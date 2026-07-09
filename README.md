@@ -6,6 +6,8 @@
 
 `ha-ebay` is a HACS custom integration that exposes read-only eBay telemetry in Home Assistant. It monitors buying, watching, bidding, and selling activity through summary sensors and fixed event entities designed for automations.
 
+This integration targets Home Assistant `2026.3.0+`.
+
 ## Read-only Boundary
 
 This integration is intentionally read-only. It does not place bids, buy items, create listings, revise listings, end listings, accept/counter/decline offers, send messages, change watchlists, perform shipping actions, or call eBay mutation APIs.
@@ -145,7 +147,7 @@ The cap is always enforced, and pinned/actionable items have priority.
 See:
 
 - [`docs/development.md`](docs/development.md) for devcontainer, source-mounted Home Assistant, and HACS custom-repository test flows.
-- [`docs/branding.md`](docs/branding.md) for local brand asset requirements and generation.
+- [`docs/branding.md`](docs/branding.md) for local brand asset requirements in `custom_components/ebay/brand/` and generation.
 
 To generate local Home Assistant brand assets:
 

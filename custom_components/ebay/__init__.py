@@ -16,7 +16,6 @@ from .const import (
     CONF_RUNAME,
     CONF_SITE_ID,
     DEFAULT_OPTIONS,
-    DOMAIN,
     PLATFORMS,
 )
 from .coordinator import EbayDataUpdateCoordinator

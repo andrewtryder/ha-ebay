@@ -28,7 +28,11 @@ BRAND_DIR = Path("custom_components/ebay/brand")
 
 
 def _download_source() -> Image.Image:
-    with urllib.request.urlopen(SOURCE_URL, timeout=30) as response:
+    request = urllib.request.Request(
+        SOURCE_URL,
+        headers={"User-Agent": "ha-ebay-brand-assets/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
         data = response.read()
     image = Image.open(BytesIO(data)).convert("RGBA")
     return _trim_transparent(image)
