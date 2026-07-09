@@ -1,0 +1,7 @@
+# Minimal Home Assistant config for ha-ebay development.
+default_config:
+
+logger:
+  default: warning
+  logs:
+    custom_components.ebay: debug
