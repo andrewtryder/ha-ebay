@@ -11,7 +11,13 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import EbayApiClient, EbayAuthError, build_consent_url, extract_authorization_code
+from .api import (
+    EbayApiClient,
+    EbayAuthError,
+    build_consent_url,
+    extract_authorization_code,
+    extract_oauth_callback_params,
+)
 from .const import (
     ALLOWED_PER_ITEM_CAPS,
     CONF_ANALYTICS_ENABLED,
@@ -21,7 +27,6 @@ from .const import (
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
     CONF_ENVIRONMENT,
-    CONF_OAUTH_MODE,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_POLL_INTERVAL,
@@ -34,8 +39,6 @@ from .const import (
     DOMAIN,
     ENTITY_MODES,
     ENVIRONMENTS,
-    OAUTH_MODE_MANUAL,
-    OAUTH_MODES,
 )
 
 
@@ -75,7 +78,6 @@ class EbayConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_CLIENT_SECRET): str,
                 vol.Required(CONF_RUNAME): str,
                 vol.Required(CONF_SITE_ID, default=DEFAULT_SITE_ID): str,
-                vol.Required(CONF_OAUTH_MODE, default=OAUTH_MODE_MANUAL): vol.In(OAUTH_MODES),
             }
         )
         return self.async_show_form(
@@ -88,8 +90,21 @@ class EbayConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Accept an OAuth authorization code or callback URL."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            authorization_value = user_input["authorization_code"]
+            callback_params = extract_oauth_callback_params(authorization_value)
+            state = callback_params.get("state", [None])[0]
+            if callback_params and state != self._state:
+                errors["base"] = "invalid_state"
+                return self.async_show_form(
+                    step_id="oauth",
+                    description_placeholders={
+                        "consent_url": self._consent_url or "",
+                    },
+                    data_schema=vol.Schema({vol.Required("authorization_code"): str}),
+                    errors=errors,
+                )
             try:
-                code = extract_authorization_code(user_input["authorization_code"])
+                code = extract_authorization_code(authorization_value)
                 client = EbayApiClient(
                     async_get_clientsession(self.hass),
                     environment=self._data[CONF_ENVIRONMENT],

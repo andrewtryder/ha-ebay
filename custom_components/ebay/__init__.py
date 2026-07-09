@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from typing import TYPE_CHECKING
 
-from .api import EbayApiClient
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -18,13 +14,20 @@ from .const import (
     DEFAULT_OPTIONS,
     PLATFORMS,
 )
-from .coordinator import EbayDataUpdateCoordinator
 
-EbayConfigEntry = ConfigEntry
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: EbayConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up eBay from a config entry."""
+    from homeassistant.const import Platform
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+    from .api import EbayApiClient
+    from .coordinator import EbayDataUpdateCoordinator
+
     options = {**DEFAULT_OPTIONS, **entry.options}
     client = EbayApiClient(
         async_get_clientsession(hass),
@@ -45,8 +48,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: EbayConfigEntry) -> bool
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: EbayConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an eBay config entry."""
+    from homeassistant.const import Platform
+
     coordinator = entry.runtime_data
     coordinator.cancel_scheduled_events()
     return await hass.config_entries.async_unload_platforms(
@@ -54,6 +59,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: EbayConfigEntry) -> boo
     )
 
 
-async def _async_update_listener(hass: HomeAssistant, entry: EbayConfigEntry) -> None:
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload after options change."""
     await hass.config_entries.async_reload(entry.entry_id)

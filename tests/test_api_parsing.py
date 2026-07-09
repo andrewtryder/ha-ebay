@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import xml.etree.ElementTree as ET
 
 from custom_components.ebay.api import (
     EBAY_XML_NS,
+    BEST_OFFERS_CALL_NAME,
+    READ_ONLY_CALL_NAME,
+    SELLER_LIST_CALL_NAME,
+    SELLING_CALL_NAME,
+    EbayApiClient,
+    EbayApiError,
     active_offers_by_item_id,
     analytics_views_by_item_id,
+    extract_authorization_code,
+    extract_oauth_callback_params,
     parse_container,
     parse_selling_container,
     seller_list_views_by_item_id,
@@ -125,3 +134,185 @@ def test_analytics_views_and_summary_are_bounded() -> None:
     assert summary["selling_total_bids"] == 2
     assert summary["selling_ending_soon"] == 1
     assert len(summary["items_with_offers"]) == 1
+
+
+def test_oauth_callback_params_and_raw_code() -> None:
+    callback_url = "https://example.test/callback?code=v%5E1&state=expected"
+
+    assert extract_authorization_code(callback_url) == "v^1"
+    assert extract_oauth_callback_params(callback_url)["state"] == ["expected"]
+    assert extract_authorization_code("raw-code") == "raw-code"
+    assert extract_oauth_callback_params("raw-code") == {}
+
+
+def test_access_token_refreshes_near_expiry() -> None:
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+            self.tokens = ["first", "second"]
+
+        async def _token_request(self, data: dict[str, str]) -> dict[str, object]:
+            return {"access_token": self.tokens.pop(0), "expires_in": 60}
+
+    async def run() -> tuple[str, str]:
+        client = Client()
+        first = await client.async_get_access_token()
+        second = await client.async_get_access_token()
+        return first, second
+
+    assert asyncio.run(run()) == ("first", "second")
+
+
+def test_fetch_data_paginates_buying_selling_and_seller_list_views() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            page = 2 if "<PageNumber>2</PageNumber>" in xml_body else 1
+            if call_name == READ_ONLY_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBayBuyingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <WatchList>
+                        <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+                        <ItemArray><Item>
+                          <ItemID>w{page}</ItemID><Title>Watch {page}</Title>
+                          <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                        </Item></ItemArray>
+                      </WatchList>
+                      <BidList>
+                        <PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>
+                      </BidList>
+                    </GetMyeBayBuyingResponse>
+                    """
+                )
+            if call_name == SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList>
+                        <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+                        <ItemArray><Item>
+                          <ItemID>s{page}</ItemID><Title>Sell {page}</Title>
+                          <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                          <SellingStatus><CurrentPrice currencyID="USD">{page}</CurrentPrice></SellingStatus>
+                        </Item></ItemArray>
+                      </ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            if call_name == SELLER_LIST_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetSellerListResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+                      <ItemArray><Item><ItemID>s{page}</ItemID><HitCount>{page * 10}</HitCount></Item></ItemArray>
+                    </GetSellerListResponse>
+                    """
+                )
+            if call_name == BEST_OFFERS_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                    </GetBestOffersResponse>
+                    """
+                )
+            raise AssertionError(call_name)
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=True,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+
+    assert set(payload["watched"]) == {"w1", "w2"}
+    assert set(payload["selling"]) == {"s1", "s2"}
+    assert payload["selling"]["s1"]["views"] == 10
+    assert payload["selling"]["s2"]["views"] == 20
+
+
+def test_optional_analytics_errors_become_partial_failure() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name == SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList><ItemArray><Item>
+                        <ItemID>s1</ItemID><Title>Sell</Title>
+                        <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                      </Item></ItemArray></ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            return _root(
+                f"""
+                <{call_name}Response xmlns="{EBAY_XML_NS}">
+                  <Ack>Success</Ack>
+                </{call_name}Response>
+                """
+            )
+
+        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, object]:
+            raise EbayApiError("analytics exploded")
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=True,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+
+    assert payload["partial_failures"] == ["analytics_views"]
