@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -17,7 +17,6 @@ from .const import (
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     DOMAIN,
-    ENTITY_MODE_BALANCED,
     ENTITY_MODE_DETAILED,
     ENTITY_MODE_MINIMAL,
 )
