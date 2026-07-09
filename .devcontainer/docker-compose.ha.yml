@@ -1,0 +1,11 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: ha-ebay-homeassistant
+    volumes:
+      - ./ha-config:/config
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: ${TZ:-Etc/UTC}
+    restart: unless-stopped
