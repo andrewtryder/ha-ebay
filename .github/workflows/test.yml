@@ -1,0 +1,60 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then
+            python -m pip install -r requirements-dev.txt
+          else
+            python -m pip install pytest pytest-homeassistant-custom-component ruff
+          fi
+
+      - name: Ruff
+        run: |
+          if [ -d custom_components ]; then
+            ruff check custom_components tests --output-format=github
+          else
+            echo "No custom_components directory yet; skipping ruff."
+          fi
+
+      - name: Compile
+        run: |
+          if [ -d custom_components ]; then
+            python -m compileall custom_components
+          else
+            echo "No custom_components directory yet; skipping compileall."
+          fi
+
+      - name: Tests
+        run: |
+          if [ -d tests ]; then
+            pytest -q
+          else
+            echo "No tests directory yet; skipping pytest."
+          fi
