@@ -29,19 +29,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            python -m pip install -r requirements.txt
-          fi
           if [ -f requirements-dev.txt ]; then
             python -m pip install -r requirements-dev.txt
           else
-            python -m pip install pytest pytest-homeassistant-custom-component ruff
+            python -m pip install pytest pytest-homeassistant-custom-component ruff pillow
           fi
 
       - name: Ruff
         run: |
           if [ -d custom_components ]; then
-            ruff check custom_components tests --output-format=github
+            paths="custom_components"
+            if [ -d tests ]; then
+              paths="$paths tests"
+            fi
+            ruff check $paths --output-format=github
           else
             echo "No custom_components directory yet; skipping ruff."
           fi
