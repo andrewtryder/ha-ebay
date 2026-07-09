@@ -1,0 +1,38 @@
+{
+  "name": "ha-ebay",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "redhat.vscode-yaml",
+        "github.vscode-github-actions"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "editor.formatOnSave": true,
+        "ruff.enable": true
+      }
+    }
+  },
+  "postCreateCommand": "python -m pip install --upgrade pip && if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; else python -m pip install pytest pytest-homeassistant-custom-component ruff pillow; fi",
+  "remoteUser": "vscode",
+  "forwardPorts": [8123],
+  "portsAttributes": {
+    "8123": {
+      "label": "Home Assistant",
+      "onAutoForward": "notify"
+    }
+  }
+}
