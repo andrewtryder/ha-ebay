@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://upload.wikimedia.org/wikipedia/commons/4/48/EBay_logo.png" alt="eBay logo" width="220">
+</p>
+
 # eBay for Home Assistant
 
 `ha-ebay` is a HACS custom integration that exposes read-only eBay telemetry in Home Assistant. It monitors buying, watching, bidding, and selling activity through summary sensors and fixed event entities designed for automations.
@@ -16,11 +20,12 @@ The MVP uses these read-only calls:
 
 ## HACS Installation
 
-1. In HACS, add this repository as a custom repository.
-2. Choose category `Integration`.
-3. Install `eBay`.
-4. Restart Home Assistant.
-5. Go to Settings -> Devices & services -> Add integration -> eBay.
+1. In HACS, add this repository as a custom repository:
+   - Repository: `https://github.com/andrewtryder/ha-ebay`
+   - Category: `Integration`
+2. Install `eBay`.
+3. Restart Home Assistant.
+4. Go to Settings -> Devices & services -> Add integration -> eBay.
 
 ## eBay Developer Setup
 
@@ -135,6 +140,20 @@ Per-item entities are convenience sensors, not the main automation surface.
 
 The cap is always enforced, and pinned/actionable items have priority.
 
+## Development
+
+See:
+
+- [`docs/development.md`](docs/development.md) for devcontainer, source-mounted Home Assistant, and HACS custom-repository test flows.
+- [`docs/branding.md`](docs/branding.md) for local brand asset requirements and generation.
+
+To generate local Home Assistant brand assets:
+
+```bash
+python -m pip install pillow
+python scripts/prepare_brand_assets.py
+```
+
 ## Automation Examples
 
 Notify when a selling item gets a bid:
@@ -210,3 +229,7 @@ Expired or revoked refresh token: reconfigure the integration and complete OAuth
 Production/sandbox mismatch: make sure the selected environment matches the eBay app credentials and refresh token.
 
 External callback URL problems: use the manual fallback and paste the final callback URL into the setup flow.
+
+## Trademark
+
+eBay is a trademark of eBay Inc. This project is an unofficial Home Assistant integration and is not affiliated with, endorsed by, or sponsored by eBay Inc. The eBay logo is used only for identification.
