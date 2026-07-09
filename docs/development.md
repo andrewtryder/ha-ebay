@@ -1,6 +1,7 @@
 # Development environment
 
 This repository includes a devcontainer and two Home Assistant test modes.
+The integration targets Home Assistant `2026.3.0+`.
 
 ## Open the devcontainer
 
@@ -62,6 +63,19 @@ Then:
 ## Notes
 
 The HACS test mode needs the GitHub repository to be public, or HACS needs access to the private repository through a configured GitHub token.
+
+Home Assistant `2026.3.0+` loads local custom integration brand assets from:
+
+```text
+custom_components/ebay/brand/
+```
+
+Regenerate those assets with:
+
+```bash
+python -m pip install pillow
+python scripts/prepare_brand_assets.py
+```
 
 On macOS/Linux, make scripts executable after checkout if needed:
 

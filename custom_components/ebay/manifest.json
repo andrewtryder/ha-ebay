@@ -1,12 +1,12 @@
 {
   "domain": "ebay",
   "name": "eBay",
-  "codeowners": [],
+  "codeowners": ["@andrewtryder"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/custom-components/ha-ebay",
+  "documentation": "https://github.com/andrewtryder/ha-ebay",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/custom-components/ha-ebay/issues",
+  "issue_tracker": "https://github.com/andrewtryder/ha-ebay/issues",
   "requirements": [],
   "version": "0.1.0"
 }

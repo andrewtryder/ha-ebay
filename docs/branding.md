@@ -1,5 +1,8 @@
 # Branding
 
+This integration targets Home Assistant `2026.3.0+`. Local custom
+integration brand assets are stored inside the integration package.
+
 Home Assistant brand assets for this custom integration live in:
 
 ```text
