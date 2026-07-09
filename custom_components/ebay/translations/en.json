@@ -1,0 +1,64 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up eBay",
+        "description": "Enter your eBay developer app credentials. The integration only uses read-only APIs.",
+        "data": {
+          "environment": "eBay environment",
+          "client_id": "Client ID",
+          "client_secret": "Client secret",
+          "runame": "RuName / redirect URI identifier",
+          "site_id": "Site ID",
+          "oauth_mode": "OAuth mode"
+        }
+      },
+      "oauth": {
+        "title": "Authorize eBay",
+        "description": "Open this consent URL, approve access, then paste the authorization code or the final callback URL:\n\n{consent_url}",
+        "data": {
+          "authorization_code": "Authorization code or callback URL"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not exchange the authorization code with eBay."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "eBay options",
+        "data": {
+          "poll_interval": "Poll interval in minutes",
+          "ending_soon_threshold": "Ending-soon threshold in minutes",
+          "entity_mode": "Per-item entity mode",
+          "per_item_cap": "Per-item entity cap",
+          "pinned_item_ids": "Pinned item IDs",
+          "analytics_enabled": "Enable Sell Analytics views",
+          "buying_enabled": "Enable buying and watch data",
+          "selling_enabled": "Enable selling data"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "active_selling_items": { "name": "Active selling items" },
+      "watched_items": { "name": "Watched items" },
+      "bidding_items": { "name": "Bidding items" },
+      "selling_total_bids": { "name": "Selling total bids" },
+      "selling_total_offers": { "name": "Selling total offers" },
+      "selling_total_sold": { "name": "Selling total sold" },
+      "selling_total_watchers": { "name": "Selling total watchers" },
+      "selling_total_views": { "name": "Selling total views" },
+      "watched_ending_soon": { "name": "Watched ending soon" },
+      "selling_ending_soon": { "name": "Selling ending soon" }
+    },
+    "event": {
+      "selling_activity": { "name": "Selling activity" },
+      "watching_activity": { "name": "Watching activity" },
+      "bidding_activity": { "name": "Bidding activity" }
+    }
+  }
+}
