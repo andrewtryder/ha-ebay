@@ -2,10 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Set up eBay"
-      },
-      "authorization_method": {
-        "title": "Choose authorization method",
+        "title": "Set up eBay",
         "description": "Automatic callback uses Home Assistant's native OAuth callback and is recommended. Manual authorization is an advanced fallback for troubleshooting browser callback problems.",
         "menu_options": {
           "automatic": "Automatic callback - Recommended",
@@ -71,11 +68,14 @@
           "poll_interval": "Poll interval in minutes",
           "ending_soon_threshold": "Ending-soon threshold in minutes",
           "entity_mode": "Per-item entity mode",
-          "per_item_cap": "Per-item entity cap",
+          "per_item_cap": "Tracked item cap",
           "pinned_item_ids": "Pinned item IDs",
           "analytics_enabled": "Enable Sell Analytics views",
           "buying_enabled": "Enable buying and watch data",
           "selling_enabled": "Enable selling data"
+        },
+        "data_description": {
+          "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type."
         }
       }
     }

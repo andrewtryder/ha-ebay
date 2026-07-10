@@ -55,9 +55,7 @@ from .oauth2 import (
 _LOGGER = logging.getLogger(__name__)
 
 
-class EbayConfigFlow(
-    config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
-):
+class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN):
     """Handle an eBay config flow."""
 
     DOMAIN = DOMAIN
@@ -80,16 +78,16 @@ class EbayConfigFlow(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Start the guided setup flow."""
-        return await self.async_step_authorization_method(user_input)
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["automatic", "manual"],
+        )
 
     async def async_step_authorization_method(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Choose automatic callback or manual authorization."""
-        return self.async_show_menu(
-            step_id="authorization_method",
-            menu_options=["automatic", "manual"],
-        )
+        return await self.async_step_user(user_input)
 
     async def async_step_automatic(
         self, user_input: dict[str, Any] | None = None

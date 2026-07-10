@@ -56,7 +56,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up eBay event entities."""
     coordinator: EbayDataUpdateCoordinator = entry.runtime_data
-    async_add_entities(EbayActivityEvent(coordinator, entry, description) for description in EVENTS)
+    async_add_entities(
+        EbayActivityEvent(coordinator, entry, description) for description in EVENTS
+    )
 
 
 class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntity):
@@ -79,12 +81,18 @@ class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntit
             "name": "eBay",
             "manufacturer": "eBay",
         }
-        self._unsubscribe_event_callback: CALLBACK_TYPE | None = (
-            coordinator.register_event_callback(description.kind, self._handle_event)
+        self._unsubscribe_event_callback: CALLBACK_TYPE | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Register coordinator event callback once HA has added the entity."""
+        await super().async_added_to_hass()
+        self._unsubscribe_event_callback = self.coordinator.register_event_callback(
+            self.entity_description.kind, self._handle_event
         )
 
     async def async_will_remove_from_hass(self) -> None:
         """Deregister coordinator event callback."""
+        await super().async_will_remove_from_hass()
         if self._unsubscribe_event_callback is not None:
             self._unsubscribe_event_callback()
             self._unsubscribe_event_callback = None

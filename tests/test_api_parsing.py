@@ -18,7 +18,6 @@ from custom_components.ebay.api import (
     SELLING_CALL_NAME,
     EbayApiClient,
     EbayApiError,
-    EbayAuthError,
     active_offers_by_item_id,
     analytics_views_by_item_id,
     build_get_best_offers_xml,
@@ -30,6 +29,7 @@ from custom_components.ebay.api import (
     seller_list_views_by_item_id,
     summarize_payload,
 )
+from custom_components.ebay.oauth_errors import OAuth2TokenRequestError
 
 
 def _root(xml: str) -> ET.Element:
@@ -340,7 +340,9 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
                 """
             )
 
-        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, object]:
+        async def async_get_traffic_report(
+            self, item_ids: list[str]
+        ) -> dict[str, object]:
             raise EbayApiError("analytics exploded")
 
     async def run() -> dict[str, object]:
@@ -370,7 +372,7 @@ def test_token_request_wraps_non_json_response() -> None:
     async def request() -> None:
         await client._token_request({"grant_type": "authorization_code"})
 
-    with pytest.raises(EbayAuthError, match="not valid JSON; HTTP 502"):
+    with pytest.raises(OAuth2TokenRequestError, match="not valid JSON; HTTP 502"):
         asyncio.run(request())
 
 
@@ -449,7 +451,9 @@ def test_fetch_data_paginates_best_offers() -> None:
     payload = asyncio.run(fetch())
 
     assert payload["selling"]["456"]["offers"] == 2
-    best_offer_calls = [body for call_name, body in calls if call_name == BEST_OFFERS_CALL_NAME]
+    best_offer_calls = [
+        body for call_name, body in calls if call_name == BEST_OFFERS_CALL_NAME
+    ]
     assert len(best_offer_calls) == 2
     assert "<PageNumber>1</PageNumber>" in best_offer_calls[0]
     assert "<PageNumber>2</PageNumber>" in best_offer_calls[1]
