@@ -17,30 +17,6 @@ The devcontainer includes:
 - pytest-homeassistant-custom-component
 - Pillow for generating brand assets
 
-## Local Python 3.13 environment
-
-The repository targets Python 3.13, matching CI and the devcontainer. On macOS with Homebrew Python installed:
-
-```bash
-/opt/homebrew/bin/python3.13 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements-dev.txt
-```
-
-Run the fast local checks with:
-
-```bash
-.venv/bin/python -m ruff check custom_components tests
-.venv/bin/python -m pytest -q
-.venv/bin/python -m compileall custom_components
-```
-
-Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
-
-```bash
-.venv/bin/python -m pip install -r requirements-ha.txt
-```
-
 ## Fast source-mounted Home Assistant test
 
 This starts Home Assistant and mounts the local integration directly into `/config/custom_components/ebay`.

@@ -9,20 +9,20 @@
           "client_id": "Client ID",
           "client_secret": "Client secret",
           "runame": "RuName / redirect URI identifier",
-          "site_id": "Site ID"
+          "site_id": "Site ID",
+          "oauth_mode": "OAuth mode"
         }
       },
       "oauth": {
         "title": "Authorize eBay",
-        "description": "Open this consent URL, approve access, then paste the final callback URL so the OAuth state can be verified. You can paste only the authorization code if needed, but state cannot be verified in manual-code mode.\n\n{consent_url}",
+        "description": "Open this consent URL, approve access, then paste the authorization code or the final callback URL:\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
       }
     },
     "error": {
-      "cannot_connect": "Could not exchange the authorization code with eBay.",
-      "invalid_state": "The callback URL state does not match this setup session."
+      "cannot_connect": "Could not exchange the authorization code with eBay."
     }
   },
   "options": {

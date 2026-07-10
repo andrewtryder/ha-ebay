@@ -57,18 +57,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return configured ending-soon threshold in seconds."""
         return int(self.options[CONF_ENDING_SOON_THRESHOLD]) * 60
 
-    def register_event_callback(
-        self, kind: str, callback_func: EventCallback
-    ) -> CALLBACK_TYPE:
+    def register_event_callback(self, kind: str, callback_func: EventCallback) -> None:
         """Register an event entity callback."""
         self._event_callbacks[kind] = callback_func
-
-        @callback
-        def unsubscribe() -> None:
-            if self._event_callbacks.get(kind) is callback_func:
-                self._event_callbacks.pop(kind, None)
-
-        return unsubscribe
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data and detect events."""
