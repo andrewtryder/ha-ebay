@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.event import EventEntity, EventEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -79,7 +79,15 @@ class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntit
             "name": "eBay",
             "manufacturer": "eBay",
         }
-        coordinator.register_event_callback(description.kind, self._handle_event)
+        self._unsubscribe_event_callback: CALLBACK_TYPE | None = (
+            coordinator.register_event_callback(description.kind, self._handle_event)
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Deregister coordinator event callback."""
+        if self._unsubscribe_event_callback is not None:
+            self._unsubscribe_event_callback()
+            self._unsubscribe_event_callback = None
 
     def _handle_event(self, event_type: str, event_data: dict[str, Any]) -> None:
         """Publish an event on this entity."""
