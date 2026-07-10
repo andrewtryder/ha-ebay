@@ -58,21 +58,35 @@ The integration also requests the base eBay API scope.
 
 ## OAuth Setup
 
-The setup flow generates an eBay consent URL from your Client ID and RuName.
+Home Assistant uses its native external OAuth callback flow for eBay setup.
+The callback is only used during authorization and reauthorization; normal
+operation uses outbound eBay API calls and refresh tokens.
 
-1. Enter the eBay app fields in the config flow.
-2. Open the consent URL shown by Home Assistant.
-3. Approve access at eBay.
-4. Paste either the final authorization code or the full final callback URL into the Home Assistant flow.
-5. The integration exchanges the authorization code and stores the refresh token in the config entry.
+1. Start adding the eBay integration in Home Assistant.
+2. Copy the callback URL shown by the setup flow.
+3. In the eBay Developer Program application keys page, open or create an OAuth redirect URL.
+4. Set both Auth Accepted URL and Auth Declined URL to the Home Assistant callback URL.
+5. Save the redirect configuration.
+6. Copy the generated RuName.
+7. Enter the environment, Client ID, Client secret, RuName, and Site ID in Home Assistant.
+8. Click Authorize and approve access at eBay.
+9. The browser returns through Home Assistant's OAuth callback and the config entry is created.
 
-Access tokens are refreshed automatically before API calls. Tokens and client secrets are redacted from diagnostics and are never logged intentionally.
+Automatic OAuth setup does not require SSH, Cloudflare Tunnel, Nabu Casa, port
+forwarding, or a publicly accessible Home Assistant instance. eBay uses the
+RuName as its OAuth `redirect_uri`; the RuName maps to the Home Assistant
+callback URL you registered in the eBay developer portal.
 
-### Nabu Casa / External URL Notes
+Access tokens are refreshed automatically before API calls. Tokens and client
+secrets are redacted from diagnostics and are never logged intentionally.
 
-The MVP is designed so automatic callback support can be added cleanly, including Home Assistant Cloud and externally reachable URLs. The safest working path today is the manual fallback: paste the authorization code or final callback URL into the setup flow.
+### Manual OAuth Fallback
 
-If eBay callback routing fails, copy the final browser URL after eBay redirects and paste it into the flow.
+If browser callback routing fails, choose manual authorization in the setup
+flow. Home Assistant will show an eBay consent URL; approve access at eBay,
+then paste either the final callback URL or the authorization code into Home
+Assistant. Pasting the full callback URL lets the integration verify OAuth
+state.
 
 ## Options
 
@@ -233,11 +247,11 @@ actions:
 
 Missing analytics views: regenerate consent with `sell.analytics.readonly`, or disable analytics views in options. Setup still succeeds if analytics views are unavailable.
 
-Expired or revoked refresh token: reconfigure the integration and complete OAuth consent again.
+Expired or revoked refresh token: reauthorize the integration and complete OAuth consent again.
 
 Production/sandbox mismatch: make sure the selected environment matches the eBay app credentials and refresh token.
 
-External callback URL problems: use the manual fallback and paste the final callback URL into the setup flow.
+Callback URL problems: use the manual fallback and paste the final callback URL into the setup flow.
 
 ## Trademark
 

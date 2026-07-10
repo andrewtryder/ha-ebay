@@ -3,8 +3,9 @@
     "step": {
       "user": {
         "title": "Set up eBay",
-        "description": "Enter your eBay developer app credentials. The integration only uses read-only APIs.",
+        "description": "Register this Home Assistant OAuth callback URL in the eBay Developer Program before authorizing:\n\n{callback_url}\n\nOpen {developer_console_url}, open or create your OAuth redirect URL, set both Auth Accepted URL and Auth Declined URL to the callback URL above, save, then copy the generated RuName into this form. The integration only uses read-only APIs.",
         "data": {
+          "oauth_mode": "Authorization mode",
           "environment": "eBay environment",
           "client_id": "Client ID",
           "client_secret": "Client secret",
@@ -12,8 +13,19 @@
           "site_id": "Site ID"
         }
       },
+      "reauth_confirm": {
+        "title": "Reauthorize eBay",
+        "description": "eBay rejected the stored refresh token. Continue to authorize eBay again."
+      },
       "oauth": {
         "title": "Authorize eBay",
+        "description": "Open this consent URL, approve access, then paste the final callback URL so the OAuth state can be verified. You can paste only the authorization code if needed, but state cannot be verified in manual-code mode.\n\n{consent_url}",
+        "data": {
+          "authorization_code": "Authorization code or callback URL"
+        }
+      },
+      "manual": {
+        "title": "Authorize eBay manually",
         "description": "Open this consent URL, approve access, then paste the final callback URL so the OAuth state can be verified. You can paste only the authorization code if needed, but state cannot be verified in manual-code mode.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
@@ -23,6 +35,12 @@
     "error": {
       "cannot_connect": "Could not exchange the authorization code with eBay.",
       "invalid_state": "The callback URL state does not match this setup session."
+    },
+    "abort": {
+      "oauth_failed": "Could not authorize with eBay.",
+      "oauth_timeout": "Timed out while authorizing with eBay.",
+      "oauth_unauthorized": "eBay rejected the OAuth credentials.",
+      "user_rejected_authorize": "Authorization was rejected: {error}"
     }
   },
   "options": {

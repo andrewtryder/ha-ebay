@@ -32,8 +32,11 @@ TO_REDACT = {
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     "authorization",
+    "authorization_code",
+    "code",
     "access_token",
     "refresh_token",
+    "token",
 }
 
 
