@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
 import json
 import logging
 from typing import Any
@@ -14,6 +15,11 @@ import xml.etree.ElementTree as ET
 import aiohttp
 
 from .const import COMPATIBILITY_LEVEL, EBAY_XML_NS, ENV_SANDBOX, NS
+from .oauth_errors import (
+    OAuth2TokenRequestError,
+    OAuth2TokenRequestReauthError,
+    OAuth2TokenRequestTransientError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +44,10 @@ class EbayError(Exception):
 
 class EbayAuthError(EbayError):
     """Authentication or authorization failed."""
+
+
+class EbayAuthTransientError(EbayError):
+    """Authentication refresh failed temporarily."""
 
 
 class EbayApiError(EbayError):
@@ -88,17 +98,14 @@ def build_consent_url(
 ) -> str:
     """Build an eBay OAuth consent URL."""
     endpoints = endpoints_for(environment)
-    return (
-        f"{endpoints.authorize}?"
-        + urlencode(
-            {
-                "client_id": client_id,
-                "redirect_uri": runame,
-                "response_type": "code",
-                "scope": scope,
-                "state": state,
-            }
-        )
+    return f"{endpoints.authorize}?" + urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": runame,
+            "response_type": "code",
+            "scope": scope,
+            "state": state,
+        }
     )
 
 
@@ -126,6 +133,33 @@ def extract_oauth_callback_params(value: str) -> dict[str, list[str]]:
 def _basic_auth_header(client_id: str, client_secret: str) -> str:
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     return f"Basic {basic}"
+
+
+def _raise_token_request_error(status: int, error_code: str | None) -> None:
+    """Raise the OAuth exception matching an eBay token failure."""
+    if (
+        status == HTTPStatus.TOO_MANY_REQUESTS
+        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
+    ):
+        raise OAuth2TokenRequestTransientError(
+            f"eBay OAuth token request failed temporarily with HTTP {status}"
+        )
+    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
+        if error_code in {
+            "invalid_grant",
+            "invalid_client",
+            "invalid_request",
+            "unauthorized_client",
+            "access_denied",
+        } or status in {
+            HTTPStatus.BAD_REQUEST,
+            HTTPStatus.UNAUTHORIZED,
+            HTTPStatus.FORBIDDEN,
+        }:
+            raise OAuth2TokenRequestReauthError(
+                f"eBay OAuth token request requires reauthorization; HTTP {status}"
+            )
+    raise OAuth2TokenRequestError(f"eBay OAuth token request failed with HTTP {status}")
 
 
 def _text(parent: ET.Element | None, path: str) -> str | None:
@@ -326,7 +360,9 @@ def parse_selling_item(item: ET.Element) -> dict[str, Any]:
     return data
 
 
-def parse_container(root: ET.Element, container_name: str, kind: str) -> list[dict[str, Any]]:
+def parse_container(
+    root: ET.Element, container_name: str, kind: str
+) -> list[dict[str, Any]]:
     """Parse a buying response container."""
     container = root.find(f"e:{container_name}", namespaces=NS)
     if container is None:
@@ -380,7 +416,9 @@ def analytics_views_by_item_id(payload: dict[str, Any]) -> dict[str, int]:
 def active_offers_by_item_id(root: ET.Element) -> dict[str, int]:
     """Parse active best offers by item id."""
     offers: dict[str, int] = {}
-    for item_offers in root.findall("e:ItemBestOffersArray/e:ItemBestOffers", namespaces=NS):
+    for item_offers in root.findall(
+        "e:ItemBestOffersArray/e:ItemBestOffers", namespaces=NS
+    ):
         role = _text(item_offers, "e:Role")
         if role and role != "Seller":
             continue
@@ -513,15 +551,24 @@ def summarize_payload(
     ending_soon_threshold_seconds: int,
 ) -> dict[str, Any]:
     """Build bounded summary metrics and attributes."""
+
     def under_threshold(item: dict[str, Any]) -> bool:
         seconds_left = item.get("seconds_left")
-        return seconds_left is not None and seconds_left <= ending_soon_threshold_seconds
+        return (
+            seconds_left is not None and seconds_left <= ending_soon_threshold_seconds
+        )
 
     selling_items = list(selling.values())
     watched_items = list(watched.values())
-    items_with_bids = [item for item in selling_items if (item.get("bid_count") or 0) > 0]
-    items_with_offers = [item for item in selling_items if (item.get("offers") or 0) > 0]
-    items_with_questions = [item for item in selling_items if (item.get("questions") or 0) > 0]
+    items_with_bids = [
+        item for item in selling_items if (item.get("bid_count") or 0) > 0
+    ]
+    items_with_offers = [
+        item for item in selling_items if (item.get("offers") or 0) > 0
+    ]
+    items_with_questions = [
+        item for item in selling_items if (item.get("questions") or 0) > 0
+    ]
     selling_ending = [item for item in selling_items if under_threshold(item)]
     watched_ending = [item for item in watched_items if under_threshold(item)]
 
@@ -531,29 +578,43 @@ def summarize_payload(
             "title": item.get("title"),
             "price": item.get("current_price"),
             "currency": item.get("currency"),
-            "end_time": item.get("end_time").isoformat() if item.get("end_time") else None,
+            "end_time": item.get("end_time").isoformat()
+            if item.get("end_time")
+            else None,
             "seconds_left": item.get("seconds_left"),
             "url": item.get("url"),
         }
 
-    highest_watchers = max(selling_items, key=lambda item: item.get("watchers") or -1, default=None)
-    highest_views = max(selling_items, key=lambda item: item.get("views") or -1, default=None)
+    highest_watchers = max(
+        selling_items, key=lambda item: item.get("watchers") or -1, default=None
+    )
+    highest_views = max(
+        selling_items, key=lambda item: item.get("views") or -1, default=None
+    )
     return {
         "active_selling_items": len(selling),
         "watched_items": len(watched),
         "bidding_items": len(bidding),
         "selling_total_bids": sum(item.get("bid_count") or 0 for item in selling_items),
         "selling_total_offers": sum(item.get("offers") or 0 for item in selling_items),
-        "selling_total_sold": sum(item.get("quantity_sold") or 0 for item in selling_items),
-        "selling_total_watchers": sum(item.get("watchers") or 0 for item in selling_items),
+        "selling_total_sold": sum(
+            item.get("quantity_sold") or 0 for item in selling_items
+        ),
+        "selling_total_watchers": sum(
+            item.get("watchers") or 0 for item in selling_items
+        ),
         "selling_total_views": sum(item.get("views") or 0 for item in selling_items),
         "watched_ending_soon": len(watched_ending),
         "selling_ending_soon": len(selling_ending),
-        "items_ending_soon": [small(item) for item in (watched_ending + selling_ending)[:10]],
+        "items_ending_soon": [
+            small(item) for item in (watched_ending + selling_ending)[:10]
+        ],
         "items_with_offers": [small(item) for item in items_with_offers[:10]],
         "items_with_bids": [small(item) for item in items_with_bids[:10]],
         "items_with_questions": [small(item) for item in items_with_questions[:10]],
-        "highest_watcher_count_item": small(highest_watchers) if highest_watchers else None,
+        "highest_watcher_count_item": small(highest_watchers)
+        if highest_watchers
+        else None,
         "highest_view_count_item": small(highest_views) if highest_views else None,
     }
 
@@ -587,15 +648,20 @@ class EbayApiClient:
 
     async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
         """Exchange an authorization code for OAuth tokens."""
-        payload = await self._token_request(
-            {
-                "grant_type": "authorization_code",
-                "code": extract_authorization_code(code),
-                "redirect_uri": self.runame,
-            }
-        )
+        try:
+            payload = await self._token_request(
+                {
+                    "grant_type": "authorization_code",
+                    "code": extract_authorization_code(code),
+                    "redirect_uri": self.runame,
+                }
+            )
+        except OAuth2TokenRequestError as exc:
+            raise EbayAuthError("OAuth authorization code exchange failed") from exc
         if not payload.get("access_token") or not payload.get("refresh_token"):
-            raise EbayAuthError("OAuth response did not include access and refresh tokens")
+            raise EbayAuthError(
+                "OAuth response did not include access and refresh tokens"
+            )
         self._store_access_token(payload)
         self.refresh_token = payload["refresh_token"]
         return payload
@@ -605,8 +671,12 @@ class EbayApiClient:
         if self._oauth_session is not None:
             try:
                 await self._oauth_session.async_ensure_token_valid()
-            except Exception as exc:
+            except OAuth2TokenRequestReauthError as exc:
                 raise EbayAuthError("OAuth token refresh failed") from exc
+            except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
+                raise EbayAuthTransientError(
+                    "OAuth token refresh failed temporarily"
+                ) from exc
             access_token = self._oauth_session.token.get("access_token")
             if not access_token:
                 raise EbayAuthError("OAuth token data does not include access token")
@@ -615,12 +685,19 @@ class EbayApiClient:
             return self._access_token
         if not self.refresh_token:
             raise EbayAuthError("Missing eBay refresh token")
-        payload = await self._token_request(
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh_token,
-            }
-        )
+        try:
+            payload = await self._token_request(
+                {
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                }
+            )
+        except OAuth2TokenRequestReauthError as exc:
+            raise EbayAuthError("OAuth token refresh failed") from exc
+        except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
+            raise EbayAuthTransientError(
+                "OAuth token refresh failed temporarily"
+            ) from exc
         access_token = payload.get("access_token")
         if not access_token:
             raise EbayAuthError("OAuth refresh response did not include access token")
@@ -632,7 +709,10 @@ class EbayApiClient:
         """Return whether the cached access token is close to expiry."""
         if self._access_token_expires_at is None:
             return True
-        return datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN >= self._access_token_expires_at
+        return (
+            datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN
+            >= self._access_token_expires_at
+        )
 
     def _store_access_token(self, payload: dict[str, Any]) -> None:
         """Cache an access token and its expiry."""
@@ -641,7 +721,9 @@ class EbayApiClient:
         if expires_in is None:
             self._access_token_expires_at = datetime.now(timezone.utc)
             return
-        self._access_token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        self._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=expires_in
+        )
 
     def _clear_access_token(self) -> None:
         """Clear cached access token state."""
@@ -653,21 +735,29 @@ class EbayApiClient:
             "Authorization": _basic_auth_header(self.client_id, self._client_secret),
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        async with self._session.post(
-            self._endpoints.token,
-            headers=headers,
-            data=data,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            try:
-                payload = await response.json(content_type=None)
-            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                raise EbayAuthError(
-                    f"eBay OAuth response was not valid JSON; HTTP {response.status}"
-                ) from exc
-            if response.status >= 400:
-                raise EbayAuthError(f"eBay OAuth request failed with HTTP {response.status}")
-            return payload
+        try:
+            async with self._session.post(
+                self._endpoints.token,
+                headers=headers,
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                try:
+                    payload = await response.json(content_type=None)
+                except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                    raise OAuth2TokenRequestError(
+                        f"eBay OAuth response was not valid JSON; HTTP {response.status}"
+                    ) from exc
+                if response.status >= 400:
+                    error_code = (
+                        payload.get("error") if isinstance(payload, dict) else None
+                    )
+                    _raise_token_request_error(response.status, error_code)
+                return payload
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise OAuth2TokenRequestTransientError(
+                "eBay OAuth token request failed temporarily"
+            ) from exc
 
     async def async_call_trading_api(self, call_name: str, xml_body: str) -> ET.Element:
         """Call a read-only Trading API operation."""
@@ -701,9 +791,13 @@ class EbayApiClient:
         ) as response:
             body = await response.text()
             if response.status in {401, 403}:
-                raise EbayAuthError(f"eBay Trading API auth failed with HTTP {response.status}")
+                raise EbayAuthError(
+                    f"eBay Trading API auth failed with HTTP {response.status}"
+                )
             if response.status >= 400:
-                raise EbayApiError(f"eBay Trading API failed with HTTP {response.status}")
+                raise EbayApiError(
+                    f"eBay Trading API failed with HTTP {response.status}"
+                )
         try:
             root = ET.fromstring(body)
         except ET.ParseError as exc:
@@ -741,13 +835,19 @@ class EbayApiClient:
             if response.status in {400, 401, 403}:
                 raise EbayPartialFailure("analytics_views")
             if response.status >= 400:
-                raise EbayApiError(f"eBay Sell Analytics failed with HTTP {response.status}")
+                raise EbayApiError(
+                    f"eBay Sell Analytics failed with HTTP {response.status}"
+                )
             try:
                 return await response.json(content_type=None)
             except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                raise EbayParseError("Could not parse eBay Sell Analytics JSON") from exc
+                raise EbayParseError(
+                    "Could not parse eBay Sell Analytics JSON"
+                ) from exc
 
-    async def _fetch_buying_pages(self) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    async def _fetch_buying_pages(
+        self,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
         """Fetch all configured buying pages up to MAX_PAGES."""
         watched_items: list[dict[str, Any]] = []
         bidding_items: list[dict[str, Any]] = []
@@ -819,7 +919,9 @@ class EbayApiClient:
                     if item_id in selling:
                         selling[item_id]["views"] = views
             except EbayError as exc:
-                _LOGGER.debug("Optional GetSellerList views failed: %s", type(exc).__name__)
+                _LOGGER.debug(
+                    "Optional GetSellerList views failed: %s", type(exc).__name__
+                )
                 partial_failures.append("seller_list_views")
 
             try:

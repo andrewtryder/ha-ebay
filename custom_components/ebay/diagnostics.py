@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -49,7 +51,7 @@ async def async_get_config_entry_diagnostics(
     summary = data.get("summary", {})
     options = coordinator.options
     return {
-        "integration_version": "0.1.0",
+        "integration_version": _manifest_version(),
         "domain": DOMAIN,
         "environment": entry.data.get(CONF_ENVIRONMENT),
         "site_id": entry.data.get(CONF_SITE_ID),
@@ -65,7 +67,9 @@ async def async_get_config_entry_diagnostics(
         "pinned_item_ids_count": len(
             [
                 part
-                for part in str(options.get(CONF_PINNED_ITEM_IDS, "")).replace("\n", ",").split(",")
+                for part in str(options.get(CONF_PINNED_ITEM_IDS, ""))
+                .replace("\n", ",")
+                .split(",")
                 if part.strip()
             ]
         ),
@@ -79,3 +83,13 @@ async def async_get_config_entry_diagnostics(
         "partial_failure_categories": data.get("partial_failures", []),
         "redacted": sorted(TO_REDACT),
     }
+
+
+def _manifest_version() -> str | None:
+    """Return the integration version from manifest.json."""
+    manifest_path = Path(__file__).with_name("manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return manifest.get("version")

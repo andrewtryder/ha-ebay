@@ -25,6 +25,12 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 EventCallback = Callable[[str, dict[str, Any]], None]
+EndingSoonKey = tuple[str, str, str, int, str]
+
+COLLECTION_BY_EVENT_KIND = {
+    "watching": "watched",
+    "bidding": "bidding",
+}
 
 
 class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -43,8 +49,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.previous_payload: dict[str, Any] | None = None
         self.last_error_category: str | None = None
         self._event_callbacks: dict[str, EventCallback] = {}
-        self._scheduled: dict[tuple[str, str, str, int], CALLBACK_TYPE] = {}
-        self._fired_ending_soon: set[tuple[str, str, str, int]] = set()
+        self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
+        self._fired_ending_soon: set[EndingSoonKey] = set()
         super().__init__(
             hass,
             _LOGGER,
@@ -100,7 +106,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.previous_payload = payload
         return payload
 
-    def _emit(self, kind: str, event_type: str, item: dict[str, Any], **extra: Any) -> bool:
+    def _emit(
+        self, kind: str, event_type: str, item: dict[str, Any], **extra: Any
+    ) -> bool:
         callback_func = self._event_callbacks.get(kind)
         if not callback_func:
             return False
@@ -123,7 +131,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "kind": kind,
             "price": item.get("current_price"),
             "currency": item.get("currency"),
-            "end_time": end_time.isoformat() if isinstance(end_time, datetime) else end_time,
+            "end_time": end_time.isoformat()
+            if isinstance(end_time, datetime)
+            else end_time,
             "seconds_left": item.get("seconds_left"),
             "url": item.get("url"),
             "image": item.get("image"),
@@ -147,9 +157,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             old = previous.get(item_id)
             if not old:
                 continue
-            self._emit_if_increased("selling", "bid_count_increased", old, item, "bid_count")
+            self._emit_if_increased(
+                "selling", "bid_count_increased", old, item, "bid_count"
+            )
             self._emit_if_increased("selling", "offer_received", old, item, "offers")
-            self._emit_if_increased("selling", "question_received", old, item, "questions")
+            self._emit_if_increased(
+                "selling", "question_received", old, item, "questions"
+            )
             self._emit_if_increased(
                 "selling", "watcher_count_increased", old, item, "watchers"
             )
@@ -220,7 +234,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._emit(kind, event_type, new, old_value=old_value, new_value=new_value)
 
     def _rebuild_ending_soon_timers(self, payload: dict[str, Any]) -> None:
-        wanted: set[tuple[str, str, str, int]] = set()
+        wanted: set[EndingSoonKey] = set()
         threshold = self.ending_soon_threshold_seconds
         for kind, collection, event_type in (
             ("watching", payload["watched"], "watched_item_ending_soon"),
@@ -230,12 +244,22 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 end_time = item.get("end_time")
                 if not isinstance(end_time, datetime):
                     continue
-                key = (self.entry.entry_id, kind, item_id, threshold)
+                normalized_end_time = _normalized_end_time(end_time)
+                key = (
+                    self.entry.entry_id,
+                    kind,
+                    item_id,
+                    threshold,
+                    normalized_end_time,
+                )
                 wanted.add(key)
                 fire_at = end_time - timedelta(seconds=threshold)
                 now = datetime.now(timezone.utc)
                 if fire_at <= now:
-                    if item.get("seconds_left") is not None and item["seconds_left"] <= threshold:
+                    if (
+                        item.get("seconds_left") is not None
+                        and item["seconds_left"] <= threshold
+                    ):
                         if key not in self._fired_ending_soon:
                             if self._emit(kind, event_type, item):
                                 self._fired_ending_soon.add(key)
@@ -245,26 +269,44 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     continue
                 self._scheduled[key] = async_track_point_in_utc_time(
                     self.hass,
-                    self._scheduled_callback(kind, event_type, item, key),
+                    self._scheduled_callback(
+                        kind,
+                        event_type,
+                        item_id,
+                        normalized_end_time,
+                        key,
+                    ),
                     fire_at,
                 )
 
         for key in list(self._scheduled):
             if key not in wanted:
                 self._scheduled.pop(key)()
+        self._fired_ending_soon.intersection_update(wanted)
 
     @callback
     def _scheduled_callback(
         self,
         kind: str,
         event_type: str,
-        item: dict[str, Any],
-        key: tuple[str, str, str, int],
+        item_id: str,
+        scheduled_end_time: str,
+        key: EndingSoonKey,
     ) -> Callable[[datetime], None]:
         @callback
         def fire(_: datetime) -> None:
             self._scheduled.pop(key, None)
             if key in self._fired_ending_soon:
+                return
+            item = (
+                (self.data or {}).get(COLLECTION_BY_EVENT_KIND[kind], {}).get(item_id)
+            )
+            end_time = item.get("end_time") if item else None
+            if (
+                item is None
+                or not isinstance(end_time, datetime)
+                or _normalized_end_time(end_time) != scheduled_end_time
+            ):
                 return
             if self._emit(kind, event_type, item):
                 self._fired_ending_soon.add(key)
@@ -276,3 +318,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for cancel in self._scheduled.values():
             cancel()
         self._scheduled.clear()
+
+
+def _normalized_end_time(end_time: datetime) -> str:
+    """Return a stable UTC identity for an eBay end time."""
+    return end_time.astimezone(timezone.utc).isoformat()

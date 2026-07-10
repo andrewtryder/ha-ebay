@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any, cast
 
-from aiohttp import ClientError, ClientResponseError
+from aiohttp import ClientError
 from yarl import URL
 
 from homeassistant.core import HomeAssistant
@@ -27,6 +27,11 @@ from .const import (
     CONF_ENVIRONMENT,
     CONF_RUNAME,
     DOMAIN,
+)
+from .oauth_errors import (
+    OAuth2TokenRequestError,
+    OAuth2TokenRequestReauthError,
+    OAuth2TokenRequestTransientError,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -128,19 +133,20 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
             "Content-Type": "application/x-www-form-urlencoded",
         }
         _LOGGER.debug("Sending eBay OAuth token request to %s", self.token_url)
-        resp = await session.post(self.token_url, headers=headers, data=data)
+        try:
+            resp = await session.post(self.token_url, headers=headers, data=data)
+        except (ClientError, TimeoutError) as exc:
+            raise OAuth2TokenRequestTransientError(
+                "eBay OAuth token request failed temporarily"
+            ) from exc
         if resp.status >= HTTPStatus.BAD_REQUEST:
-            await _log_oauth_error(resp.status, resp)
-            resp.raise_for_status()
+            error_code = await _log_oauth_error(resp.status, resp)
+            _raise_token_request_error(resp.status, error_code)
         try:
             payload = cast(dict[str, Any], await resp.json(content_type=None))
         except (ClientError, json.JSONDecodeError) as exc:
-            raise ClientResponseError(
-                resp.request_info,
-                resp.history,
-                status=resp.status,
-                message="eBay OAuth response was not valid JSON",
-                headers=resp.headers,
+            raise OAuth2TokenRequestError(
+                "eBay OAuth response was not valid JSON"
             ) from exc
         return payload
 
@@ -169,12 +175,42 @@ def _basic_auth_header(client_id: str, client_secret: str) -> str:
     return f"Basic {basic}"
 
 
-async def _log_oauth_error(status: int, resp: Any) -> None:
+def _raise_token_request_error(status: int, error_code: str | None) -> None:
+    """Raise the HA OAuth exception matching an eBay token failure."""
+    if (
+        status == HTTPStatus.TOO_MANY_REQUESTS
+        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
+    ):
+        raise OAuth2TokenRequestTransientError(
+            f"eBay OAuth token request failed temporarily with HTTP {status}"
+        )
+    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
+        if error_code in {
+            "invalid_grant",
+            "invalid_client",
+            "invalid_request",
+            "unauthorized_client",
+            "access_denied",
+        } or status in {
+            HTTPStatus.BAD_REQUEST,
+            HTTPStatus.UNAUTHORIZED,
+            HTTPStatus.FORBIDDEN,
+        }:
+            raise OAuth2TokenRequestReauthError(
+                f"eBay OAuth token request requires reauthorization; HTTP {status}"
+            )
+    raise OAuth2TokenRequestError(f"eBay OAuth token request failed with HTTP {status}")
+
+
+async def _log_oauth_error(status: int, resp: Any) -> str | None:
     """Log an OAuth error without sensitive request data."""
+    error_code = None
     try:
         body = await resp.text()
         payload = json.loads(body)
-        detail = payload.get("error_description") or payload.get("error") or "unknown"
+        error_code = payload.get("error")
+        detail = payload.get("error_description") or error_code or "unknown"
     except (ClientError, ValueError, AttributeError):
         detail = "unknown"
     _LOGGER.debug("eBay OAuth token request failed (%s): %s", status, detail)
+    return error_code

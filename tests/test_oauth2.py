@@ -32,6 +32,10 @@ from custom_components.ebay.oauth2 import (
     EbayOAuth2Implementation,
     legacy_token_from_refresh_token,
 )
+from custom_components.ebay.oauth_errors import (
+    OAuth2TokenRequestReauthError,
+    OAuth2TokenRequestTransientError,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,9 +85,7 @@ def test_authorize_url_uses_runame_and_ha_state() -> None:
 def test_authorize_url_uses_sandbox_endpoint() -> None:
     """Sandbox credentials use sandbox eBay authorize endpoint."""
     hass = _Hass()
-    implementation = EbayOAuth2Implementation(
-        hass, _flow_data(environment=ENV_SANDBOX)
-    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data(environment=ENV_SANDBOX))
 
     url = asyncio.run(implementation.async_generate_authorize_url("flow-123"))
 
@@ -122,9 +124,7 @@ def test_token_exchange_uses_basic_auth_and_runame(
     )
     implementation = EbayOAuth2Implementation(hass, _flow_data())
 
-    token = asyncio.run(
-        implementation.async_resolve_external_data({"code": "code-1"})
-    )
+    token = asyncio.run(implementation.async_resolve_external_data({"code": "code-1"}))
 
     assert token["refresh_token"] == "refresh"
     request = requests[0]
@@ -164,7 +164,9 @@ def test_refresh_preserves_refresh_token_when_omitted(
     implementation = EbayOAuth2Implementation(hass, _flow_data())
 
     token = asyncio.run(
-        implementation.async_refresh_token(legacy_token_from_refresh_token("old-refresh"))
+        implementation.async_refresh_token(
+            legacy_token_from_refresh_token("old-refresh")
+        )
     )
 
     assert token["access_token"] == "new-access"
@@ -172,13 +174,71 @@ def test_refresh_preserves_refresh_token_when_omitted(
     assert token["expires_at"] > 0
 
 
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_token_request_transient_errors_do_not_force_reauth(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Temporary token endpoint failures are classified as retryable."""
+    hass = _Hass()
+
+    class Response:
+        request_info = None
+        history: tuple = ()
+        headers: dict[str, str] = {}
+
+        async def text(self) -> str:
+            return json.dumps({"error": "temporarily_unavailable"})
+
+    Response.status = status
+
+    class Session:
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            return Response()
+
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_clientsession",
+        lambda hass: Session(),
+    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    with pytest.raises(OAuth2TokenRequestTransientError):
+        asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
+
+
+def test_token_request_invalid_grant_requires_reauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revoked refresh tokens are classified as reauthorization failures."""
+    hass = _Hass()
+
+    class Response:
+        status = 400
+        request_info = None
+        history: tuple = ()
+        headers: dict[str, str] = {}
+
+        async def text(self) -> str:
+            return json.dumps({"error": "invalid_grant"})
+
+    class Session:
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            return Response()
+
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_clientsession",
+        lambda hass: Session(),
+    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    with pytest.raises(OAuth2TokenRequestReauthError):
+        asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
+
+
 def test_config_flow_starts_external_step(monkeypatch: pytest.MonkeyPatch) -> None:
     """Automatic mode starts HA's external OAuth step."""
     flow = _flow(monkeypatch)
 
-    result = asyncio.run(
-        flow.async_step_credentials(_flow_data())
-    )
+    result = asyncio.run(flow.async_step_credentials(_flow_data()))
 
     assert result["type"] == "external"
     assert result["step_id"] == "auth"
@@ -196,9 +256,10 @@ def test_manual_fallback_still_shows_consent_url(
 
     assert result["type"] == "form"
     assert result["step_id"] == "manual"
-    assert "auth.ebay.com/oauth2/authorize" in result["description_placeholders"][
-        "consent_url"
-    ]
+    assert (
+        "auth.ebay.com/oauth2/authorize"
+        in result["description_placeholders"]["consent_url"]
+    )
 
 
 def test_initial_flow_shows_authorization_method_menu(
@@ -210,7 +271,7 @@ def test_initial_flow_shows_authorization_method_menu(
     result = asyncio.run(flow.async_step_user())
 
     assert result["type"] == "menu"
-    assert result["step_id"] == "authorization_method"
+    assert result["step_id"] == "user"
     assert result["menu_options"] == ["automatic", "manual"]
 
 
@@ -390,12 +451,13 @@ def test_strings_and_english_translations_match_setup_keys() -> None:
     assert strings == english
     steps = strings["config"]["step"]
     for step in (
-        "authorization_method",
         "prepare_application",
         "credentials",
         "manual",
     ):
         assert step in steps
+    assert "menu_options" in steps["user"]
+    assert "authorization_method" not in steps
     assert "oauth_mode" not in steps["credentials"]["data"]
 
 
