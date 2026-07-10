@@ -16,9 +16,11 @@ authorization-code token request send the configured RuName as `redirect_uri`.
 
 ## Callback URL UX
 
-The setup form displays Home Assistant's OAuth callback URL and asks the user
-to register it as both Auth Accepted URL and Auth Declined URL in the eBay
-Developer Program before continuing.
+The setup flow starts with an authorization-method menu. The recommended
+automatic path shows a dedicated "Prepare your eBay application" step before
+credentials are requested. That step displays Home Assistant's OAuth callback
+URL and asks the user to register it as both Auth Accepted URL and Auth
+Declined URL in the eBay Developer Program before continuing.
 
 ## Application Credentials
 
@@ -38,8 +40,9 @@ access token on the next poll.
 
 Runtime polling uses `OAuth2Session`; token refresh failures surface as
 `ConfigEntryAuthFailed`, which starts Home Assistant's native reauth flow. The
-reauth flow preserves environment, RuName, Site ID, and options, then updates
-the existing config entry after successful authorization.
+reauth flow preserves environment, Client ID, RuName, Site ID, and options,
+asks for the client secret again, then updates the existing config entry after
+successful authorization.
 
 ## Manual Fallback
 

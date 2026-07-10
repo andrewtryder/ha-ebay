@@ -32,6 +32,10 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 DEVELOPER_CONSOLE_URL = "https://developer.ebay.com/my/keys"
+OAUTH_SETUP_GUIDE_URL = (
+    "https://github.com/andrewtryder/ha-ebay/blob/main/docs/ebay-oauth-setup.md"
+)
+PRIVACY_POLICY_URL = "https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md"
 
 
 def auth_implementation_domain(environment: str, client_id: str) -> str:

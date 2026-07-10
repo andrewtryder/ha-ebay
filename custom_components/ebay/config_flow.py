@@ -29,7 +29,6 @@ from .const import (
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
     CONF_ENVIRONMENT,
-    CONF_OAUTH_MODE,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_POLL_INTERVAL,
@@ -43,10 +42,11 @@ from .const import (
     ENVIRONMENTS,
     OAUTH_MODE_CALLBACK,
     OAUTH_MODE_MANUAL,
-    OAUTH_MODES,
 )
 from .oauth2 import (
     DEVELOPER_CONSOLE_URL,
+    OAUTH_SETUP_GUIDE_URL,
+    PRIVACY_POLICY_URL,
     EbayOAuth2Implementation,
     async_get_ebay_callback_url,
     normalize_new_token,
@@ -69,6 +69,7 @@ class EbayConfigFlow(
         self._data: dict[str, Any] = {}
         self._state = secrets.token_urlsafe(24)
         self._consent_url: str | None = None
+        self._oauth_mode = OAUTH_MODE_CALLBACK
 
     @property
     def logger(self) -> logging.Logger:
@@ -78,10 +79,44 @@ class EbayConfigFlow(
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Collect eBay app settings and choose OAuth mode."""
+        """Start the guided setup flow."""
+        return await self.async_step_authorization_method(user_input)
+
+    async def async_step_authorization_method(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Choose automatic callback or manual authorization."""
+        return self.async_show_menu(
+            step_id="authorization_method",
+            menu_options=["automatic", "manual"],
+        )
+
+    async def async_step_automatic(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Use Home Assistant's native OAuth callback."""
+        self._oauth_mode = OAUTH_MODE_CALLBACK
+        return await self.async_step_prepare_application()
+
+    async def async_step_prepare_application(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show eBay developer-console setup instructions before credentials."""
+        if user_input is not None:
+            return await self.async_step_credentials()
+
+        return self.async_show_form(
+            step_id="prepare_application",
+            data_schema=vol.Schema({}),
+            description_placeholders=self._setup_description_placeholders(),
+        )
+
+    async def async_step_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Collect eBay app settings."""
         if user_input is not None:
             self._data = dict(user_input)
-            oauth_mode = self._data.pop(CONF_OAUTH_MODE, OAUTH_MODE_CALLBACK)
             await self.async_set_unique_id(
                 f"{self._data[CONF_ENVIRONMENT]}:{self._data[CONF_CLIENT_ID]}"
             )
@@ -89,7 +124,7 @@ class EbayConfigFlow(
                 self._abort_if_unique_id_configured()
 
             self.flow_impl = EbayOAuth2Implementation(self.hass, self._data)
-            if oauth_mode == OAUTH_MODE_MANUAL:
+            if self._oauth_mode == OAUTH_MODE_MANUAL:
                 self._consent_url = build_consent_url(
                     self._data[CONF_ENVIRONMENT],
                     self._data[CONF_CLIENT_ID],
@@ -101,36 +136,8 @@ class EbayConfigFlow(
 
         defaults = self._reauth_defaults()
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_OAUTH_MODE, default=OAUTH_MODE_CALLBACK
-                    ): vol.In(OAUTH_MODES),
-                    vol.Required(
-                        CONF_ENVIRONMENT,
-                        default=defaults.get(CONF_ENVIRONMENT, "production"),
-                    ): vol.In(ENVIRONMENTS),
-                    vol.Required(
-                        CONF_CLIENT_ID, default=defaults.get(CONF_CLIENT_ID, "")
-                    ): str,
-                    vol.Required(
-                        CONF_CLIENT_SECRET,
-                        default=defaults.get(CONF_CLIENT_SECRET, ""),
-                    ): str,
-                    vol.Required(
-                        CONF_RUNAME, default=defaults.get(CONF_RUNAME, "")
-                    ): str,
-                    vol.Required(
-                        CONF_SITE_ID,
-                        default=defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID),
-                    ): str,
-                }
-            ),
-            description_placeholders={
-                "callback_url": async_get_ebay_callback_url(self.hass),
-                "developer_console_url": DEVELOPER_CONSOLE_URL,
-            },
+            step_id="credentials",
+            data_schema=self._credentials_schema(defaults),
         )
 
     async def async_oauth_create_entry(
@@ -164,12 +171,17 @@ class EbayConfigFlow(
         """Confirm before collecting credentials for reauth."""
         if user_input is None:
             return self.async_show_form(step_id="reauth_confirm")
-        return await self.async_step_user()
+        self._oauth_mode = OAUTH_MODE_CALLBACK
+        return await self.async_step_credentials()
 
     async def async_step_manual(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Accept an OAuth authorization code or callback URL."""
+        """Choose or complete manual OAuth authorization."""
+        if user_input is None and not self._data:
+            self._oauth_mode = OAUTH_MODE_MANUAL
+            return await self.async_step_credentials()
+
         errors: dict[str, str] = {}
         if user_input is not None:
             authorization_value = user_input["authorization_code"]
@@ -226,6 +238,35 @@ class EbayConfigFlow(
             data_schema=vol.Schema({vol.Required("authorization_code"): str}),
             errors=errors,
         )
+
+    def _credentials_schema(self, defaults: dict[str, Any]) -> vol.Schema:
+        """Return the eBay application credential schema."""
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_ENVIRONMENT,
+                    default=defaults.get(CONF_ENVIRONMENT, "production"),
+                ): vol.In(ENVIRONMENTS),
+                vol.Required(
+                    CONF_CLIENT_ID, default=defaults.get(CONF_CLIENT_ID, "")
+                ): str,
+                vol.Required(CONF_CLIENT_SECRET, default=""): str,
+                vol.Required(CONF_RUNAME, default=defaults.get(CONF_RUNAME, "")): str,
+                vol.Required(
+                    CONF_SITE_ID,
+                    default=defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID),
+                ): str,
+            }
+        )
+
+    def _setup_description_placeholders(self) -> dict[str, str]:
+        """Return setup instruction URLs for translation placeholders."""
+        return {
+            "callback_url": async_get_ebay_callback_url(self.hass),
+            "developer_console_url": DEVELOPER_CONSOLE_URL,
+            "oauth_setup_guide_url": OAUTH_SETUP_GUIDE_URL,
+            "privacy_policy_url": PRIVACY_POLICY_URL,
+        }
 
     def _reauth_defaults(self) -> dict[str, Any]:
         """Return defaults from the existing entry during reauth."""
