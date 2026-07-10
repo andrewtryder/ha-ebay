@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/andrewtryder/ha-ebay/compare/v0.2.0...v0.3.0) (2026-07-10)
+
+
+### Features
+
+* guide eBay OAuth setup flow ([8b3db65](https://github.com/andrewtryder/ha-ebay/commit/8b3db65763edc1cff7126dfd2c97fda3b409b3e3))
+* guide eBay OAuth setup flow ([508dec2](https://github.com/andrewtryder/ha-ebay/commit/508dec2cb25d16981665493ca75515cf556c3e36))
+
 ## [0.2.0](https://github.com/andrewtryder/ha-ebay/compare/v0.1.0...v0.2.0) (2026-07-10)
 
 
