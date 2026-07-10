@@ -21,6 +21,8 @@ READ_ONLY_CALL_NAME = "GetMyeBayBuying"
 SELLING_CALL_NAME = "GetMyeBaySelling"
 SELLER_LIST_CALL_NAME = "GetSellerList"
 BEST_OFFERS_CALL_NAME = "GetBestOffers"
+BEST_OFFERS_ENTRIES_PER_PAGE = 200
+BEST_OFFERS_MAX_PAGES = 25
 
 DEFAULT_SCOPE = (
     "https://api.ebay.com/oauth/api_scope "
@@ -394,6 +396,12 @@ def active_offers_by_item_id(root: ET.Element) -> dict[str, int]:
     return offers
 
 
+def pagination_total_pages(root: ET.Element) -> int:
+    """Parse Trading API PaginationResult total pages."""
+    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages"))
+    return max(1, total_pages or 1)
+
+
 def build_get_my_ebay_buying_xml(entries_per_page: int = 100, page: int = 1) -> str:
     """Build GetMyeBayBuying XML."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -480,12 +488,16 @@ def build_get_seller_list_xml(entries_per_page: int = 200, page: int = 1) -> str
 """
 
 
-def build_get_best_offers_xml() -> str:
+def build_get_best_offers_xml(
+    entries_per_page: int = BEST_OFFERS_ENTRIES_PER_PAGE,
+    page: int = 1,
+) -> str:
     """Build GetBestOffers XML."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <GetBestOffersRequest xmlns="{EBAY_XML_NS}">
   <DetailLevel>ReturnAll</DetailLevel>
   <BestOfferStatus>Active</BestOfferStatus>
+  <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
 </GetBestOffersRequest>
 """
 
@@ -635,7 +647,12 @@ class EbayApiClient:
             data=data,
             timeout=aiohttp.ClientTimeout(total=30),
         ) as response:
-            payload = await response.json(content_type=None)
+            try:
+                payload = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise EbayAuthError(
+                    f"eBay OAuth response was not valid JSON; HTTP {response.status}"
+                ) from exc
             if response.status >= 400:
                 raise EbayAuthError(f"eBay OAuth request failed with HTTP {response.status}")
             return payload
@@ -794,12 +811,24 @@ class EbayApiClient:
                 partial_failures.append("seller_list_views")
 
             try:
-                offers = await self.async_call_trading_api(
-                    BEST_OFFERS_CALL_NAME, build_get_best_offers_xml()
-                )
-                for item_id, count in active_offers_by_item_id(offers).items():
-                    if item_id in selling:
-                        selling[item_id]["offers"] = count
+                page = 1
+                total_pages = 1
+                active_offer_counts: dict[str, int] = {}
+                while page <= min(total_pages, BEST_OFFERS_MAX_PAGES):
+                    offers = await self.async_call_trading_api(
+                        BEST_OFFERS_CALL_NAME, build_get_best_offers_xml(page=page)
+                    )
+                    total_pages = pagination_total_pages(offers)
+                    for item_id, count in active_offers_by_item_id(offers).items():
+                        if item_id in selling:
+                            active_offer_counts[item_id] = (
+                                active_offer_counts.get(item_id, 0) + count
+                            )
+                    page += 1
+                for item_id, count in active_offer_counts.items():
+                    selling[item_id]["offers"] = count
+                if total_pages > BEST_OFFERS_MAX_PAGES:
+                    partial_failures.append("active_offers_truncated")
             except EbayError as exc:
                 _LOGGER.debug("Optional GetBestOffers failed: %s", type(exc).__name__)
                 partial_failures.append("active_offers")
