@@ -571,8 +571,10 @@ class EbayApiClient:
         runame: str,
         refresh_token: str | None,
         site_id: str,
+        oauth_session: Any | None = None,
     ) -> None:
         self._session = session
+        self._oauth_session = oauth_session
         self.environment = environment
         self.client_id = client_id
         self._client_secret = client_secret
@@ -600,6 +602,15 @@ class EbayApiClient:
 
     async def async_get_access_token(self) -> str:
         """Return a fresh access token."""
+        if self._oauth_session is not None:
+            try:
+                await self._oauth_session.async_ensure_token_valid()
+            except Exception as exc:
+                raise EbayAuthError("OAuth token refresh failed") from exc
+            access_token = self._oauth_session.token.get("access_token")
+            if not access_token:
+                raise EbayAuthError("OAuth token data does not include access token")
+            return access_token
         if self._access_token and not self._access_token_expiring():
             return self._access_token
         if not self.refresh_token:
@@ -614,6 +625,7 @@ class EbayApiClient:
         if not access_token:
             raise EbayAuthError("OAuth refresh response did not include access token")
         self._store_access_token(payload)
+        self.refresh_token = payload.get("refresh_token", self.refresh_token)
         return access_token
 
     def _access_token_expiring(self) -> bool:

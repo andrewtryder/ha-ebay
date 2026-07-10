@@ -3,7 +3,7 @@
   "name": "eBay",
   "codeowners": ["@andrewtryder"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["http", "my"],
   "documentation": "https://github.com/andrewtryder/ha-ebay",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/andrewtryder/ha-ebay/issues",
