@@ -20,6 +20,9 @@ The MVP uses these read-only calls:
 - `GetBestOffers`
 - optional Sell Analytics traffic report
 
+`GetBestOffers` uses Trading API pagination for active offers, with a defensive
+page cap to keep polling bounded on unusually large accounts.
+
 ## HACS Installation
 
 1. In HACS, add this repository as a custom repository:
@@ -40,6 +43,10 @@ Create or open an eBay developer application and collect:
 - Site ID, usually `0` for US
 
 Use production credentials with the production environment and sandbox credentials with sandbox. Mixing them will cause OAuth or Trading API failures.
+
+Current setup uniqueness is based on environment and Client ID, so only one eBay
+account can be configured per developer app credential set. To monitor multiple
+eBay accounts, create a separate eBay developer app for each account.
 
 For traffic views from Sell Analytics, mint consent with:
 

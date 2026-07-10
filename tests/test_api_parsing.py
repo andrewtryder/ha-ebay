@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
+from typing import Any
 import xml.etree.ElementTree as ET
 
+import pytest
+
 from custom_components.ebay.api import (
-    EBAY_XML_NS,
     BEST_OFFERS_CALL_NAME,
+    EBAY_XML_NS,
     READ_ONLY_CALL_NAME,
     SELLER_LIST_CALL_NAME,
     SELLING_CALL_NAME,
     EbayApiClient,
     EbayApiError,
+    EbayAuthError,
     active_offers_by_item_id,
     analytics_views_by_item_id,
+    build_get_best_offers_xml,
     extract_authorization_code,
     extract_oauth_callback_params,
+    pagination_total_pages,
     parse_container,
     parse_selling_container,
     seller_list_views_by_item_id,
@@ -27,6 +34,26 @@ from custom_components.ebay.api import (
 
 def _root(xml: str) -> ET.Element:
     return ET.fromstring(xml)
+
+
+class _TokenResponse:
+    status = 502
+
+    async def json(self, *, content_type: str | None = None) -> dict[str, Any]:
+        raise json.JSONDecodeError("bad json", "<html>", 0)
+
+
+class _TokenContext:
+    async def __aenter__(self) -> _TokenResponse:
+        return _TokenResponse()
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _TokenSession:
+    def post(self, *args: object, **kwargs: object) -> _TokenContext:
+        return _TokenContext()
 
 
 def test_parse_buying_items_normalizes_numbers() -> None:
@@ -99,6 +126,17 @@ def test_parse_selling_item_and_optional_views_offers() -> None:
         """
     )
     assert active_offers_by_item_id(offers) == {"456": 2}
+    assert pagination_total_pages(offers) == 1
+
+    paginated_offers = _root(
+        f"""
+        <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+          <PaginationResult><TotalNumberOfPages>3</TotalNumberOfPages></PaginationResult>
+        </GetBestOffersResponse>
+        """
+    )
+    assert pagination_total_pages(paginated_offers) == 3
+    assert "<PageNumber>2</PageNumber>" in build_get_best_offers_xml(page=2)
 
 
 def test_analytics_views_and_summary_are_bounded() -> None:
@@ -316,3 +354,102 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
     payload = asyncio.run(run())
 
     assert payload["partial_failures"] == ["analytics_views"]
+
+
+def test_token_request_wraps_non_json_response() -> None:
+    client = EbayApiClient(
+        _TokenSession(),
+        environment="production",
+        client_id="client",
+        client_secret="secret",
+        runame="runame",
+        refresh_token=None,
+        site_id="0",
+    )
+
+    async def request() -> None:
+        await client._token_request({"grant_type": "authorization_code"})
+
+    with pytest.raises(EbayAuthError, match="not valid JSON; HTTP 502"):
+        asyncio.run(request())
+
+
+def test_fetch_data_paginates_best_offers() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+    selling = _root(
+        f"""
+        <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+          <ActiveList><ItemArray><Item>
+            <ItemID>456</ItemID><Title>Sell</Title>
+            <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+            <SellingStatus><CurrentPrice currencyID="USD">20</CurrentPrice></SellingStatus>
+            <BestOfferDetails><BestOfferCount>99</BestOfferCount></BestOfferDetails>
+          </Item></ItemArray></ActiveList>
+        </GetMyeBaySellingResponse>
+        """
+    )
+    seller_list = _root(f"""<GetSellerListResponse xmlns="{EBAY_XML_NS}" />""")
+    offer_pages = [
+        _root(
+            f"""
+            <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+              <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+              <ItemBestOffersArray><ItemBestOffers>
+                <Role>Seller</Role><Item><ItemID>456</ItemID></Item>
+                <BestOfferArray><BestOffer><Status>Active</Status></BestOffer></BestOfferArray>
+              </ItemBestOffers></ItemBestOffersArray>
+            </GetBestOffersResponse>
+            """
+        ),
+        _root(
+            f"""
+            <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+              <PaginationResult><TotalNumberOfPages>2</TotalNumberOfPages></PaginationResult>
+              <ItemBestOffersArray><ItemBestOffers>
+                <Role>Seller</Role><Item><ItemID>456</ItemID></Item>
+                <BestOfferArray><BestOffer><Status>Countered</Status></BestOffer></BestOfferArray>
+              </ItemBestOffers></ItemBestOffersArray>
+            </GetBestOffersResponse>
+            """
+        ),
+    ]
+    calls: list[tuple[str, str]] = []
+    client = EbayApiClient(
+        _TokenSession(),
+        environment="production",
+        client_id="client",
+        client_secret="secret",
+        runame="runame",
+        refresh_token=None,
+        site_id="0",
+    )
+
+    async def call_trading_api(call_name: str, xml_body: str) -> ET.Element:
+        calls.append((call_name, xml_body))
+        if call_name == SELLING_CALL_NAME:
+            return selling
+        if call_name == SELLER_LIST_CALL_NAME:
+            return seller_list
+        if call_name == BEST_OFFERS_CALL_NAME:
+            return offer_pages.pop(0)
+        raise AssertionError(f"Unexpected call: {call_name}")
+
+    client.async_call_trading_api = call_trading_api
+
+    async def fetch() -> dict[str, Any]:
+        return await client.async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(fetch())
+
+    assert payload["selling"]["456"]["offers"] == 2
+    best_offer_calls = [body for call_name, body in calls if call_name == BEST_OFFERS_CALL_NAME]
+    assert len(best_offer_calls) == 2
+    assert "<PageNumber>1</PageNumber>" in best_offer_calls[0]
+    assert "<PageNumber>2</PageNumber>" in best_offer_calls[1]

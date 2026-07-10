@@ -62,6 +62,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> CALLBACK_TYPE:
         """Register an event entity callback."""
         self._event_callbacks[kind] = callback_func
+        if self.data:
+            self._rebuild_ending_soon_timers(self.data)
 
         @callback
         def unsubscribe() -> None:
@@ -98,12 +100,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.previous_payload = payload
         return payload
 
-    def _emit(self, kind: str, event_type: str, item: dict[str, Any], **extra: Any) -> None:
+    def _emit(self, kind: str, event_type: str, item: dict[str, Any], **extra: Any) -> bool:
         callback_func = self._event_callbacks.get(kind)
         if not callback_func:
-            return
+            return False
         event_data = self._event_data(event_type, item, kind, extra)
         callback_func(event_type, event_data)
+        return True
 
     def _event_data(
         self,
@@ -234,8 +237,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if fire_at <= now:
                     if item.get("seconds_left") is not None and item["seconds_left"] <= threshold:
                         if key not in self._fired_ending_soon:
-                            self._fired_ending_soon.add(key)
-                            self._emit(kind, event_type, item)
+                            if self._emit(kind, event_type, item):
+                                self._fired_ending_soon.add(key)
                         continue
                     fire_at = now
                 if key in self._scheduled:
@@ -263,8 +266,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._scheduled.pop(key, None)
             if key in self._fired_ending_soon:
                 return
-            self._fired_ending_soon.add(key)
-            self._emit(kind, event_type, item)
+            if self._emit(kind, event_type, item):
+                self._fired_ending_soon.add(key)
 
         return fire
 

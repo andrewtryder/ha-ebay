@@ -32,7 +32,12 @@ jobs:
           if [ -f requirements-dev.txt ]; then
             python -m pip install -r requirements-dev.txt
           else
-            python -m pip install pytest pytest-homeassistant-custom-component ruff pillow
+            python -m pip install pytest ruff pillow
+          fi
+          if [ -f requirements-ha.txt ]; then
+            python -m pip install -r requirements-ha.txt
+          else
+            python -m pip install pytest-homeassistant-custom-component
           fi
 
       - name: Ruff
