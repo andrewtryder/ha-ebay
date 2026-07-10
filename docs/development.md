@@ -69,14 +69,15 @@ https://my.home-assistant.io/redirect/oauth
 1. Start source-mounted Home Assistant with `.devcontainer/start-ha-source.sh`.
 2. Open `http://localhost:8123` and complete onboarding if needed.
 3. Go to **Settings -> Devices & services -> Add integration -> eBay**.
-4. Copy the callback URL shown by the eBay setup form.
-5. In the eBay Developer Program application keys page, open or create an OAuth redirect URL.
-6. Set both Auth Accepted URL and Auth Declined URL to the copied callback URL.
-7. Save the redirect configuration and copy the generated RuName.
-8. Enter the matching production or sandbox Client ID, Client secret, RuName, environment, and Site ID in Home Assistant.
-9. Keep **Automatic callback** selected and click authorize.
-10. Approve access at eBay.
-11. Confirm the browser returns to the dev Home Assistant instance, the config entry is created, and the first refresh succeeds.
+4. Choose **Automatic callback - Recommended**.
+5. Copy the callback URL shown by the eBay setup flow.
+6. In the eBay Developer Program application keys page, open or create an OAuth redirect URL.
+7. Set both Auth Accepted URL and Auth Declined URL to the copied callback URL.
+8. Save the redirect configuration and copy the generated RuName.
+9. Enter the matching production or sandbox App ID / Client ID, Cert ID / Client secret, RuName, environment, and Site ID in Home Assistant.
+10. Continue to eBay authorization from Home Assistant.
+11. Approve access with the regular eBay account to monitor.
+12. Confirm the browser returns to the dev Home Assistant instance, the config entry is created, and the first refresh succeeds.
 
 No Cloudflare tunnel, public Home Assistant URL, SSH access, or port forwarding
 is required for this primary test path.
