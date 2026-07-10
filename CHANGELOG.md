@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/andrewtryder/ha-ebay/compare/v0.3.0...v0.3.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* classify OAuth token failures and harden ending-soon events ([b9f82fb](https://github.com/andrewtryder/ha-ebay/commit/b9f82fb8582a3b20ef53a1f249ebbd22dcfce6f4))
+* classify OAuth token failures and harden ending-soon events ([a79eb3b](https://github.com/andrewtryder/ha-ebay/commit/a79eb3b76ae99dbb78732e8d99655d9abe85659b))
+
 ## [0.3.0](https://github.com/andrewtryder/ha-ebay/compare/v0.2.0...v0.3.0) (2026-07-10)
 
 
