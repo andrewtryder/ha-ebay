@@ -43,11 +43,11 @@ jobs:
       - name: Ruff
         run: |
           if [ -d custom_components ]; then
-            paths="custom_components"
+            paths=(custom_components)
             if [ -d tests ]; then
-              paths="$paths tests"
+              paths+=(tests)
             fi
-            ruff check $paths --output-format=github
+            ruff check "${paths[@]}" --output-format=github
           else
             echo "No custom_components directory yet; skipping ruff."
           fi
