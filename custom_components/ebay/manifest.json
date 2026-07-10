@@ -1,12 +1,17 @@
 {
   "domain": "ebay",
   "name": "eBay",
-  "codeowners": ["@andrewtryder"],
+  "codeowners": [
+    "@andrewtryder"
+  ],
   "config_flow": true,
-  "dependencies": ["http", "my"],
+  "dependencies": [
+    "http",
+    "my"
+  ],
   "documentation": "https://github.com/andrewtryder/ha-ebay",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/andrewtryder/ha-ebay/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
