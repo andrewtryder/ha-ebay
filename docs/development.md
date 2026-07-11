@@ -9,7 +9,7 @@ Open the repository in VS Code and choose **Dev Containers: Reopen in Container*
 
 The devcontainer includes:
 
-- Python 3.13
+- Python 3.14
 - Docker-in-Docker
 - GitHub CLI
 - pytest
@@ -17,12 +17,14 @@ The devcontainer includes:
 - pytest-homeassistant-custom-component
 - Pillow for generating brand assets
 
-## Local Python 3.13 environment
+## Local Python 3.14 environment
 
-The repository targets Python 3.13, matching CI and the devcontainer. On macOS with Homebrew Python installed:
+The repository targets Python 3.14, matching CI, the devcontainer, and Home
+Assistant `2026.3.0+` (requires Python `>=3.14.2`). On macOS with Homebrew
+Python installed:
 
 ```bash
-/opt/homebrew/bin/python3.13 -m venv .venv
+/opt/homebrew/bin/python3.14 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
@@ -38,10 +40,9 @@ Run the fast local checks with:
 `pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
 floor of 80%.
 
-CI uses one Python 3.13 job with `requirements-ha.txt`
-(`pytest-homeassistant-custom-component==0.13.316` → Home Assistant `2026.2.3`).
-Newer harness releases require Python 3.14; bump the CI Python version when you
-want to track those. The HACS minimum remains `2026.3.0` for runtime/docker.
+CI uses one Python 3.14 job with `requirements-ha.txt`
+(`pytest-homeassistant-custom-component==0.13.346` → Home Assistant `2026.7.2`).
+The HACS minimum remains `2026.3.0` for runtime/docker.
 
 Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
 

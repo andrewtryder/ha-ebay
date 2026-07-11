@@ -1,6 +1,6 @@
 {
   "name": "ha-ebay",
-  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/python:3.14-bookworm",
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",

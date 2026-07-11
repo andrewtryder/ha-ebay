@@ -149,6 +149,7 @@ async def test_item_sensor_registry_reconciles_selection_change(
 
     first_payload = _payload("001")
     coordinator = EbayDataUpdateCoordinator(hass, entry, Mock(), _options())
+    coordinator.update_interval = None
     coordinator.data = first_payload
     coordinator.refresh_selected_item_keys(first_payload)
     entry.runtime_data = coordinator
@@ -204,5 +205,6 @@ async def test_item_sensor_registry_reconciles_selection_change(
     )
 
     await platform.async_reset()
+    await coordinator.async_shutdown()
     await hass.async_block_till_done()
     assert platform.entities == {}

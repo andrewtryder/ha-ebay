@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from http import HTTPStatus
 import json
 import logging
 from typing import Any
@@ -19,6 +18,9 @@ from .oauth_errors import (
     OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
     OAuth2TokenRequestTransientError,
+    oauth_token_error,
+    oauth_token_request_error,
+    oauth_token_transient_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,33 +138,6 @@ def extract_oauth_callback_params(value: str) -> dict[str, list[str]]:
 def _basic_auth_header(client_id: str, client_secret: str) -> str:
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     return f"Basic {basic}"
-
-
-def _raise_token_request_error(status: int, error_code: str | None) -> None:
-    """Raise the OAuth exception matching an eBay token failure."""
-    if (
-        status == HTTPStatus.TOO_MANY_REQUESTS
-        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    ):
-        raise OAuth2TokenRequestTransientError(
-            f"eBay OAuth token request failed temporarily with HTTP {status}"
-        )
-    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
-        if error_code in {
-            "invalid_grant",
-            "invalid_client",
-            "invalid_request",
-            "unauthorized_client",
-            "access_denied",
-        } or status in {
-            HTTPStatus.BAD_REQUEST,
-            HTTPStatus.UNAUTHORIZED,
-            HTTPStatus.FORBIDDEN,
-        }:
-            raise OAuth2TokenRequestReauthError(
-                f"eBay OAuth token request requires reauthorization; HTTP {status}"
-            )
-    raise OAuth2TokenRequestError(f"eBay OAuth token request failed with HTTP {status}")
 
 
 def _text(parent: ET.Element | None, path: str) -> str | None:
@@ -811,18 +786,27 @@ class EbayApiClient:
                 try:
                     payload = await response.json(content_type=None)
                 except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                    raise OAuth2TokenRequestError(
-                        f"eBay OAuth response was not valid JSON; HTTP {response.status}"
+                    raise oauth_token_request_error(
+                        f"eBay OAuth response was not valid JSON; HTTP {response.status}",
+                        status=response.status,
+                        token_url=self._endpoints.token,
                     ) from exc
                 if response.status >= 400:
                     error_code = (
                         payload.get("error") if isinstance(payload, dict) else None
                     )
-                    _raise_token_request_error(response.status, error_code)
+                    raise oauth_token_error(
+                        response.status,
+                        error_code=error_code,
+                        token_url=self._endpoints.token,
+                    )
                 return payload
+        except OAuth2TokenRequestError:
+            raise
         except (aiohttp.ClientError, TimeoutError) as exc:
-            raise OAuth2TokenRequestTransientError(
-                "eBay OAuth token request failed temporarily"
+            raise oauth_token_transient_error(
+                "eBay OAuth token request failed temporarily",
+                token_url=self._endpoints.token,
             ) from exc
 
     async def async_call_trading_api(self, call_name: str, xml_body: str) -> ET.Element:
