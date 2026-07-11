@@ -194,6 +194,9 @@ def _entity_registry(hass: HomeAssistant) -> er.EntityRegistry | None:
         return None
 
 
+_SUMMARY_SENSOR_KEYS = {description.key for description in SUMMARY_SENSORS}
+
+
 def _item_sensor_unique_ids(
     entry_id: str, selected: set[SelectedItemKey]
 ) -> set[str]:
@@ -220,10 +223,20 @@ def _registered_item_sensor_unique_ids(
 
 def _is_item_sensor_unique_id(entry_id: str, unique_id: str) -> bool:
     """Return whether a unique ID belongs to a generated per-item sensor."""
+    if unique_id.removeprefix(f"{entry_id}_") in _SUMMARY_SENSOR_KEYS:
+        return False
     for kind, fields in ITEM_SENSOR_FIELDS.items():
-        if not unique_id.startswith(f"{entry_id}_{kind}_"):
+        prefix = f"{entry_id}_{kind}_"
+        if not unique_id.startswith(prefix):
             continue
-        return any(unique_id.endswith(f"_{suffix}") for suffix, _, _ in fields)
+        remainder = unique_id[len(prefix) :]
+        for suffix, _, _ in fields:
+            ending = f"_{suffix}"
+            if remainder.endswith(ending):
+                item_id = remainder[: -len(ending)]
+                if item_id:
+                    return True
+        return False
     return False
 
 

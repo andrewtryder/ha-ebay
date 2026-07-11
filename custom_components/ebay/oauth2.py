@@ -29,9 +29,9 @@ from .const import (
     DOMAIN,
 )
 from .oauth_errors import (
-    OAuth2TokenRequestError,
-    OAuth2TokenRequestReauthError,
-    OAuth2TokenRequestTransientError,
+    oauth_token_error,
+    oauth_token_request_error,
+    oauth_token_transient_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,17 +136,23 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
         try:
             resp = await session.post(self.token_url, headers=headers, data=data)
         except (ClientError, TimeoutError) as exc:
-            raise OAuth2TokenRequestTransientError(
-                "eBay OAuth token request failed temporarily"
+            raise oauth_token_transient_error(
+                "eBay OAuth token request failed temporarily",
+                token_url=self.token_url,
             ) from exc
         if resp.status >= HTTPStatus.BAD_REQUEST:
             error_code = await _log_oauth_error(resp.status, resp)
-            _raise_token_request_error(resp.status, error_code)
+            raise oauth_token_error(
+                resp.status,
+                error_code=error_code,
+                token_url=self.token_url,
+            )
         try:
             payload = cast(dict[str, Any], await resp.json(content_type=None))
         except (ClientError, json.JSONDecodeError) as exc:
-            raise OAuth2TokenRequestError(
-                "eBay OAuth response was not valid JSON"
+            raise oauth_token_request_error(
+                "eBay OAuth response was not valid JSON",
+                token_url=self.token_url,
             ) from exc
         return payload
 
@@ -173,33 +179,6 @@ def normalize_new_token(token: dict[str, Any]) -> dict[str, Any]:
 def _basic_auth_header(client_id: str, client_secret: str) -> str:
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     return f"Basic {basic}"
-
-
-def _raise_token_request_error(status: int, error_code: str | None) -> None:
-    """Raise the HA OAuth exception matching an eBay token failure."""
-    if (
-        status == HTTPStatus.TOO_MANY_REQUESTS
-        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    ):
-        raise OAuth2TokenRequestTransientError(
-            f"eBay OAuth token request failed temporarily with HTTP {status}"
-        )
-    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
-        if error_code in {
-            "invalid_grant",
-            "invalid_client",
-            "invalid_request",
-            "unauthorized_client",
-            "access_denied",
-        } or status in {
-            HTTPStatus.BAD_REQUEST,
-            HTTPStatus.UNAUTHORIZED,
-            HTTPStatus.FORBIDDEN,
-        }:
-            raise OAuth2TokenRequestReauthError(
-                f"eBay OAuth token request requires reauthorization; HTTP {status}"
-            )
-    raise OAuth2TokenRequestError(f"eBay OAuth token request failed with HTTP {status}")
 
 
 async def _log_oauth_error(status: int, resp: Any) -> str | None:

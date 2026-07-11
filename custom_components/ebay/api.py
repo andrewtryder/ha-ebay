@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from http import HTTPStatus
 import json
 import logging
 from typing import Any
@@ -19,6 +18,9 @@ from .oauth_errors import (
     OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
     OAuth2TokenRequestTransientError,
+    oauth_token_error,
+    oauth_token_request_error,
+    oauth_token_transient_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,6 +40,7 @@ TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 MAX_PAGES = 20
 ANALYTICS_BATCH_SIZE = 100
 _WARNING_MESSAGE_MAX_LEN = 240
+API_WARNINGS_STATE_ATTR_MAX = 10
 
 
 class EbayError(Exception):
@@ -135,33 +138,6 @@ def extract_oauth_callback_params(value: str) -> dict[str, list[str]]:
 def _basic_auth_header(client_id: str, client_secret: str) -> str:
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     return f"Basic {basic}"
-
-
-def _raise_token_request_error(status: int, error_code: str | None) -> None:
-    """Raise the OAuth exception matching an eBay token failure."""
-    if (
-        status == HTTPStatus.TOO_MANY_REQUESTS
-        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
-    ):
-        raise OAuth2TokenRequestTransientError(
-            f"eBay OAuth token request failed temporarily with HTTP {status}"
-        )
-    if status < HTTPStatus.INTERNAL_SERVER_ERROR:
-        if error_code in {
-            "invalid_grant",
-            "invalid_client",
-            "invalid_request",
-            "unauthorized_client",
-            "access_denied",
-        } or status in {
-            HTTPStatus.BAD_REQUEST,
-            HTTPStatus.UNAUTHORIZED,
-            HTTPStatus.FORBIDDEN,
-        }:
-            raise OAuth2TokenRequestReauthError(
-                f"eBay OAuth token request requires reauthorization; HTTP {status}"
-            )
-    raise OAuth2TokenRequestError(f"eBay OAuth token request failed with HTTP {status}")
 
 
 def _text(parent: ET.Element | None, path: str) -> str | None:
@@ -280,6 +256,25 @@ def extract_trading_warnings(root: ET.Element) -> list[dict[str, str | None]]:
             }
         )
     return warnings
+
+
+def dedupe_trading_warnings(
+    warnings: list[dict[str, str | None]],
+) -> list[dict[str, str | None]]:
+    """Deduplicate Trading API warnings by code and message text."""
+    deduped: list[dict[str, str | None]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    for warning in warnings:
+        key = (
+            warning.get("code"),
+            warning.get("short_message"),
+            warning.get("long_message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(warning)
+    return deduped
 
 
 def chunk_item_ids(item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE) -> list[list[str]]:
@@ -791,18 +786,27 @@ class EbayApiClient:
                 try:
                     payload = await response.json(content_type=None)
                 except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                    raise OAuth2TokenRequestError(
-                        f"eBay OAuth response was not valid JSON; HTTP {response.status}"
+                    raise oauth_token_request_error(
+                        f"eBay OAuth response was not valid JSON; HTTP {response.status}",
+                        status=response.status,
+                        token_url=self._endpoints.token,
                     ) from exc
                 if response.status >= 400:
                     error_code = (
                         payload.get("error") if isinstance(payload, dict) else None
                     )
-                    _raise_token_request_error(response.status, error_code)
+                    raise oauth_token_error(
+                        response.status,
+                        error_code=error_code,
+                        token_url=self._endpoints.token,
+                    )
                 return payload
+        except OAuth2TokenRequestError:
+            raise
         except (aiohttp.ClientError, TimeoutError) as exc:
-            raise OAuth2TokenRequestTransientError(
-                "eBay OAuth token request failed temporarily"
+            raise oauth_token_transient_error(
+                "eBay OAuth token request failed temporarily",
+                token_url=self._endpoints.token,
             ) from exc
 
     async def async_call_trading_api(self, call_name: str, xml_body: str) -> ET.Element:
@@ -864,6 +868,20 @@ class EbayApiClient:
         """Fetch optional Sell Analytics traffic report for one ID batch."""
         if not item_ids:
             return {}
+        for attempt in range(2):
+            try:
+                return await self._async_get_traffic_report_once(item_ids)
+            except EbayAuthError:
+                self._clear_access_token()
+                if attempt == 0:
+                    continue
+                raise
+        raise EbayAuthError("eBay Sell Analytics auth failed")
+
+    async def _async_get_traffic_report_once(
+        self, item_ids: list[str]
+    ) -> dict[str, Any]:
+        """Fetch one Sell Analytics traffic report without auth retry."""
         access_token = await self.async_get_access_token()
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=30)
@@ -884,7 +902,11 @@ class EbayApiClient:
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
-                if response.status in {400, 401, 403}:
+                if response.status == 401:
+                    raise EbayAuthError(
+                        f"eBay Sell Analytics auth failed with HTTP {response.status}"
+                    )
+                if response.status in {400, 403}:
                     raise EbayPartialFailure("analytics_views")
                 if response.status >= 400:
                     raise EbayApiError(
@@ -910,6 +932,8 @@ class EbayApiClient:
         for batch in chunk_item_ids(item_ids):
             try:
                 payload = await self.async_get_traffic_report(batch)
+            except EbayAuthError:
+                raise
             except (EbayError, aiohttp.ClientError, TimeoutError):
                 partial_failure = True
                 continue
@@ -1066,13 +1090,15 @@ class EbayApiClient:
                             selling[item_id]["analytics_views_30d"] = views
                     if analytics_partial:
                         partial_failures.append("analytics_views")
+                except EbayAuthError:
+                    raise
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
                         "Optional analytics views failed: %s", type(exc).__name__
                     )
                     partial_failures.append("analytics_views")
 
-        api_warnings = list(self._api_warnings)
+        api_warnings = dedupe_trading_warnings(self._api_warnings)
         if api_warnings and "trading_warning" not in partial_failures:
             partial_failures.append("trading_warning")
 

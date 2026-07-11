@@ -12,12 +12,15 @@ import pytest
 
 from custom_components.ebay.api import (
     ANALYTICS_BATCH_SIZE,
+    API_WARNINGS_STATE_ATTR_MAX,
     EBAY_XML_NS,
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
     EbayParseError,
+    EbayPartialFailure,
     chunk_item_ids,
+    dedupe_trading_warnings,
     extract_trading_warnings,
     parse_ebay_time,
     parse_selling_container,
@@ -325,3 +328,80 @@ def test_extract_trading_warnings_skips_non_warning_severity() -> None:
     warnings = extract_trading_warnings(root)
     assert len(warnings) == 1
     assert warnings[0]["code"] == "2"
+
+
+def test_dedupe_trading_warnings_by_code_and_message() -> None:
+    warnings = [
+        {"code": "1", "short_message": "a", "long_message": "b"},
+        {"code": "1", "short_message": "a", "long_message": "b"},
+        {"code": "1", "short_message": "other", "long_message": "b"},
+        {"code": "2", "short_message": "a", "long_message": "b"},
+    ]
+    deduped = dedupe_trading_warnings(warnings)
+    assert len(deduped) == 3
+    assert [item["code"] for item in deduped] == ["1", "1", "2"]
+    assert API_WARNINGS_STATE_ATTR_MAX == 10
+
+
+def test_analytics_http_403_is_partial_failure() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(_Response(status=403, text="forbidden"))
+    with pytest.raises(EbayPartialFailure, match="analytics_views"):
+        asyncio.run(client.async_get_traffic_report(["1"]))
+    assert session.get.call_count == 1
+
+
+def test_analytics_http_400_is_partial_failure() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(_Response(status=400, text="bad request"))
+    with pytest.raises(EbayPartialFailure, match="analytics_views"):
+        asyncio.run(client.async_get_traffic_report(["1"]))
+    assert session.get.call_count == 1
+
+
+def test_analytics_http_401_retries_then_raises_auth_error() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(_Response(status=401, text="unauthorized"))
+    with pytest.raises(EbayAuthError, match="HTTP 401"):
+        asyncio.run(client.async_get_traffic_report(["1"]))
+    assert session.get.call_count == 2
+
+
+def test_analytics_http_401_then_successful_retry() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(side_effect=["stale", "fresh"])
+    session.get.side_effect = [
+        _Context(_Response(status=401, text="unauthorized")),
+        _Context(_Response(status=200, json_payload={"records": []})),
+    ]
+    assert asyncio.run(client.async_get_traffic_report(["1"])) == {"records": []}
+    assert session.get.call_count == 2
+
+
+def test_analytics_auth_error_propagates_from_batch_fetch() -> None:
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="c",
+                client_secret="s",
+                runame="r",
+                refresh_token="t",
+                site_id="0",
+            )
+
+        async def async_get_traffic_report(
+            self, item_ids: list[str]
+        ) -> dict[str, Any]:
+            raise EbayAuthError("analytics auth failed")
+
+    with pytest.raises(EbayAuthError, match="analytics auth failed"):
+        asyncio.run(Client().async_fetch_analytics_views(["1"]))
