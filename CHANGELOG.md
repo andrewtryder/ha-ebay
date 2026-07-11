@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2](https://github.com/andrewtryder/ha-ebay/compare/v0.3.1...v0.3.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* align release-please version handling ([dcc0679](https://github.com/andrewtryder/ha-ebay/commit/dcc06793af12bef9f37954ca2ae101374e7ecdc0))
+* align release-please version handling ([49ea289](https://github.com/andrewtryder/ha-ebay/commit/49ea289b5170c2952a2637cbd1cb479e9875b3a2))
+
 ## [0.3.1](https://github.com/andrewtryder/ha-ebay/compare/v0.3.0...v0.3.1) (2026-07-10)
 
 
