@@ -37,6 +37,8 @@ Run the fast local checks with:
 .venv/bin/python -m compileall custom_components
 ```
 
+Platforms under test include `sensor`, `event`, `calendar`, and `button`.
+
 `pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
 floor of 80%.
 
