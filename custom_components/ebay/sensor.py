@@ -8,7 +8,7 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -111,12 +111,32 @@ async def async_setup_entry(
 ) -> None:
     """Set up eBay sensors."""
     coordinator: EbayDataUpdateCoordinator = entry.runtime_data
+    known_item_ids: set[str] = set()
+
+    def _new_item_sensors() -> list["EbayItemSensor"]:
+        sensors: list[EbayItemSensor] = []
+        for sensor in _item_sensors(coordinator, entry):
+            unique_id = sensor.unique_id
+            if unique_id is None or unique_id in known_item_ids:
+                continue
+            known_item_ids.add(unique_id)
+            sensors.append(sensor)
+        return sensors
+
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
         for description in SUMMARY_SENSORS
     ]
-    entities.extend(_item_sensors(coordinator, entry))
+    entities.extend(_new_item_sensors())
     async_add_entities(entities)
+
+    @callback
+    def _handle_coordinator_update() -> None:
+        new_sensors = _new_item_sensors()
+        if new_sensors:
+            async_add_entities(new_sensors)
+
+    entry.async_on_unload(coordinator.async_add_listener(_handle_coordinator_update))
 
 
 def _item_sensors(
