@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 
 import pytest
 
@@ -10,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import Mock
 
-from custom_components.ebay.const import DEFAULT_OPTIONS
+from custom_components.ebay.const import DEFAULT_OPTIONS, RECENT_EVENTS_MAX
 from custom_components.ebay.coordinator import (
     EbayDataUpdateCoordinator,
     _normalized_end_time,
@@ -28,6 +29,12 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
     coordinator._price_drop_below_active = set()
+    coordinator._recent_events = {
+        "watching": deque(maxlen=RECENT_EVENTS_MAX),
+        "bidding": deque(maxlen=RECENT_EVENTS_MAX),
+        "selling": deque(maxlen=RECENT_EVENTS_MAX),
+    }
+    coordinator._recent_history_ending_soon = set()
     return coordinator
 
 

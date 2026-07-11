@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from collections import deque
 import logging
 import time
 from typing import Any, Callable
@@ -31,6 +32,9 @@ from .const import (
     DOMAIN,
     ENTITY_MODE_DETAILED,
     ENTITY_MODE_MINIMAL,
+    LEGACY_COMPATIBILITY_EVENT_TYPES,
+    RECENT_EVENTS_MAX,
+    TITLE_HISTORY_MAX_LEN,
 )
 from .options_parse import parse_price_targets, pinned_ids, to_decimal
 
@@ -74,12 +78,31 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fired_ending_soon: set[EndingSoonKey] = set()
         # Items currently at/below their effective drop threshold (no repeat events).
         self._price_drop_below_active: set[str] = set()
+        self._recent_events: dict[str, deque[dict[str, Any]]] = {
+            "watching": deque(maxlen=RECENT_EVENTS_MAX),
+            "bidding": deque(maxlen=RECENT_EVENTS_MAX),
+            "selling": deque(maxlen=RECENT_EVENTS_MAX),
+        }
+        # Ending-soon keys already recorded to history without an entity callback.
+        self._recent_history_ending_soon: set[EndingSoonKey] = set()
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_{entry.entry_id}",
             update_interval=timedelta(minutes=int(options[CONF_POLL_INTERVAL])),
         )
+
+    def recent_events(self, kind: str) -> list[dict[str, Any]]:
+        """Return newest-first recent activity for a kind."""
+        history = self._recent_events.get(kind)
+        if not history:
+            return []
+        return list(reversed(history))
+
+    @property
+    def scheduled_ending_soon_count(self) -> int:
+        """Return the number of scheduled ending-soon callbacks."""
+        return len(self._scheduled)
 
     @property
     def ending_soon_threshold_seconds(self) -> int:
@@ -199,12 +222,31 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self.selected_item_keys
 
     def _emit(
-        self, kind: str, event_type: str, item: dict[str, Any], **extra: Any
+        self,
+        kind: str,
+        event_type: str,
+        item: dict[str, Any],
+        *,
+        record_history: bool | None = None,
+        history_key: EndingSoonKey | None = None,
+        **extra: Any,
     ) -> bool:
+        """Emit an event to the entity callback and optionally record history.
+
+        Returns True when the EventEntity callback received the event. History is
+        recorded for canonical events even when no callback is registered.
+        """
+        if record_history is None:
+            record_history = event_type not in LEGACY_COMPATIBILITY_EVENT_TYPES
+        event_data = self._event_data(event_type, item, kind, extra)
+        if record_history:
+            if history_key is None or history_key not in self._recent_history_ending_soon:
+                self._append_recent_event(kind, event_data)
+                if history_key is not None:
+                    self._recent_history_ending_soon.add(history_key)
         callback_func = self._event_callbacks.get(kind)
         if not callback_func:
             return False
-        event_data = self._event_data(event_type, item, kind, extra)
         callback_func(event_type, event_data)
         _LOGGER.debug(
             "Emitted eBay event kind=%s event_type=%s item_id=%s",
@@ -213,6 +255,39 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             item.get("item_id"),
         )
         return True
+
+    def _append_recent_event(self, kind: str, event_data: dict[str, Any]) -> None:
+        """Append a bounded safe summary of a canonical event."""
+        history = self._recent_events.get(kind)
+        if history is None:
+            return
+        title = event_data.get("title")
+        if isinstance(title, str) and len(title) > TITLE_HISTORY_MAX_LEN:
+            title = title[: TITLE_HISTORY_MAX_LEN - 1] + "…"
+        entry = {
+            "event_type": event_data.get("event_type"),
+            "kind": event_data.get("kind"),
+            "item_id": event_data.get("item_id"),
+            "title": title,
+            "detected_at": event_data.get("detected_at"),
+            "price": event_data.get("price"),
+            "currency": event_data.get("currency"),
+            "end_time": event_data.get("end_time"),
+            "seconds_left": event_data.get("seconds_left"),
+            "url": event_data.get("url"),
+        }
+        for key in (
+            "old_value",
+            "new_value",
+            "threshold",
+            "threshold_currency",
+            "threshold_source",
+            "percent_change",
+            "direction",
+        ):
+            if key in event_data:
+                entry[key] = event_data[key]
+        history.append(entry)
 
     def _event_data(
         self,
@@ -555,6 +630,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 kind,
                                 event_type,
                                 _with_current_seconds_left(item, now),
+                                history_key=key,
                             ):
                                 self._fired_ending_soon.add(key)
                         else:
@@ -613,6 +689,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self._scheduled.pop(key)()
         self._fired_ending_soon.intersection_update(wanted)
+        self._recent_history_ending_soon.intersection_update(wanted)
 
     @callback
     def _scheduled_callback(
@@ -666,7 +743,12 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     scheduled_end_time,
                 )
                 return
-            if self._emit(kind, event_type, _with_current_seconds_left(item, now)):
+            if self._emit(
+                kind,
+                event_type,
+                _with_current_seconds_left(item, now),
+                history_key=key,
+            ):
                 self._fired_ending_soon.add(key)
 
         return fire

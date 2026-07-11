@@ -66,6 +66,7 @@ class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntit
 
     entity_description: EbayEventEntityDescription
     _attr_has_entity_name = True
+    _unrecorded_attributes = frozenset({"recent_events"})
 
     def __init__(
         self,
@@ -82,6 +83,15 @@ class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntit
             "manufacturer": "eBay",
         }
         self._unsubscribe_event_callback: CALLBACK_TYPE | None = None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return bounded recent activity for this kind only."""
+        return {
+            "recent_events": self.coordinator.recent_events(
+                self.entity_description.kind
+            )
+        }
 
     async def async_added_to_hass(self) -> None:
         """Register coordinator event callback once HA has added the entity."""

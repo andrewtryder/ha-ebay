@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from typing import Any
 from unittest.mock import Mock
 
-from custom_components.ebay.const import DEFAULT_OPTIONS, SELLING_EVENT_TYPES
+from custom_components.ebay.const import DEFAULT_OPTIONS, RECENT_EVENTS_MAX, SELLING_EVENT_TYPES
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 from custom_components.ebay.event import EbayActivityEvent, EVENTS, async_setup_entry
 
@@ -15,11 +16,18 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     entry = Mock(entry_id="entry-1")
     coordinator = object.__new__(EbayDataUpdateCoordinator)
     coordinator.entry = entry
-    coordinator.options = DEFAULT_OPTIONS
+    coordinator.options = dict(DEFAULT_OPTIONS)
     coordinator.data = None
     coordinator._event_callbacks = {}
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._price_drop_below_active = set()
+    coordinator._recent_events = {
+        "watching": deque(maxlen=RECENT_EVENTS_MAX),
+        "bidding": deque(maxlen=RECENT_EVENTS_MAX),
+        "selling": deque(maxlen=RECENT_EVENTS_MAX),
+    }
+    coordinator._recent_history_ending_soon = set()
     return coordinator
 
 
