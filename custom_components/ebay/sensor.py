@@ -268,11 +268,24 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
 
     @property
     def _item(self) -> dict[str, Any] | None:
+        if not self._is_selected:
+            return None
         return self.coordinator.data.get(self.kind, {}).get(self.item_id)
 
     @property
+    def _is_selected(self) -> bool:
+        selected = _select_item_entities(
+            self.coordinator.data,
+            self.coordinator.options[CONF_ENTITY_MODE],
+            int(self.coordinator.options[CONF_PER_ITEM_CAP]),
+            _pinned_ids(self.coordinator.options.get(CONF_PINNED_ITEM_IDS, "")),
+            self.coordinator.ending_soon_threshold_seconds,
+        )
+        return (self.kind, self.item_id) in selected
+
+    @property
     def available(self) -> bool:
-        """Return whether item still exists."""
+        """Return whether item is currently inside the capped selection."""
         return super().available and self._item is not None
 
     @property

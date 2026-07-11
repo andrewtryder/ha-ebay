@@ -114,7 +114,13 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     ) -> config_entries.ConfigFlowResult:
         """Collect eBay app settings."""
         if user_input is not None:
-            self._data = dict(user_input)
+            self._data, errors = _normalize_credentials(user_input)
+            if errors:
+                return self.async_show_form(
+                    step_id="credentials",
+                    data_schema=self._credentials_schema(self._data),
+                    errors=errors,
+                )
             await self.async_set_unique_id(
                 f"{self._data[CONF_ENVIRONMENT]}:{self._data[CONF_CLIENT_ID]}"
             )
@@ -247,13 +253,15 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                 ): vol.In(ENVIRONMENTS),
                 vol.Required(
                     CONF_CLIENT_ID, default=defaults.get(CONF_CLIENT_ID, "")
-                ): str,
-                vol.Required(CONF_CLIENT_SECRET, default=""): str,
-                vol.Required(CONF_RUNAME, default=defaults.get(CONF_RUNAME, "")): str,
+                ): _non_empty_string,
+                vol.Required(CONF_CLIENT_SECRET, default=""): _non_empty_string,
+                vol.Required(
+                    CONF_RUNAME, default=defaults.get(CONF_RUNAME, "")
+                ): _non_empty_string,
                 vol.Required(
                     CONF_SITE_ID,
                     default=defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID),
-                ): str,
+                ): _non_empty_string,
             }
         )
 
@@ -325,3 +333,31 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
+
+
+def _non_empty_string(value: Any) -> str:
+    """Return a stripped string, rejecting empty credential values."""
+    stripped = str(value).strip()
+    if not stripped:
+        raise vol.Invalid("required")
+    return stripped
+
+
+def _normalize_credentials(
+    user_input: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Normalize credential form input and report blank required fields."""
+    data = dict(user_input)
+    errors: dict[str, str] = {}
+    for field in (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_RUNAME,
+        CONF_SITE_ID,
+    ):
+        raw_value = data.get(field)
+        value = "" if raw_value is None else str(raw_value).strip()
+        data[field] = value
+        if not value:
+            errors[field] = "required"
+    return data, errors

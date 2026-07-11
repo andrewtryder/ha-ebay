@@ -10,8 +10,14 @@ from unittest.mock import Mock
 from custom_components.ebay.const import (
     DEFAULT_OPTIONS,
     ENTITY_MODE_BALANCED,
+    ENTITY_MODE_DETAILED,
 )
-from custom_components.ebay.sensor import ITEM_SENSOR_FIELDS, SUMMARY_SENSORS, async_setup_entry
+from custom_components.ebay.sensor import (
+    ITEM_SENSOR_FIELDS,
+    SUMMARY_SENSORS,
+    EbayItemSensor,
+    async_setup_entry,
+)
 
 
 def test_item_sensors_are_added_after_late_coordinator_data() -> None:
@@ -69,3 +75,50 @@ def test_item_sensors_are_added_after_late_coordinator_data() -> None:
         len(ITEM_SENSOR_FIELDS["selling"]),
     ]
     assert {sensor.item_id for sensor in added[1]} == {"123"}
+
+
+def test_item_sensor_availability_follows_current_cap_selection() -> None:
+    """Displaced per-item sensors should become unavailable while still present."""
+
+    class Coordinator:
+        options = {
+            **DEFAULT_OPTIONS,
+            "entity_mode": ENTITY_MODE_DETAILED,
+            "per_item_cap": 1,
+        }
+        last_update_success = True
+        ending_soon_threshold_seconds = 3600
+        data = {
+            "summary": {},
+            "selling": {},
+            "watched": {
+                "001": {"item_id": "001", "current_price": 10},
+            },
+            "bidding": {},
+            "last_successful_update": datetime.now(timezone.utc),
+        }
+
+        def async_add_listener(
+            self, update_callback: Callable[[], None], context: Any | None = None
+        ) -> Callable[[], None]:
+            return lambda: None
+
+    coordinator = Coordinator()
+    entry = Mock(entry_id="entry-1")
+    sensor = EbayItemSensor(
+        coordinator,
+        entry,
+        "watched",
+        "001",
+        "price",
+        "current_price",
+        None,
+    )
+
+    assert sensor.available is True
+    assert sensor.native_value == 10
+
+    coordinator.data["watched"]["000"] = {"item_id": "000", "current_price": 20}
+
+    assert sensor.available is False
+    assert sensor.native_value is None

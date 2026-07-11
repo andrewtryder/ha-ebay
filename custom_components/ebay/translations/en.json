@@ -51,7 +51,8 @@
     },
     "error": {
       "cannot_connect": "Could not exchange the authorization code with eBay.",
-      "invalid_state": "The callback URL state does not match this setup session."
+      "invalid_state": "The callback URL state does not match this setup session.",
+      "required": "This field is required."
     },
     "abort": {
       "oauth_failed": "Could not authorize with eBay.",

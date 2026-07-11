@@ -328,6 +328,64 @@ def test_credentials_form_has_expected_fields_and_defaults(
     assert fields[CONF_SITE_ID].default() == "0"
 
 
+def test_credentials_reject_blank_required_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blank app credentials are rejected before OAuth starts."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id=" ",
+                client_secret="\t",
+                runame="\n",
+                site_id=" ",
+            )
+        )
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {
+        CONF_CLIENT_ID: "required",
+        CONF_CLIENT_SECRET: "required",
+        CONF_RUNAME: "required",
+        CONF_SITE_ID: "required",
+    }
+
+
+def test_credentials_are_stripped_before_unique_id_and_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stored credentials and unique IDs use normalized form values."""
+    flow = _flow(monkeypatch)
+    unique_ids: list[str] = []
+
+    async def _record_unique_id(unique_id: str) -> None:
+        unique_ids.append(unique_id)
+
+    monkeypatch.setattr(flow, "async_set_unique_id", _record_unique_id)
+
+    result = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id=" client-id ",
+                client_secret=" client-secret ",
+                runame=" Example-Runame ",
+                site_id=" 0 ",
+            )
+        )
+    )
+
+    assert result["type"] == "external"
+    assert unique_ids == ["production:client-id"]
+    assert flow._data[CONF_CLIENT_ID] == "client-id"
+    assert flow._data[CONF_CLIENT_SECRET] == "client-secret"
+    assert flow._data[CONF_RUNAME] == "Example-Runame"
+    assert flow._data[CONF_SITE_ID] == "0"
+
+
 def test_manual_selection_reaches_credentials_then_manual_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

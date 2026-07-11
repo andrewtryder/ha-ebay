@@ -208,11 +208,16 @@ def _to_bool(value: Any) -> bool | None:
 
 def _total_pages(root: ET.Element, container_name: str | None = None) -> int:
     """Parse PaginationResult.TotalNumberOfPages, capped for safety."""
+    return min(_reported_total_pages(root, container_name), MAX_PAGES)
+
+
+def _reported_total_pages(root: ET.Element, container_name: str | None = None) -> int:
+    """Parse PaginationResult.TotalNumberOfPages without applying local caps."""
     parent = root.find(f"e:{container_name}", namespaces=NS) if container_name else root
     total = _to_int(_text(parent, "e:PaginationResult/e:TotalNumberOfPages"))
     if total is None or total < 1:
         return 1
-    return min(total, MAX_PAGES)
+    return total
 
 
 def _auth_like_error(root: ET.Element) -> bool:
@@ -852,53 +857,67 @@ class EbayApiClient:
 
     async def _fetch_buying_pages(
         self,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], bool]:
         """Fetch all configured buying pages up to MAX_PAGES."""
         watched_items: list[dict[str, Any]] = []
         bidding_items: list[dict[str, Any]] = []
         page = 1
         total_pages = 1
+        truncated = False
         while page <= total_pages:
             root = await self.async_call_trading_api(
                 READ_ONLY_CALL_NAME, build_get_my_ebay_buying_xml(page=page)
             )
             watched_items.extend(parse_container(root, "WatchList", "watched"))
             bidding_items.extend(parse_container(root, "BidList", "bidding"))
+            watch_pages = _reported_total_pages(root, "WatchList")
+            bid_pages = _reported_total_pages(root, "BidList")
+            truncated = truncated or watch_pages > MAX_PAGES or bid_pages > MAX_PAGES
             total_pages = max(
                 total_pages,
-                _total_pages(root, "WatchList"),
-                _total_pages(root, "BidList"),
+                min(watch_pages, MAX_PAGES),
+                min(bid_pages, MAX_PAGES),
             )
             page += 1
-        return _dict_by_item_id(watched_items), _dict_by_item_id(bidding_items)
+        return (
+            _dict_by_item_id(watched_items),
+            _dict_by_item_id(bidding_items),
+            truncated,
+        )
 
-    async def _fetch_selling_pages(self) -> dict[str, dict[str, Any]]:
+    async def _fetch_selling_pages(self) -> tuple[dict[str, dict[str, Any]], bool]:
         """Fetch active selling pages up to MAX_PAGES."""
         selling_items: list[dict[str, Any]] = []
         page = 1
         total_pages = 1
+        truncated = False
         while page <= total_pages:
             root = await self.async_call_trading_api(
                 SELLING_CALL_NAME, build_get_my_ebay_selling_xml(page=page)
             )
             selling_items.extend(parse_selling_container(root))
-            total_pages = max(total_pages, _total_pages(root, "ActiveList"))
+            active_pages = _reported_total_pages(root, "ActiveList")
+            truncated = truncated or active_pages > MAX_PAGES
+            total_pages = max(total_pages, min(active_pages, MAX_PAGES))
             page += 1
-        return _dict_by_item_id(selling_items)
+        return _dict_by_item_id(selling_items), truncated
 
-    async def _fetch_seller_list_views(self) -> dict[str, int]:
+    async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
         """Fetch GetSellerList view counts across pages up to MAX_PAGES."""
         views: dict[str, int] = {}
         page = 1
         total_pages = 1
+        truncated = False
         while page <= total_pages:
             root = await self.async_call_trading_api(
                 SELLER_LIST_CALL_NAME, build_get_seller_list_xml(page=page)
             )
             views.update(seller_list_views_by_item_id(root))
-            total_pages = max(total_pages, _total_pages(root))
+            seller_list_pages = _reported_total_pages(root)
+            truncated = truncated or seller_list_pages > MAX_PAGES
+            total_pages = max(total_pages, min(seller_list_pages, MAX_PAGES))
             page += 1
-        return views
+        return views, truncated
 
     async def async_fetch_data(
         self,
@@ -915,14 +934,23 @@ class EbayApiClient:
         selling: dict[str, dict[str, Any]] = {}
 
         if buying_enabled:
-            watched, bidding = await self._fetch_buying_pages()
+            watched, bidding, buying_truncated = await self._fetch_buying_pages()
+            if buying_truncated:
+                partial_failures.append("buying_truncated")
 
         if selling_enabled:
-            selling = await self._fetch_selling_pages()
+            selling, selling_truncated = await self._fetch_selling_pages()
+            if selling_truncated:
+                partial_failures.append("selling_truncated")
             try:
-                for item_id, views in (await self._fetch_seller_list_views()).items():
+                seller_list_views, seller_list_truncated = (
+                    await self._fetch_seller_list_views()
+                )
+                for item_id, views in seller_list_views.items():
                     if item_id in selling:
                         selling[item_id]["views"] = views
+                if seller_list_truncated:
+                    partial_failures.append("seller_list_views_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug(
                     "Optional GetSellerList views failed: %s", type(exc).__name__

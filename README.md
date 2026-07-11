@@ -154,6 +154,7 @@ Watching event types:
 - `watched_item_price_changed`
 - `watched_item_bid_count_changed`
 - `watched_item_ended`
+- `watched_item_disappeared_unknown`
 
 Bidding event types:
 
@@ -161,6 +162,7 @@ Bidding event types:
 - `winning`
 - `bidding_item_ending_soon`
 - `bid_item_ended`
+- `bid_item_disappeared_unknown`
 
 Event data includes item ID, title, kind, old/new values where relevant, price, currency, end time, seconds left, URL, image, and detection timestamp.
 
