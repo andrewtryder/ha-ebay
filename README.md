@@ -110,6 +110,9 @@ state.
 - Per-item entity mode: `minimal`, `balanced`, or `detailed`
 - Per-item entity cap: 25, 50, 100, or 250
 - Pinned item IDs
+- Pinned item price-drop targets (one per line: `item_id=amount CURRENCY`; IDs must also be pinned)
+- Minimum watched price change percent: default `0` (any numeric change)
+- Global watched price-drop threshold and currency (blank = disabled; currency-safe comparisons only)
 - Enable/disable buying/watch data
 - Enable/disable selling data
 - Enable/disable Sell Analytics 30-day views enrichment
@@ -117,6 +120,9 @@ state.
 Authorization always requests the base eBay API scope and `sell.analytics.readonly`.
 Disabling Analytics in options stops enrichment requests but does not remove the
 granted OAuth scope.
+
+After installing or updating the custom-component Python code through HACS, perform a
+full Home Assistant restart before expecting new platforms or event behavior.
 
 ## Summary Sensors
 
@@ -135,16 +141,53 @@ Always-created sensors:
 
 Attributes contain bounded context such as items ending soon, items with offers, items with bids, items with questions, highest watcher/view items, update timestamps, partial failure categories, truncated collections, and Trading API warnings.
 
+## Diagnostic Health Sensors
+
+These entities are created disabled by default (`EntityCategory.DIAGNOSTIC`):
+
+- Last successful update
+- Partial failure count
+- Truncated collection count
+- API warning count
+- Last refresh duration
+- Last refresh result (`unknown`, `success`, `partial`, `error`, `auth_error`)
+- Scheduled ending-soon timer count
+
+Enable them from the entity registry when troubleshooting. They never expose tokens,
+credentials, or raw exception text.
+
+## Manual Refresh
+
+- `button.ebay_refresh` requests a coordinator refresh
+- Presses are rate-limited (60 second cooldown) and ignored while a refresh is already running
+- Refresh failures still follow the coordinator auth/update error path
+
+## Calendars
+
+Fixed calendars use already-fetched polling data (no extra eBay API calls):
+
+- `calendar.ebay_watched_items`
+- `calendar.ebay_bidding_items`
+- `calendar.ebay_selling_items`
+
+Each entry is a short marker beginning at the listing end time. Watched/bidding calendars are unavailable when buying data is disabled; the selling calendar is unavailable when selling data is disabled.
+
 ## Event Entities
 
-Fixed event entities:
+Fixed event entities remain `Unknown` until their first actual detected event:
 
 - `event.ebay_selling_activity`
 - `event.ebay_watching_activity`
 - `event.ebay_bidding_activity`
 
+Each event entity exposes a bounded `recent_events` attribute for its own kind
+(newest first, max 20, memory-only, resets on Home Assistant restart or integration
+reload). The attribute is excluded from recorder history when Home Assistant supports
+unrecorded attributes.
+
 Selling event types:
 
+- `selling_item_added`
 - `bid_count_increased`
 - `offer_received`
 - `question_received`
@@ -154,21 +197,53 @@ Selling event types:
 
 Watching event types:
 
+- `watched_item_added`
+- `watched_item_removed` (declared for forward compatibility; not emitted yet)
 - `watched_item_ending_soon`
-- `watched_item_price_changed`
-- `watched_item_bid_count_changed`
+- `watched_item_price_changed` (legacy compatibility)
+- `watched_item_price_increased`
+- `watched_item_price_decreased`
+- `watched_item_price_dropped_below`
+- `watched_item_bid_count_changed` (legacy compatibility)
+- `watched_item_bid_count_increased`
 - `watched_item_ended`
 - `watched_item_disappeared_unknown`
 
 Bidding event types:
 
+- `bid_item_added`
 - `outbid`
 - `winning`
 - `bidding_item_ending_soon`
 - `bid_item_ended`
 - `bid_item_disappeared_unknown`
 
-Event data includes item ID, title, kind, old/new values where relevant, price, currency, end time, seconds left, URL, image, and detection timestamp.
+### Event semantics
+
+- The first successful poll after startup, reload, options reload, or reauthorization
+  establishes a baseline and emits **no** transition/added events.
+- Added events fire only after that baseline, and only when both previous and current
+  collections are complete (not truncated).
+- Failed refreshes do not reset the baseline.
+- `watched_item_ended` / `bid_item_ended` require the item to still be present with
+  confirmed `seconds_left == 0`.
+- Active watched-item disappearance emits `watched_item_disappeared_unknown`. The
+  current WatchList APIs do not provide affirmative evidence of a manual unwatch, so
+  `watched_item_removed` is not emitted.
+- For watched price changes, the integration emits the legacy
+  `watched_item_price_changed` event first, then the canonical directional event. The
+  EventEntity final state is the directional event. Recent-activity history records
+  only the canonical directional event. Existing automations listening for
+  `watched_item_price_changed` continue to work. Bid-count changes follow the same
+  pattern with `watched_item_bid_count_changed` then `watched_item_bid_count_increased`
+  (increases only for the canonical type).
+- Price-drop-below events fire only on a crossing (above → at/below the effective
+  threshold). Per-item pinned targets override the global threshold. Currency must
+  match; mismatched currencies are never compared.
+
+Event data includes item ID, title, kind, old/new values where relevant, price,
+currency, threshold fields for drop-below events, end time, seconds left, URL, image,
+and detection timestamp.
 
 ## Optional Per-item Entities
 
@@ -256,6 +331,25 @@ actions:
     data:
       message: "You were outbid on {{ trigger.to_state.attributes.title }}."
 ```
+
+Notify when a watched item price drops (canonical directional event):
+
+```yaml
+alias: eBay watched price decreased
+triggers:
+  - trigger: state
+    entity_id: event.ebay_watching_activity
+conditions:
+  - condition: template
+    value_template: "{{ trigger.to_state.attributes.event_type == 'watched_item_price_decreased' }}"
+actions:
+  - action: notify.notify
+    data:
+      message: "{{ trigger.to_state.attributes.title }} dropped to {{ trigger.to_state.attributes.new_value }} {{ trigger.to_state.attributes.currency }}."
+```
+
+Legacy automations that listen for `watched_item_price_changed` continue to work;
+prefer the directional types for new automations.
 
 ## Troubleshooting
 

@@ -19,14 +19,19 @@ from .const import (
     CONF_ENVIRONMENT,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
+    CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     CONF_SELLING_ENABLED,
     CONF_SITE_ID,
+    CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
+    CONF_WATCHED_PRICE_DROP_CURRENCY,
+    CONF_WATCHED_PRICE_DROP_THRESHOLD,
     DOMAIN,
 )
 from .coordinator import EbayDataUpdateCoordinator
+from .options_parse import pinned_ids
 
 TO_REDACT = {
     CONF_CLIENT_ID,
@@ -65,13 +70,21 @@ async def async_get_config_entry_diagnostics(
         "entity_mode": options.get(CONF_ENTITY_MODE),
         "per_item_cap": options.get(CONF_PER_ITEM_CAP),
         "pinned_item_ids_count": len(
+            pinned_ids(str(options.get(CONF_PINNED_ITEM_IDS, "")))
+        ),
+        "pinned_item_price_targets_count": len(
             [
-                part
-                for part in str(options.get(CONF_PINNED_ITEM_IDS, ""))
-                .replace("\n", ",")
-                .split(",")
-                if part.strip()
+                line
+                for line in str(options.get(CONF_PINNED_ITEM_PRICE_TARGETS, "")).splitlines()
+                if line.strip()
             ]
+        ),
+        "watched_price_change_min_percent": options.get(
+            CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT
+        ),
+        "watched_price_drop_configured": bool(
+            str(options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, "")).strip()
+            and str(options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, "")).strip()
         ),
         "counts": {
             "watched": len(data.get("watched", {})),
@@ -79,10 +92,16 @@ async def async_get_config_entry_diagnostics(
             "selling": len(data.get("selling", {})),
         },
         "last_successful_update": summary.get("last_successful_update"),
+        "last_attempt_at": coordinator.last_attempt_at.isoformat()
+        if coordinator.last_attempt_at
+        else None,
+        "last_refresh_duration_seconds": coordinator.last_refresh_duration_seconds,
+        "last_refresh_result": coordinator.last_refresh_result,
         "last_error_category": coordinator.last_error_category,
         "partial_failure_categories": data.get("partial_failures", []),
         "truncated_collections": data.get("truncated_collections", {}),
         "api_warnings": data.get("api_warnings", []),
+        "scheduled_ending_soon_timer_count": coordinator.scheduled_ending_soon_count,
         "redacted": sorted(TO_REDACT),
     }
 

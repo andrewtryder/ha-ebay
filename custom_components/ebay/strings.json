@@ -71,14 +71,29 @@
           "entity_mode": "Per-item entity mode",
           "per_item_cap": "Tracked item cap",
           "pinned_item_ids": "Pinned item IDs",
+          "pinned_item_price_targets": "Pinned item price-drop targets",
+          "watched_price_change_min_percent": "Minimum watched price change percent",
+          "watched_price_drop_threshold": "Global watched price-drop threshold",
+          "watched_price_drop_currency": "Global watched price-drop currency",
           "analytics_enabled": "Enable Sell Analytics 30-day views",
           "buying_enabled": "Enable buying and watch data",
           "selling_enabled": "Enable selling data"
         },
         "data_description": {
-          "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type."
+          "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
+          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY. Item IDs must also appear in pinned item IDs. Per-item targets override the global threshold.",
+          "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change.",
+          "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency.",
+          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD)."
         }
       }
+    },
+    "error": {
+      "invalid": "Enter a valid nonnegative number.",
+      "required": "This field is required.",
+      "invalid_price_target": "Each line must be item_id=amount CURRENCY with a nonnegative amount.",
+      "duplicate_price_target": "Each pinned item ID may appear only once in price targets.",
+      "target_not_pinned": "Price target item IDs must also be listed in pinned item IDs."
     }
   },
   "entity": {
@@ -112,6 +127,27 @@
       },
       "selling_ending_soon": {
         "name": "Selling ending soon"
+      },
+      "last_successful_update": {
+        "name": "Last successful update"
+      },
+      "partial_failure_count": {
+        "name": "Partial failure count"
+      },
+      "truncated_collection_count": {
+        "name": "Truncated collection count"
+      },
+      "api_warning_count": {
+        "name": "API warning count"
+      },
+      "last_refresh_duration": {
+        "name": "Last refresh duration"
+      },
+      "last_refresh_result": {
+        "name": "Last refresh result"
+      },
+      "scheduled_ending_soon_timer_count": {
+        "name": "Scheduled ending-soon timer count"
       }
     },
     "event": {
@@ -123,6 +159,22 @@
       },
       "bidding_activity": {
         "name": "Bidding activity"
+      }
+    },
+    "calendar": {
+      "watched_items": {
+        "name": "Watched items"
+      },
+      "bidding_items": {
+        "name": "Bidding items"
+      },
+      "selling_items": {
+        "name": "Selling items"
+      }
+    },
+    "button": {
+      "refresh": {
+        "name": "Refresh"
       }
     }
   }
