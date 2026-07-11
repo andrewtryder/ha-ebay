@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 import xml.etree.ElementTree as ET
@@ -19,6 +20,8 @@ from custom_components.ebay.api import (
     EbayAuthError,
     EbayParseError,
     EbayPartialFailure,
+    BEST_OFFERS_CALL_NAME,
+    build_get_my_ebay_buying_xml,
     chunk_item_ids,
     dedupe_trading_warnings,
     extract_trading_warnings,
@@ -107,9 +110,7 @@ def test_analytics_batching_zero_one_and_multiple() -> None:
             )
             self.calls: list[list[str]] = []
 
-        async def async_get_traffic_report(
-            self, item_ids: list[str]
-        ) -> dict[str, Any]:
+        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
             self.calls.append(list(item_ids))
             return {
                 "records": [
@@ -149,9 +150,7 @@ def test_analytics_partial_intermediate_batch_failure_keeps_successes() -> None:
             )
             self.calls = 0
 
-        async def async_get_traffic_report(
-            self, item_ids: list[str]
-        ) -> dict[str, Any]:
+        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
             self.calls += 1
             if self.calls == 2:
                 raise EbayApiError("batch failed")
@@ -171,6 +170,76 @@ def test_analytics_partial_intermediate_batch_failure_keeps_successes() -> None:
     assert views["0"] == 10
     assert "100" not in views
     assert views.get("200") == 30
+
+
+def test_analytics_batch_failure_debug_log_includes_batch_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.api")
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="c",
+                client_secret="s",
+                runame="r",
+                refresh_token="t",
+                site_id="0",
+            )
+
+        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
+            raise EbayApiError("eBay Sell Analytics failed with HTTP 500")
+
+    views, partial = asyncio.run(Client().async_fetch_analytics_views(["1", "2"]))
+
+    assert views == {}
+    assert partial is True
+    assert "Sell Analytics batch failed batch=1 item_count=2" in caplog.text
+    assert "EbayApiError: eBay Sell Analytics failed with HTTP 500" in caplog.text
+
+
+def test_optional_failure_debug_log_includes_safe_exception_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.api")
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="c",
+                client_secret="s",
+                runame="r",
+                refresh_token="t",
+                site_id="0",
+            )
+
+        async def _fetch_selling_pages(self) -> tuple[dict[str, dict[str, Any]], bool]:
+            return {}, False
+
+        async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
+            return {}, False
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            assert call_name == BEST_OFFERS_CALL_NAME
+            raise EbayApiError("eBay Trading API returned Ack='Failure'")
+
+    asyncio.run(
+        Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+    )
+
+    assert "Optional GetBestOffers failed error=EbayApiError" in caplog.text
+    assert "Ack='Failure'" in caplog.text
 
 
 def test_trading_api_ack_warning_extracts_sanitized_warnings() -> None:
@@ -193,6 +262,56 @@ def test_trading_api_ack_warning_extracts_sanitized_warnings() -> None:
     assert _text_ack(root) == "Warning"
     assert client._api_warnings[0]["code"] == "21917053"
     assert client._api_warnings[0]["long_message"] == "[redacted]"
+
+
+def test_trading_api_debug_log_includes_safe_call_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.api")
+    xml = f"""
+    <GetMyeBayBuyingResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Success</Ack>
+      <WatchList/>
+    </GetMyeBayBuyingResponse>
+    """
+    session = Mock()
+    session.post.return_value = _Context(_Response(status=200, text=xml))
+    client = _client(session)
+
+    asyncio.run(
+        client.async_call_trading_api(
+            "GetMyeBayBuying", build_get_my_ebay_buying_xml(page=2)
+        )
+    )
+
+    assert (
+        "Trading API call completed call=GetMyeBayBuying page=2 status=200"
+        in caplog.text
+    )
+    assert "ack=Success" in caplog.text
+    assert "duration_ms=" in caplog.text
+
+
+def test_trading_api_debug_log_includes_ack_failure_without_body(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.api")
+    xml = f"""
+    <GetMyeBayBuyingResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Failure</Ack>
+      <Errors><ErrorCode>1</ErrorCode><ShortMessage>Something else</ShortMessage></Errors>
+    </GetMyeBayBuyingResponse>
+    """
+    session = Mock()
+    session.post.return_value = _Context(_Response(status=200, text=xml))
+    client = _client(session)
+
+    with pytest.raises(EbayApiError):
+        asyncio.run(client.async_call_trading_api("GetMyeBayBuying", "<xml/>"))
+
+    assert "Trading API call failed call=GetMyeBayBuying" in caplog.text
+    assert "ack=Failure" in caplog.text
+    assert "Something else" not in caplog.text
 
 
 def _text_ack(root: ET.Element) -> str | None:
@@ -294,7 +413,9 @@ def test_malformed_fields_and_missing_containers() -> None:
     assert _to_float("x") is None
     assert _to_bool("maybe") is None
     assert parse_ebay_time("not-a-time") is None
-    root = _root(f'<GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}"><Ack>Success</Ack></GetMyeBaySellingResponse>')
+    root = _root(
+        f'<GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}"><Ack>Success</Ack></GetMyeBaySellingResponse>'
+    )
     assert parse_selling_container(root) == []
 
 
@@ -398,9 +519,7 @@ def test_analytics_auth_error_propagates_from_batch_fetch() -> None:
                 site_id="0",
             )
 
-        async def async_get_traffic_report(
-            self, item_ids: list[str]
-        ) -> dict[str, Any]:
+        async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
             raise EbayAuthError("analytics auth failed")
 
     with pytest.raises(EbayAuthError, match="analytics auth failed"):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from .const import (
@@ -24,6 +25,8 @@ from .oauth2 import (
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -79,7 +82,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate config entries to the current schema and entity unique IDs."""
     if entry.version > 3:
+        _LOGGER.debug(
+            "Rejecting eBay config entry migration entry_id=%s version=%s",
+            entry.entry_id,
+            entry.version,
+        )
         return False
+
+    original_version = entry.version
+    _LOGGER.debug(
+        "Starting eBay config entry migration entry_id=%s from_version=%s",
+        entry.entry_id,
+        original_version,
+    )
 
     if entry.version < 2:
         data = dict(entry.data)
@@ -91,27 +106,52 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 data["token"] = legacy_token_from_refresh_token(refresh_token)
         hass.config_entries.async_update_entry(entry, data=data, version=2)
+        _LOGGER.debug(
+            "Migrated eBay config entry token schema entry_id=%s to_version=2",
+            entry.entry_id,
+        )
 
+    renamed_count = 0
     if entry.version < 3:
-        await _async_migrate_renamed_sensor_unique_ids(hass, entry)
+        renamed_count = await _async_migrate_renamed_sensor_unique_ids(hass, entry)
         hass.config_entries.async_update_entry(entry, version=3)
+        _LOGGER.debug(
+            "Migrated eBay config entry sensor unique IDs entry_id=%s renamed_count=%s to_version=3",
+            entry.entry_id,
+            renamed_count,
+        )
+
+    _LOGGER.debug(
+        "Completed eBay config entry migration entry_id=%s from_version=%s to_version=%s renamed_count=%s",
+        entry.entry_id,
+        original_version,
+        entry.version,
+        renamed_count,
+    )
 
     return True
 
 
 async def _async_migrate_renamed_sensor_unique_ids(
     hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+) -> int:
     """Rename summary and per-item sensor unique IDs introduced before release."""
     from homeassistant.helpers import entity_registry as er
 
+    renamed_count = 0
+
     def _update_unique_id(entity_entry: er.RegistryEntry) -> dict[str, str] | None:
-        new_unique_id = _renamed_sensor_unique_id(entry.entry_id, entity_entry.unique_id)
+        nonlocal renamed_count
+        new_unique_id = _renamed_sensor_unique_id(
+            entry.entry_id, entity_entry.unique_id
+        )
         if new_unique_id is None:
             return None
+        renamed_count += 1
         return {"new_unique_id": new_unique_id}
 
     await er.async_migrate_entries(hass, entry.entry_id, _update_unique_id)
+    return renamed_count
 
 
 def _renamed_sensor_unique_id(entry_id: str, unique_id: str) -> str | None:

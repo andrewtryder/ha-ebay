@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import logging
+import time
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -39,6 +40,11 @@ COLLECTION_BY_EVENT_KIND = {
 }
 
 _BASELINE_COLLECTIONS = ("watched", "bidding", "selling")
+
+
+def _duration_ms(start: float) -> float:
+    """Return elapsed monotonic time in milliseconds."""
+    return (time.monotonic() - start) * 1000
 
 
 class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -89,18 +95,40 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data and detect events."""
+        start = time.monotonic()
+        buying_enabled = bool(self.options[CONF_BUYING_ENABLED])
+        selling_enabled = bool(self.options[CONF_SELLING_ENABLED])
+        analytics_enabled = bool(self.options[CONF_ANALYTICS_ENABLED])
+        _LOGGER.debug(
+            "eBay coordinator refresh started entry_id=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s",
+            self.entry.entry_id,
+            buying_enabled,
+            selling_enabled,
+            analytics_enabled,
+        )
         try:
             payload = await self.api.async_fetch_data(
-                buying_enabled=bool(self.options[CONF_BUYING_ENABLED]),
-                selling_enabled=bool(self.options[CONF_SELLING_ENABLED]),
-                analytics_enabled=bool(self.options[CONF_ANALYTICS_ENABLED]),
+                buying_enabled=buying_enabled,
+                selling_enabled=selling_enabled,
+                analytics_enabled=analytics_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
             )
         except EbayAuthError as exc:
             self.last_error_category = "auth"
+            _LOGGER.debug(
+                "eBay coordinator refresh auth failed entry_id=%s duration_ms=%.1f",
+                self.entry.entry_id,
+                _duration_ms(start),
+            )
             raise ConfigEntryAuthFailed("eBay authentication failed") from exc
         except EbayError as exc:
             self.last_error_category = type(exc).__name__
+            _LOGGER.debug(
+                "eBay coordinator refresh failed entry_id=%s error=%s duration_ms=%.1f",
+                self.entry.entry_id,
+                type(exc).__name__,
+                _duration_ms(start),
+            )
             raise UpdateFailed(f"eBay update failed: {type(exc).__name__}") from exc
 
         payload["summary"]["last_update"] = payload["last_update"].isoformat()
@@ -119,6 +147,16 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rebuild_ending_soon_timers(payload)
         self.previous_payload = _baseline_payload(self.previous_payload, payload)
         self.refresh_selected_item_keys(payload)
+        _LOGGER.debug(
+            "eBay coordinator refresh completed entry_id=%s watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
+            self.entry.entry_id,
+            len(payload["watched"]),
+            len(payload["bidding"]),
+            len(payload["selling"]),
+            payload["partial_failures"],
+            payload.get("truncated_collections", {}),
+            _duration_ms(start),
+        )
         return payload
 
     def refresh_selected_item_keys(
@@ -129,6 +167,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         mode = self.options[CONF_ENTITY_MODE]
         if mode == ENTITY_MODE_MINIMAL or not payload:
             self.selected_item_keys = set()
+            _LOGGER.debug(
+                "Selected eBay item entities refreshed entry_id=%s mode=%s selected_count=0",
+                self.entry.entry_id,
+                mode,
+            )
             return self.selected_item_keys
         selected = _select_item_entities(
             payload,
@@ -138,6 +181,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.ending_soon_threshold_seconds,
         )
         self.selected_item_keys = set(selected)
+        _LOGGER.debug(
+            "Selected eBay item entities refreshed entry_id=%s mode=%s selected_count=%s cap=%s",
+            self.entry.entry_id,
+            mode,
+            len(self.selected_item_keys),
+            int(self.options[CONF_PER_ITEM_CAP]),
+        )
         return self.selected_item_keys
 
     def _emit(
@@ -148,6 +198,12 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         event_data = self._event_data(event_type, item, kind, extra)
         callback_func(event_type, event_data)
+        _LOGGER.debug(
+            "Emitted eBay event kind=%s event_type=%s item_id=%s",
+            kind,
+            event_type,
+            item.get("item_id"),
+        )
         return True
 
     def _event_data(
@@ -324,16 +380,51 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if fire_at <= now:
                     if _is_active_ending_soon(item, threshold, now):
                         if key not in self._fired_ending_soon:
+                            _LOGGER.debug(
+                                "Firing eBay ending-soon timer immediately kind=%s item_id=%s threshold=%s end_time=%s",
+                                kind,
+                                item_id,
+                                threshold,
+                                normalized_end_time,
+                            )
                             if self._emit(
                                 kind,
                                 event_type,
                                 _with_current_seconds_left(item, now),
                             ):
                                 self._fired_ending_soon.add(key)
+                        else:
+                            _LOGGER.debug(
+                                "Skipping already-fired eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s",
+                                kind,
+                                item_id,
+                                threshold,
+                                normalized_end_time,
+                            )
                         continue
                     fire_at = now
                 if key in self._scheduled:
                     continue
+                if any(
+                    scheduled_key[:4] == key[:4] and scheduled_key != key
+                    for scheduled_key in self._scheduled
+                ):
+                    _LOGGER.debug(
+                        "Rescheduling eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s",
+                        kind,
+                        item_id,
+                        threshold,
+                        normalized_end_time,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Scheduling eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s fire_at=%s",
+                        kind,
+                        item_id,
+                        threshold,
+                        normalized_end_time,
+                        fire_at.isoformat(),
+                    )
                 self._scheduled[key] = async_track_point_in_utc_time(
                     self.hass,
                     self._scheduled_callback(
@@ -348,6 +439,14 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         for key in list(self._scheduled):
             if key not in wanted:
+                _, kind, item_id, threshold, normalized_end_time = key
+                _LOGGER.debug(
+                    "Cancelling eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s",
+                    kind,
+                    item_id,
+                    threshold,
+                    normalized_end_time,
+                )
                 self._scheduled.pop(key)()
         self._fired_ending_soon.intersection_update(wanted)
 
@@ -363,7 +462,19 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         @callback
         def fire(now: datetime) -> None:
             self._scheduled.pop(key, None)
+            _LOGGER.debug(
+                "Firing scheduled eBay ending-soon timer kind=%s item_id=%s end_time=%s",
+                kind,
+                item_id,
+                scheduled_end_time,
+            )
             if key in self._fired_ending_soon:
+                _LOGGER.debug(
+                    "Skipping already-fired scheduled eBay ending-soon timer kind=%s item_id=%s end_time=%s",
+                    kind,
+                    item_id,
+                    scheduled_end_time,
+                )
                 return
             item = (
                 (self.data or {}).get(COLLECTION_BY_EVENT_KIND[kind], {}).get(item_id)
@@ -374,10 +485,22 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 or not isinstance(end_time, datetime)
                 or _normalized_end_time(end_time) != scheduled_end_time
             ):
+                _LOGGER.debug(
+                    "Skipping stale eBay ending-soon timer kind=%s item_id=%s end_time=%s",
+                    kind,
+                    item_id,
+                    scheduled_end_time,
+                )
                 return
             if not _is_active_ending_soon(
                 item, self.ending_soon_threshold_seconds, now
             ):
+                _LOGGER.debug(
+                    "Skipping inactive eBay ending-soon timer kind=%s item_id=%s end_time=%s",
+                    kind,
+                    item_id,
+                    scheduled_end_time,
+                )
                 return
             if self._emit(kind, event_type, _with_current_seconds_left(item, now)):
                 self._fired_ending_soon.add(key)
@@ -386,7 +509,15 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def cancel_scheduled_events(self) -> None:
         """Cancel scheduled ending-soon callbacks."""
-        for cancel in self._scheduled.values():
+        for key, cancel in list(self._scheduled.items()):
+            _, kind, item_id, threshold, normalized_end_time = key
+            _LOGGER.debug(
+                "Cancelling eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s",
+                kind,
+                item_id,
+                threshold,
+                normalized_end_time,
+            )
             cancel()
         self._scheduled.clear()
 
@@ -423,7 +554,9 @@ def _collection_truncated(
 
 
 def _pinned_ids(value: str) -> set[str]:
-    return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
+    return {
+        part.strip() for part in value.replace("\n", ",").split(",") if part.strip()
+    }
 
 
 def _select_item_entities(
@@ -468,9 +601,7 @@ def _was_running(item: dict[str, Any]) -> bool:
     return seconds_left is not None and seconds_left > 0
 
 
-def _is_active_ending_soon(
-    item: dict[str, Any], threshold: int, now: datetime
-) -> bool:
+def _is_active_ending_soon(item: dict[str, Any], threshold: int, now: datetime) -> bool:
     """Return whether an item is still active and inside the ending-soon window."""
     end_time = item.get("end_time")
     if not isinstance(end_time, datetime):
@@ -479,9 +610,7 @@ def _is_active_ending_soon(
     return 0 < seconds_left <= threshold
 
 
-def _with_current_seconds_left(
-    item: dict[str, Any], now: datetime
-) -> dict[str, Any]:
+def _with_current_seconds_left(item: dict[str, Any], now: datetime) -> dict[str, Any]:
     """Return event item data with seconds_left calculated for the emission time."""
     end_time = item.get("end_time")
     if not isinstance(end_time, datetime):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -67,7 +68,10 @@ def test_other_ebay_failure_becomes_update_failed() -> None:
     assert events == []
 
 
-def test_successful_update_clears_last_error_and_sets_baseline() -> None:
+def test_successful_update_clears_last_error_and_sets_baseline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     now = datetime.now(timezone.utc)
     payload = {
         "selling": {"s1": {"item_id": "s1", "bid_count": 1}},
@@ -97,6 +101,10 @@ def test_successful_update_clears_last_error_and_sets_baseline() -> None:
     assert coordinator.last_error_category is None
     assert coordinator.previous_payload is not None
     assert coordinator.previous_payload["selling"] == payload["selling"]
+    assert "eBay coordinator refresh started entry_id=entry-1" in caplog.text
+    assert "eBay coordinator refresh completed entry_id=entry-1" in caplog.text
+    assert "watched_count=0 bidding_count=0 selling_count=1" in caplog.text
+    assert "duration_ms=" in caplog.text
 
 
 def test_summary_api_warnings_are_capped_for_state_attributes() -> None:
@@ -128,18 +136,26 @@ def test_summary_api_warnings_are_capped_for_state_attributes() -> None:
     assert result["summary"]["api_warnings"] == warnings[:API_WARNINGS_STATE_ATTR_MAX]
 
 
-def test_cancel_scheduled_events_clears_timers() -> None:
+def test_cancel_scheduled_events_clears_timers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     coordinator = _coordinator()
     cancelled: list[bool] = []
-    coordinator._scheduled[("entry-1", "watching", "1", 3600, "t")] = (
-        lambda: cancelled.append(True)
+    coordinator._scheduled[("entry-1", "watching", "1", 3600, "t")] = lambda: (
+        cancelled.append(True)
     )
     coordinator.cancel_scheduled_events()
     assert cancelled == [True]
     assert coordinator._scheduled == {}
+    assert "Cancelling eBay ending-soon timer kind=watching item_id=1" in caplog.text
 
 
-def test_timers_reschedule_when_end_time_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timers_reschedule_when_end_time_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     coordinator = _coordinator()
     events: list[str] = []
     coordinator._event_callbacks["watching"] = lambda et, ed: events.append(et)
@@ -189,3 +205,8 @@ def test_timers_reschedule_when_end_time_changes(monkeypatch: pytest.MonkeyPatch
     assert set(coordinator._scheduled) != first_keys
     assert len(coordinator._scheduled) == 1
     assert cancels[0].called
+    assert "Scheduling eBay ending-soon timer kind=watching item_id=123" in caplog.text
+    assert (
+        "Rescheduling eBay ending-soon timer kind=watching item_id=123" in caplog.text
+    )
+    assert "Cancelling eBay ending-soon timer kind=watching item_id=123" in caplog.text

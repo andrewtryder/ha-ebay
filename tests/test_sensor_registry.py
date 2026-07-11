@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Any
 from unittest.mock import Mock
 
@@ -127,8 +128,10 @@ def _registered_item_sensor_unique_ids(
 async def test_item_sensor_registry_reconciles_selection_change(
     hass: HomeAssistant,
     entity_registry: er.EntityRegistry,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Selected item sensors are created, replaced, and cleaned up via the registry."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.sensor")
     assert await async_setup_component(hass, "sensor", {})
 
     entry = MockConfigEntry(
@@ -164,7 +167,14 @@ async def test_item_sensor_registry_reconciles_selection_change(
     await hass.async_block_till_done()
 
     first_ids = _selling_unique_ids(entry.entry_id, "001")
-    assert _registered_item_sensor_unique_ids(entity_registry, entry.entry_id) == first_ids
+    assert (
+        "Reconciled eBay item sensors entry_id=entry-registry-1 selected_count=1 "
+        f"added_count={len(first_ids)} removed_count=0 known_count={len(first_ids)}"
+        in caplog.text
+    )
+    assert (
+        _registered_item_sensor_unique_ids(entity_registry, entry.entry_id) == first_ids
+    )
     first_entity_ids = {
         entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
         for unique_id in first_ids
@@ -174,18 +184,22 @@ async def test_item_sensor_registry_reconciles_selection_change(
         assert hass.states.get(entity_id) is not None
 
     second_payload = _payload("002")
+    caplog.clear()
     coordinator.async_set_updated_data(second_payload)
     await hass.async_block_till_done()
 
     second_ids = _selling_unique_ids(entry.entry_id, "002")
     assert (
+        "Reconciled eBay item sensors entry_id=entry-registry-1 selected_count=1 "
+        f"added_count={len(second_ids)} removed_count={len(first_ids)} "
+        f"known_count={len(second_ids)}" in caplog.text
+    )
+    assert (
         _registered_item_sensor_unique_ids(entity_registry, entry.entry_id)
         == second_ids
     )
     for unique_id in first_ids:
-        assert (
-            entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
-        )
+        assert entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None
     for entity_id in first_entity_ids:
         assert hass.states.get(entity_id) is None
 
@@ -197,8 +211,13 @@ async def test_item_sensor_registry_reconciles_selection_change(
     for entity_id in second_entity_ids:
         assert hass.states.get(entity_id) is not None
 
+    caplog.clear()
     coordinator.async_set_updated_data(second_payload)
     await hass.async_block_till_done()
+    assert (
+        "Reconciled eBay item sensors entry_id=entry-registry-1 selected_count=1 "
+        f"added_count=0 removed_count=0 known_count={len(second_ids)}" in caplog.text
+    )
     assert (
         _registered_item_sensor_unique_ids(entity_registry, entry.entry_id)
         == second_ids

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
@@ -15,6 +16,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -110,20 +113,21 @@ async def async_setup_entry(
     registry = _entity_registry(hass)
     platform = _current_entity_platform()
 
-    async def _async_remove_item_sensor(unique_id: str) -> None:
+    async def _async_remove_item_sensor(unique_id: str) -> bool:
         if registry is None:
-            return
+            return False
         entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
         if entity_id is None:
-            return
+            return False
         registry.async_remove(entity_id)
         if platform is not None and entity_id in platform.entities:
             try:
                 await platform.async_remove_entity(entity_id)
             except KeyError:
                 pass
+        return True
 
-    async def _async_remove_stale_item_sensors(selected_ids: set[str]) -> None:
+    async def _async_remove_stale_item_sensors(selected_ids: set[str]) -> int:
         stale_ids = (
             known_item_ids
             | (
@@ -132,9 +136,12 @@ async def async_setup_entry(
                 else set()
             )
         ) - selected_ids
+        removed_count = 0
         for unique_id in stale_ids:
-            await _async_remove_item_sensor(unique_id)
+            if await _async_remove_item_sensor(unique_id):
+                removed_count += 1
             known_item_ids.discard(unique_id)
+        return removed_count
 
     def _new_item_sensors(selected: set[SelectedItemKey]) -> list[EbayItemSensor]:
         sensors: list[EbayItemSensor] = []
@@ -152,22 +159,39 @@ async def async_setup_entry(
         return sensors
 
     selected = coordinator.refresh_selected_item_keys()
-    await _async_remove_stale_item_sensors(
+    initial_removed = await _async_remove_stale_item_sensors(
         _item_sensor_unique_ids(entry.entry_id, selected)
     )
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
         for description in SUMMARY_SENSORS
     ]
-    entities.extend(_new_item_sensors(selected))
+    initial_item_sensors = _new_item_sensors(selected)
+    entities.extend(initial_item_sensors)
+    _LOGGER.debug(
+        "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s removed_count=%s known_count=%s",
+        entry.entry_id,
+        len(selected),
+        len(initial_item_sensors),
+        initial_removed,
+        len(known_item_ids),
+    )
     async_add_entities(entities)
 
     async def _async_reconcile_item_sensors() -> None:
         selected = coordinator.refresh_selected_item_keys()
-        await _async_remove_stale_item_sensors(
+        removed_count = await _async_remove_stale_item_sensors(
             _item_sensor_unique_ids(entry.entry_id, selected)
         )
         new_sensors = _new_item_sensors(selected)
+        _LOGGER.debug(
+            "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s removed_count=%s known_count=%s",
+            entry.entry_id,
+            len(selected),
+            len(new_sensors),
+            removed_count,
+            len(known_item_ids),
+        )
         if new_sensors:
             async_add_entities(new_sensors)
 
@@ -197,9 +221,7 @@ def _entity_registry(hass: HomeAssistant) -> er.EntityRegistry | None:
 _SUMMARY_SENSOR_KEYS = {description.key for description in SUMMARY_SENSORS}
 
 
-def _item_sensor_unique_ids(
-    entry_id: str, selected: set[SelectedItemKey]
-) -> set[str]:
+def _item_sensor_unique_ids(entry_id: str, selected: set[SelectedItemKey]) -> set[str]:
     """Return unique IDs for the current capped selection without building entities."""
     unique_ids: set[str] = set()
     for kind, item_id in selected:
