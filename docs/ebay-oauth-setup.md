@@ -1,190 +1,226 @@
 # eBay OAuth Setup Guide
 
-This guide maps the Home Assistant eBay setup fields to the labels shown in
-the eBay Developer Program.
+This guide walks through connecting the unofficial eBay integration to Home
+Assistant using eBay's OAuth authorization flow.
 
-## Terminology
+The eBay Developer Program and the regular eBay marketplace use separate
+sign-in contexts. Your developer account owns the application credentials.
+Later, the regular eBay buyer or seller account you want to monitor grants
+read-only access to that application.
 
-| Home Assistant field | eBay label | Meaning |
+> [!NOTE]
+> eBay may change the layout of its developer portal. Follow the field names in
+> this guide even if the surrounding page looks slightly different.
+
+## Before you begin
+
+You need:
+
+- Home Assistant `2026.3.0` or newer
+- the eBay custom integration installed through HACS
+- an eBay Developers Program account
+- a regular eBay account whose activity you want to monitor
+
+Most users should use **Production**. Use **Sandbox** only when working with
+eBay test accounts and test data.
+
+## Field reference
+
+| Home Assistant field | eBay label | What it is |
 | --- | --- | --- |
-| App ID / Client ID | App ID / Client ID | Public app identifier |
-| Cert ID / Client secret | Cert ID | Secret for the selected keyset |
-| RuName | RuName (eBay Redirect URL name) | Identifier generated after redirect setup |
-| Callback URL | Your auth accepted/declined URL | HA browser return URL |
-| Environment | Production/Sandbox | Must match the selected eBay keys |
-| Site ID | Site ID | 0 means eBay United States |
+| eBay environment | Production or Sandbox | Must match the selected eBay keyset |
+| App ID / Client ID | App ID (Client ID) | Public application identifier |
+| Cert ID / Client secret | Cert ID (Client Secret) | Secret belonging to the same keyset |
+| RuName | RuName (eBay Redirect URL name) | Identifier generated for the redirect configuration |
+| eBay Site ID | Site ID | Use `0` for eBay United States |
+| Callback URL | Your auth accepted/declined URL | Browser return URL supplied by Home Assistant |
 
-## 1. Create or Open an eBay Developer Application
+## 1. Start setup in Home Assistant
 
-Open the eBay Developer Program application keys page:
+1. Go to **Settings → Devices & services**.
+2. Select **Add integration** and search for **eBay**.
+3. Choose **Automatic callback — Recommended**.
+4. Leave the setup window open.
+5. Copy the OAuth callback URL displayed by Home Assistant.
+
+You will paste that exact callback URL into the eBay developer portal. Do not
+substitute your Home Assistant local URL or external URL.
+
+## 2. Sign in to the eBay Developers Program
+
+Open the application keys page:
 
 ```text
 https://developer.ebay.com/my/keys
 ```
 
-Create an application if you do not already have one, or open the existing
-application you want Home Assistant to use.
+Sign in with your eBay Developers Program account. Register for the program
+first if you do not already have an account.
 
-The eBay Developer Program account owns the application. The regular eBay
-buyer/seller account grants access to that application. They can be different
-accounts.
+![eBay Developers Program sign-in page](images/ebay-oauth/01-developer-sign-in.webp)
 
-## 2. Choose Production or Sandbox
+This developer account can be different from the regular eBay account you will
+authorize later.
 
-Choose the environment you want Home Assistant to use. Most users should use
-production.
+## 3. Create or open an application keyset
 
-Production credentials must be paired with the production environment in Home
-Assistant. Sandbox credentials must be paired with sandbox.
+Create an application if needed, or open the application you want Home
+Assistant to use.
 
-## 3. Find "Get a Token from eBay via Your Application"
+On the **Application Keys** page, select the environment you chose in Home
+Assistant:
 
-On the application keys page, scroll to the section named:
+- **Production** for your real eBay account and live marketplace data
+- **Sandbox** for eBay test accounts and test data
+
+![Production keyset showing the App ID and Cert ID fields](images/ebay-oauth/02-production-keyset.webp)
+
+Copy these two values from the same keyset:
+
+- **App ID (Client ID)**
+- **Cert ID (Client Secret)**
+
+Home Assistant does not use the **Dev ID**.
+
+> [!WARNING]
+> Do not mix Production credentials with the Sandbox environment, or Sandbox
+> credentials with the Production environment.
+
+## 4. Open the eBay sign-in settings
+
+On the same application keys page, find:
 
 ```text
 Get a Token from eBay via Your Application
 ```
 
-This is where eBay shows sign-in redirect settings for your application.
+Under **Your eBay Sign-in Settings**, select **Add eBay Redirect URL** or expand
+an existing redirect configuration.
 
-> Warning: The "Sign in to Production" button under "Get a User Token Here" is
-> an eBay developer test-token tool. Home Assistant does not require you to
-> copy that token. Complete authorization from Home Assistant instead.
+![eBay sign-in settings showing the RuName and OAuth status](images/ebay-oauth/03-redirect-runame.webp)
 
-## 4. Add or Edit an eBay Redirect URL
+Use these settings:
 
-Under "Your eBay Sign-in Settings," click "Add eBay Redirect URL" or expand an
-existing redirect.
-
-## 5. Set Display Title
-
-Set Display Title to a name you will recognize, such as:
-
-```text
-Home Assistant
-```
-
-Display Title is only a human-readable label. It is not the RuName and it is
-not the callback URL.
-
-## 6. Set the Privacy-Policy URL
-
-eBay may ask for "Your privacy policy URL."
-
-For a personal self-hosted install, you may use the project privacy policy:
+- Select **OAuth**, not **Auth'n'Auth**.
+- Set **Display Title** to a recognizable name such as `Home Assistant`.
+- If eBay requests a privacy-policy URL, a personal self-hosted installation
+  may use:
 
 ```text
 https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md
 ```
 
-If you deploy this integration under different terms or as part of another
-service, use your own privacy policy URL.
+Use your own privacy-policy URL if you deploy the integration as part of another
+service or under different terms.
 
-## 7. Set Auth Accepted URL
-
-Copy the callback URL shown by the Home Assistant setup flow and paste it into:
-
-```text
-Your auth accepted URL
-```
-
-Home Assistant provides this callback URL. You register it with eBay so the
-browser can return to Home Assistant after authorization.
-
-## 8. Set Auth Declined URL
-
-Paste the same Home Assistant callback URL into:
-
-```text
-Your auth declined URL
-```
-
-The callback URL is used only for initial authorization and reauthorization.
-Normal operation does not require a tunnel, SSH, port forwarding, Cloudflare
-Tunnel, or public inbound access to Home Assistant.
-
-## 9. Save and Copy the RuName
-
-Save the redirect settings. eBay generates a RuName after the redirect is
-saved.
-
-Copy the generated RuName into Home Assistant. The RuName usually looks like a
-long hyphenated identifier. It is not the Display Title and it is not the
+The **Display Title** is only a label. It is not the RuName and it is not the
 callback URL.
 
-Home Assistant sends this RuName to eBay during OAuth authorization and token
-exchange.
+## 5. Register the Home Assistant callback URL
 
-## 10. Find App ID / Client ID
+Paste the callback URL from Home Assistant into both fields:
 
-Near the top of the same eBay application keys page, copy:
+- **Your auth accepted URL**
+- **Your auth declined URL**
 
-```text
-App ID / Client ID
-```
+![eBay redirect configuration showing the accepted and declined URL fields](images/ebay-oauth/04-redirect-fields.webp)
 
-Paste it into the Home Assistant field with the same name.
+The screenshot shows a common Home Assistant callback URL. Always use the exact
+value shown by your Home Assistant setup flow.
 
-## 11. Find Cert ID / Client Secret
+Select **Save**. eBay then assigns a **RuName** to this redirect configuration.
+Copy the generated RuName; it normally appears as a long hyphenated identifier.
 
-Copy the Cert ID from the same production or sandbox keyset:
+The three values are different:
 
-```text
-Cert ID
-```
+- **Display Title**: a human-readable label
+- **Callback URL**: the URL supplied by Home Assistant
+- **RuName**: the identifier generated by eBay after the redirect is saved
 
-Paste it into Home Assistant as:
+The callback is used only during authorization and reauthorization. Normal
+operation does not require SSH, a tunnel, port forwarding, or public inbound
+access to Home Assistant.
 
-```text
-Cert ID / Client secret
-```
+## 6. Enter the application credentials in Home Assistant
 
-Do not mix production and sandbox keysets.
+Return to the Home Assistant setup window and enter:
 
-## 12. Return to Home Assistant
+| Home Assistant field | Value |
+| --- | --- |
+| eBay environment | The environment selected on the eBay keys page |
+| App ID / Client ID | The App ID from that environment's keyset |
+| Cert ID / Client secret | The Cert ID from the same keyset |
+| RuName | The generated eBay Redirect URL name |
+| eBay Site ID | `0` for eBay United States |
 
-Enter the eBay environment, App ID / Client ID, Cert ID / Client secret,
-RuName, and Site ID.
+Continue after checking that all three eBay identifiers came from the same
+Production or Sandbox configuration.
 
-Use Site ID `0` for eBay United States. Other eBay site IDs are defined by
-eBay's Trading API documentation.
+## 7. Authorize the regular eBay account
 
-## 13. Authorize the Regular eBay Account
+Home Assistant opens eBay's authorization page. Sign in with the regular eBay
+account whose buying, watching, bidding, or selling activity you want to
+monitor, then approve the requested read-only access.
 
-After credentials are submitted, Home Assistant opens eBay authorization.
+This account can be different from the eBay Developers Program account used to
+create the application.
 
-Sign in with the regular eBay account whose buying and selling activity you
-want Home Assistant to monitor. This may be different from your eBay Developer
-Program account.
+> [!IMPORTANT]
+> Do not use the **Sign in to Production** button under **Get a User Token
+> Here** in the developer portal. That creates a developer test token and is not
+> the Home Assistant authorization flow.
 
-Approve the requested read-only access. The browser returns through Home
-Assistant's callback, Home Assistant exchanges the authorization code for
-tokens, and the config entry is created.
+## 8. Link the browser back to Home Assistant
 
-## 14. Troubleshooting
+After eBay authorization, the browser may display the Home Assistant linking
+page.
 
-If the automatic browser callback does not complete, restart setup and choose
-"Manual authorization - Advanced troubleshooting."
+![Home Assistant linking page with the Link account button](images/ebay-oauth/05-link-account.webp)
 
-Manual authorization shows a consent URL. Open it, sign into the regular eBay
-account you want to monitor, approve read-only access, then paste the complete
-final callback URL into Home Assistant. Pasting the full callback URL allows
-Home Assistant to validate OAuth state. Paste only the authorization code if
-the full URL is unavailable.
+Confirm that the displayed instance is the Home Assistant installation you
+intend to use, then select **Link account**. Home Assistant completes the token
+exchange and creates the integration entry.
 
-If authorization fails, confirm that:
+## Multiple eBay accounts
 
-- Production credentials are used with production, or sandbox credentials with
-  sandbox.
-- The Auth Accepted URL and Auth Declined URL exactly match the callback URL
-  shown by Home Assistant.
-- The Home Assistant RuName field contains the generated RuName, not the
-  Display Title and not the callback URL.
-- The regular eBay account approved access from the Home Assistant flow, not
-  from the developer test-token button.
-- Site ID is `0` for eBay United States.
+A configuration is unique by environment and Client ID. Only one eBay account
+can therefore be configured for a given developer application credential set.
 
-## Screenshots
+To monitor another eBay account, create a separate eBay developer application
+and configure it with a different Client ID.
 
-Annotated screenshots can be added here later when repository-safe image assets
-are available.
+## Manual authorization fallback
+
+Use **Manual authorization — Advanced troubleshooting** only when the automatic
+browser callback does not complete.
+
+1. Restart the eBay setup flow and select the manual option.
+2. Open the consent URL shown by Home Assistant.
+3. Sign in with the regular eBay account you want to monitor.
+4. Approve the read-only access request.
+5. Paste the complete final callback URL into Home Assistant.
+
+Pasting the complete callback URL allows Home Assistant to verify the OAuth
+state. Paste only the authorization code when the full callback URL is not
+available.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| eBay rejects the redirect | Both accepted and declined URLs must exactly match the callback URL shown by Home Assistant |
+| Authorization reports an invalid redirect or RuName | Enter the generated RuName, not the Display Title or callback URL |
+| OAuth or API calls fail immediately | Confirm that the selected environment matches the Production or Sandbox keyset |
+| Setup used a token copied from the developer portal | Restart setup and authorize from Home Assistant instead |
+| US account data is missing or incorrect | Confirm that Site ID is `0` |
+| Sell Analytics views are unavailable | Reauthorize with the analytics read-only scope, or disable analytics in the integration options |
+| Browser does not return to Home Assistant | Use the manual authorization fallback and paste the complete final callback URL |
+
+## Security notes
+
+Treat the Cert ID/client secret, access tokens, refresh tokens, authorization
+codes, and OAuth state values as confidential.
+
+The screenshots in this guide are cropped and redacted. Do not publish your own
+screenshots until all application identifiers, account names, email addresses,
+tokens, codes, and personal Home Assistant URLs have been removed.
