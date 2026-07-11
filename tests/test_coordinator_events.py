@@ -67,12 +67,17 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
     """Scheduled events should not emit stale data captured at schedule time."""
     coordinator = _coordinator()
     entry = coordinator.entry
-    end_time = datetime.now(timezone.utc) + timedelta(minutes=90)
+    scheduled_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
+        minutes=30
+    )
+    end_time = scheduled_at + timedelta(
+        seconds=coordinator.ending_soon_threshold_seconds
+    )
     item = {
         "item_id": "123",
         "title": "Updated title",
         "end_time": end_time,
-        "seconds_left": 60 * 60,
+        "seconds_left": coordinator.ending_soon_threshold_seconds + (15 * 60),
         "current_price": 12.5,
     }
     coordinator.data = {
@@ -98,7 +103,7 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
         _normalized_end_time(end_time),
         key,
     )
-    callback(datetime.now(timezone.utc))
+    callback(scheduled_at)
 
     assert len(events) == 1
     assert events[0][1]["title"] == "Updated title"

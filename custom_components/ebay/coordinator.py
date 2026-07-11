@@ -258,9 +258,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 wanted.add(key)
                 fire_at = end_time - timedelta(seconds=threshold)
                 if fire_at <= now:
-                    if (
-                        _is_active_ending_soon(item, threshold)
-                    ):
+                    if _is_active_ending_soon(item, threshold, now):
                         if key not in self._fired_ending_soon:
                             if self._emit(kind, event_type, item):
                                 self._fired_ending_soon.add(key)
@@ -295,7 +293,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         key: EndingSoonKey,
     ) -> Callable[[datetime], None]:
         @callback
-        def fire(_: datetime) -> None:
+        def fire(now: datetime) -> None:
             self._scheduled.pop(key, None)
             if key in self._fired_ending_soon:
                 return
@@ -309,7 +307,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 or _normalized_end_time(end_time) != scheduled_end_time
             ):
                 return
-            if not _is_active_ending_soon(item, self.ending_soon_threshold_seconds):
+            if not _is_active_ending_soon(
+                item, self.ending_soon_threshold_seconds, now
+            ):
                 return
             if self._emit(kind, event_type, item):
                 self._fired_ending_soon.add(key)
@@ -334,7 +334,12 @@ def _was_running(item: dict[str, Any]) -> bool:
     return seconds_left is not None and seconds_left > 0
 
 
-def _is_active_ending_soon(item: dict[str, Any], threshold: int) -> bool:
+def _is_active_ending_soon(
+    item: dict[str, Any], threshold: int, now: datetime
+) -> bool:
     """Return whether an item is still active and inside the ending-soon window."""
-    seconds_left = item.get("seconds_left")
-    return seconds_left is not None and 0 < seconds_left <= threshold
+    end_time = item.get("end_time")
+    if not isinstance(end_time, datetime):
+        return False
+    seconds_left = int((end_time - now.astimezone(timezone.utc)).total_seconds())
+    return 0 < seconds_left <= threshold
