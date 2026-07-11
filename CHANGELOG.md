@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.5](https://github.com/andrewtryder/ha-ebay/compare/v0.3.4...v0.3.5) (2026-07-11)
+
+
+### Bug Fixes
+
+* harden truncated baselines, auth handling, and release CI ([87f88fe](https://github.com/andrewtryder/ha-ebay/commit/87f88fe42e1b66c8e14d31727d8a6dee97e12e41))
+* harden truncated baselines, auth handling, and release CI ([d81b5c2](https://github.com/andrewtryder/ha-ebay/commit/d81b5c273819098f2068c7885285b381352d8575))
+
 ## [0.3.4](https://github.com/andrewtryder/ha-ebay/compare/v0.3.3...v0.3.4) (2026-07-11)
 
 
