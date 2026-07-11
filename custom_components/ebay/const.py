@@ -67,7 +67,7 @@ DEFAULT_OPTIONS = {
     CONF_SELLING_ENABLED: True,
 }
 
-PLATFORMS = ["sensor", "event"]
+PLATFORMS = ["sensor", "event", "calendar"]
 
 SCAN_INTERVAL = timedelta(minutes=DEFAULT_POLL_INTERVAL)
 

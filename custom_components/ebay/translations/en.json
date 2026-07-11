@@ -139,6 +139,17 @@
       "bidding_activity": {
         "name": "Bidding activity"
       }
+    },
+    "calendar": {
+      "watched_items": {
+        "name": "Watched items"
+      },
+      "bidding_items": {
+        "name": "Bidding items"
+      },
+      "selling_items": {
+        "name": "Selling items"
+      }
     }
   }
 }
