@@ -417,17 +417,20 @@ def test_truncated_snapshot_suppresses_disappearance_events() -> None:
     assert ("selling", "bid_count_increased") in events
 
 
-def test_truncated_baseline_keeps_prior_collection() -> None:
+def test_truncated_baseline_merges_overlapping_items() -> None:
     from custom_components.ebay.coordinator import _baseline_payload
 
     previous = {
-        "selling": {"s1": {"item_id": "s1"}, "s2": {"item_id": "s2"}},
+        "selling": {
+            "s1": {"item_id": "s1", "bid_count": 1},
+            "s2": {"item_id": "s2", "bid_count": 0},
+        },
         "watched": {},
         "bidding": {},
         "truncated_collections": {},
     }
     current = {
-        "selling": {"s1": {"item_id": "s1"}},
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2}},
         "watched": {},
         "bidding": {},
         "summary": {"x": 1},
@@ -435,6 +438,63 @@ def test_truncated_baseline_keeps_prior_collection() -> None:
         "partial_failures": ["selling_truncated"],
     }
     baseline = _baseline_payload(previous, current)
-    assert baseline["selling"] == previous["selling"]
+    assert baseline["selling"] == {
+        "s1": {"item_id": "s1", "bid_count": 2},
+        "s2": {"item_id": "s2", "bid_count": 0},
+    }
     assert baseline["summary"] == current["summary"]
     assert baseline["truncated_collections"]["selling"] is True
+
+
+def test_truncated_baseline_merge_avoids_repeated_change_events() -> None:
+    """Overlapping truncated polls must not re-emit the same increase."""
+    from custom_components.ebay.coordinator import _baseline_payload
+
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = (
+        lambda event_type, _event_data: events.append(event_type)
+    )
+
+    complete_1 = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 1}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {},
+    }
+    truncated_2 = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {"selling": True},
+    }
+    complete_2 = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {},
+    }
+    complete_3 = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 3}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {},
+    }
+
+    baseline = complete_1
+
+    coordinator._detect_transition_events(baseline, truncated_2)
+    assert events == ["bid_count_increased"]
+    baseline = _baseline_payload(baseline, truncated_2)
+    events.clear()
+
+    coordinator._detect_transition_events(baseline, truncated_2)
+    assert events == []
+    baseline = _baseline_payload(baseline, truncated_2)
+
+    coordinator._detect_transition_events(baseline, complete_2)
+    assert events == []
+    baseline = _baseline_payload(baseline, complete_2)
+
+    coordinator._detect_transition_events(baseline, complete_3)
+    assert events == ["bid_count_increased"]

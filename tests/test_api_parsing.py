@@ -19,6 +19,7 @@ from custom_components.ebay.api import (
     SELLING_CALL_NAME,
     EbayApiClient,
     EbayApiError,
+    EbayAuthError,
     active_offers_by_item_id,
     analytics_views_by_item_id,
     build_get_best_offers_xml,
@@ -498,6 +499,63 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
     payload = asyncio.run(run())
 
     assert payload["partial_failures"] == ["analytics_views"]
+
+
+def test_analytics_auth_error_propagates_from_fetch_data() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name == SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList><ItemArray><Item>
+                        <ItemID>s1</ItemID><Title>Sell</Title>
+                        <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                      </Item></ItemArray></ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            return _root(
+                f"""
+                <{call_name}Response xmlns="{EBAY_XML_NS}">
+                  <Ack>Success</Ack>
+                </{call_name}Response>
+                """
+            )
+
+        async def async_get_traffic_report(
+            self, item_ids: list[str]
+        ) -> dict[str, object]:
+            raise EbayAuthError("analytics auth failed")
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=True,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    with pytest.raises(EbayAuthError, match="analytics auth failed"):
+        asyncio.run(run())
 
 
 def test_optional_transport_timeout_becomes_partial_failure() -> None:

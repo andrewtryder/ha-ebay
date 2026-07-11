@@ -93,6 +93,14 @@ def _patch_setup(*, coordinator: Mock, client: Any = None) -> ExitStack:
 
 def test_migrate_v1_refresh_token_to_v2() -> None:
     hass = Mock()
+
+    def _update_entry(entry: Mock, **kwargs: Any) -> None:
+        if "data" in kwargs:
+            entry.data = kwargs["data"]
+        if "version" in kwargs:
+            entry.version = kwargs["version"]
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_update_entry)
     entry = _mock_entry(
         version=1,
         data={
@@ -104,18 +112,101 @@ def test_migrate_v1_refresh_token_to_v2() -> None:
             CONF_REFRESH_TOKEN: "legacy-refresh",
         },
     )
-    assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
-    hass.config_entries.async_update_entry.assert_called_once()
-    kwargs = hass.config_entries.async_update_entry.call_args.kwargs
-    assert kwargs["version"] == 2
-    assert "token" in kwargs["data"]
-    assert kwargs["data"]["token"]["refresh_token"] == "legacy-refresh"
+
+    async def _noop_migrate_entries(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_migrate_entries",
+        new=_noop_migrate_entries,
+    ):
+        assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.version == 3
+    assert "token" in entry.data
+    assert entry.data["token"]["refresh_token"] == "legacy-refresh"
+    assert hass.config_entries.async_update_entry.call_count == 2
 
 
 def test_migrate_rejects_future_version() -> None:
     hass = Mock()
-    entry = _mock_entry(version=3)
+    entry = _mock_entry(version=4)
     assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is False
+
+
+def test_migrate_v2_renames_legacy_sensor_unique_ids() -> None:
+    """Legacy summary and analytics unique IDs must become the release names."""
+    from types import SimpleNamespace
+
+    hass = Mock()
+
+    def _update_entry(entry: Mock, **kwargs: Any) -> None:
+        if "version" in kwargs:
+            entry.version = kwargs["version"]
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_update_entry)
+    entry = _mock_entry(version=2)
+    migrated: list[tuple[str, str]] = []
+
+    async def _fake_migrate_entries(
+        _hass: Any,
+        config_entry_id: str,
+        callback: Any,
+    ) -> None:
+        assert config_entry_id == entry.entry_id
+        for unique_id in (
+            f"{entry.entry_id}_selling_total_sold",
+            f"{entry.entry_id}_selling_abc_analytics_views",
+            f"{entry.entry_id}_selling_total_bids",
+            f"{entry.entry_id}_selling_abc_analytics_views_30d",
+            f"{entry.entry_id}_selling_abc_views",
+        ):
+            updates = callback(SimpleNamespace(unique_id=unique_id))
+            if updates is not None:
+                migrated.append((unique_id, updates["new_unique_id"]))
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_migrate_entries",
+        new=_fake_migrate_entries,
+    ):
+        assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
+
+    assert entry.version == 3
+    assert migrated == [
+        (
+            f"{entry.entry_id}_selling_total_sold",
+            f"{entry.entry_id}_active_listings_quantity_sold",
+        ),
+        (
+            f"{entry.entry_id}_selling_abc_analytics_views",
+            f"{entry.entry_id}_selling_abc_analytics_views_30d",
+        ),
+    ]
+
+
+def test_renamed_sensor_unique_id_mapping() -> None:
+    assert (
+        ebay_integration._renamed_sensor_unique_id("entry-1", "entry-1_selling_total_sold")
+        == "entry-1_active_listings_quantity_sold"
+    )
+    assert (
+        ebay_integration._renamed_sensor_unique_id(
+            "entry-1", "entry-1_selling_123_analytics_views"
+        )
+        == "entry-1_selling_123_analytics_views_30d"
+    )
+    assert (
+        ebay_integration._renamed_sensor_unique_id(
+            "entry-1", "entry-1_selling_123_analytics_views_30d"
+        )
+        is None
+    )
+    assert (
+        ebay_integration._renamed_sensor_unique_id(
+            "entry-1", "entry-1_selling_total_bids"
+        )
+        is None
+    )
 
 
 def test_async_setup_entry_success_forwards_platforms() -> None:

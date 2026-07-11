@@ -1,0 +1,4 @@
+# Declared HACS minimum is homeassistant>=2026.3.0. First published
+# pytest-homeassistant-custom-component release that pins a 2026.3.x core
+# build is 0.13.317 (homeassistant==2026.3.1); no 2026.3.0 harness exists.
+pytest-homeassistant-custom-component==0.13.317

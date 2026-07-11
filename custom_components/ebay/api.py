@@ -38,6 +38,7 @@ TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 MAX_PAGES = 20
 ANALYTICS_BATCH_SIZE = 100
 _WARNING_MESSAGE_MAX_LEN = 240
+API_WARNINGS_STATE_ATTR_MAX = 10
 
 
 class EbayError(Exception):
@@ -280,6 +281,25 @@ def extract_trading_warnings(root: ET.Element) -> list[dict[str, str | None]]:
             }
         )
     return warnings
+
+
+def dedupe_trading_warnings(
+    warnings: list[dict[str, str | None]],
+) -> list[dict[str, str | None]]:
+    """Deduplicate Trading API warnings by code and message text."""
+    deduped: list[dict[str, str | None]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+    for warning in warnings:
+        key = (
+            warning.get("code"),
+            warning.get("short_message"),
+            warning.get("long_message"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(warning)
+    return deduped
 
 
 def chunk_item_ids(item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE) -> list[list[str]]:
@@ -864,6 +884,20 @@ class EbayApiClient:
         """Fetch optional Sell Analytics traffic report for one ID batch."""
         if not item_ids:
             return {}
+        for attempt in range(2):
+            try:
+                return await self._async_get_traffic_report_once(item_ids)
+            except EbayAuthError:
+                self._clear_access_token()
+                if attempt == 0:
+                    continue
+                raise
+        raise EbayAuthError("eBay Sell Analytics auth failed")
+
+    async def _async_get_traffic_report_once(
+        self, item_ids: list[str]
+    ) -> dict[str, Any]:
+        """Fetch one Sell Analytics traffic report without auth retry."""
         access_token = await self.async_get_access_token()
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=30)
@@ -884,7 +918,11 @@ class EbayApiClient:
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
-                if response.status in {400, 401, 403}:
+                if response.status == 401:
+                    raise EbayAuthError(
+                        f"eBay Sell Analytics auth failed with HTTP {response.status}"
+                    )
+                if response.status in {400, 403}:
                     raise EbayPartialFailure("analytics_views")
                 if response.status >= 400:
                     raise EbayApiError(
@@ -910,6 +948,8 @@ class EbayApiClient:
         for batch in chunk_item_ids(item_ids):
             try:
                 payload = await self.async_get_traffic_report(batch)
+            except EbayAuthError:
+                raise
             except (EbayError, aiohttp.ClientError, TimeoutError):
                 partial_failure = True
                 continue
@@ -1066,13 +1106,15 @@ class EbayApiClient:
                             selling[item_id]["analytics_views_30d"] = views
                     if analytics_partial:
                         partial_failures.append("analytics_views")
+                except EbayAuthError:
+                    raise
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
                         "Optional analytics views failed: %s", type(exc).__name__
                     )
                     partial_failures.append("analytics_views")
 
-        api_warnings = list(self._api_warnings)
+        api_warnings = dedupe_trading_warnings(self._api_warnings)
         if api_warnings and "trading_warning" not in partial_failures:
             partial_failures.append("trading_warning")
 

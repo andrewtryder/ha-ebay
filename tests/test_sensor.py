@@ -247,6 +247,20 @@ def test_selection_priorities_and_modes() -> None:
     assert ("watched", "pinned") in minimal
 
 
+def test_is_item_sensor_unique_id_excludes_summary_sensors() -> None:
+    from custom_components.ebay.sensor import _is_item_sensor_unique_id
+
+    entry_id = "entry-1"
+    assert _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_123_bids") is True
+    assert _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_total_bids") is False
+    assert (
+        _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_total_views") is False
+    )
+    assert (
+        _is_item_sensor_unique_id(entry_id, f"{entry_id}_active_selling_items") is False
+    )
+
+
 def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
     from custom_components.ebay.sensor import EbaySummarySensor, SUMMARY_SENSORS
 

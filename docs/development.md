@@ -38,10 +38,14 @@ Run the fast local checks with:
 `pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
 floor of 80%.
 
-The pytest harness currently installs Home Assistant `2026.2.3` via
-`pytest-homeassistant-custom-component` (latest on PyPI). The declared HACS
-minimum remains `2026.3.0` for runtime/docker; add a second CI matrix entry when
-a matching harness pin is published.
+CI runs a minimum-plus-current matrix:
+
+- `requirements-ha-min.txt` — first published harness on the HACS minimum train
+  (`pytest-homeassistant-custom-component==0.13.317` → Home Assistant `2026.3.1`;
+  HACS declares `2026.3.0` and no `2026.3.0` harness exists on PyPI)
+- `requirements-ha-current.txt` — latest published harness pin
+
+`requirements-ha.txt` includes the current pin for local installs.
 
 Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
 

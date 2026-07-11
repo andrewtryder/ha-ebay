@@ -1,0 +1,2 @@
+# Latest published pytest-homeassistant-custom-component / Home Assistant pin.
+pytest-homeassistant-custom-component==0.13.346

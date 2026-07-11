@@ -99,6 +99,35 @@ def test_successful_update_clears_last_error_and_sets_baseline() -> None:
     assert coordinator.previous_payload["selling"] == payload["selling"]
 
 
+def test_summary_api_warnings_are_capped_for_state_attributes() -> None:
+    from custom_components.ebay.api import API_WARNINGS_STATE_ATTR_MAX
+
+    now = datetime.now(timezone.utc)
+    warnings = [
+        {"code": str(index), "short_message": f"w{index}", "long_message": None}
+        for index in range(API_WARNINGS_STATE_ATTR_MAX + 5)
+    ]
+    payload = {
+        "selling": {},
+        "watched": {},
+        "bidding": {},
+        "summary": {},
+        "last_update": now,
+        "last_successful_update": now,
+        "partial_failures": ["trading_warning"],
+        "truncated_collections": {},
+        "api_warnings": warnings,
+    }
+    api = Mock()
+    api.async_fetch_data = AsyncMock(return_value=payload)
+    coordinator = _coordinator(api)
+
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["api_warnings"] == warnings
+    assert result["summary"]["api_warnings"] == warnings[:API_WARNINGS_STATE_ATTR_MAX]
+
+
 def test_cancel_scheduled_events_clears_timers() -> None:
     coordinator = _coordinator()
     cancelled: list[bool] = []

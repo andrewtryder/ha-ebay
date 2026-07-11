@@ -12,7 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import EbayApiClient, EbayAuthError, EbayError
+from .api import EbayApiClient, EbayAuthError, EbayError, API_WARNINGS_STATE_ATTR_MAX
 from .const import (
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
@@ -111,7 +111,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload["summary"]["truncated_collections"] = payload.get(
             "truncated_collections", {}
         )
-        payload["summary"]["api_warnings"] = payload.get("api_warnings", [])
+        warnings = payload.get("api_warnings") or []
+        payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]
         self.last_error_category = None
 
         self._detect_transition_events(self.previous_payload, payload)
@@ -393,14 +394,21 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 def _baseline_payload(
     previous: dict[str, Any] | None, current: dict[str, Any]
 ) -> dict[str, Any]:
-    """Return the next event-comparison baseline, preserving truncated collections."""
+    """Return the next event-comparison baseline, preserving truncated collections.
+
+    Truncated responses omit items outside the page budget. Keep prior items that
+    were missing from the truncated collection, but update overlapping items with
+    the current values so change events are not repeated on the next poll.
+    """
     baseline = dict(current)
     if previous is None:
         return baseline
     truncated = current.get("truncated_collections") or {}
     for key in _BASELINE_COLLECTIONS:
         if truncated.get(key):
-            baseline[key] = previous.get(key, {})
+            merged = dict(previous.get(key, {}))
+            merged.update(current.get(key, {}))
+            baseline[key] = merged
     return baseline
 
 

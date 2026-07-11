@@ -16,11 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Current published phcc/HA pin (2026.2.3). Add a second include
-          # entry for the declared HACS minimum (2026.3.0) once available on PyPI.
+          # Declared HACS minimum is 2026.3.0; first published harness on that
+          # train is 0.13.317 → homeassistant==2026.3.1.
           - python-version: "3.13"
-            ha-label: "2026.2.3-current"
-            requirements-ha: requirements-ha.txt
+            ha-label: "2026.3.1-minimum"
+            requirements-ha: requirements-ha-min.txt
+          - python-version: "3.13"
+            ha-label: "2026.7.2-current"
+            requirements-ha: requirements-ha-current.txt
 
     steps:
       - uses: actions/checkout@v4

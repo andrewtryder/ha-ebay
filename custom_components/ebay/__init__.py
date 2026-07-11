@@ -77,24 +77,55 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate legacy refresh-token entries to HA OAuth token storage."""
-    if entry.version > 2:
+    """Migrate config entries to the current schema and entity unique IDs."""
+    if entry.version > 3:
         return False
 
-    if entry.version == 1 and "token" not in entry.data:
-        refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
-        if refresh_token:
-            data = dict(entry.data)
-            data["auth_implementation"] = auth_implementation_domain(
-                data[CONF_ENVIRONMENT], data[CONF_CLIENT_ID]
-            )
-            data["token"] = legacy_token_from_refresh_token(refresh_token)
-            hass.config_entries.async_update_entry(entry, data=data, version=2)
-            return True
-
     if entry.version < 2:
-        hass.config_entries.async_update_entry(entry, version=2)
+        data = dict(entry.data)
+        if "token" not in data:
+            refresh_token = data.get(CONF_REFRESH_TOKEN)
+            if refresh_token:
+                data["auth_implementation"] = auth_implementation_domain(
+                    data[CONF_ENVIRONMENT], data[CONF_CLIENT_ID]
+                )
+                data["token"] = legacy_token_from_refresh_token(refresh_token)
+        hass.config_entries.async_update_entry(entry, data=data, version=2)
+
+    if entry.version < 3:
+        await _async_migrate_renamed_sensor_unique_ids(hass, entry)
+        hass.config_entries.async_update_entry(entry, version=3)
+
     return True
+
+
+async def _async_migrate_renamed_sensor_unique_ids(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Rename summary and per-item sensor unique IDs introduced before release."""
+    from homeassistant.helpers import entity_registry as er
+
+    def _update_unique_id(entity_entry: er.RegistryEntry) -> dict[str, str] | None:
+        new_unique_id = _renamed_sensor_unique_id(entry.entry_id, entity_entry.unique_id)
+        if new_unique_id is None:
+            return None
+        return {"new_unique_id": new_unique_id}
+
+    await er.async_migrate_entries(hass, entry.entry_id, _update_unique_id)
+
+
+def _renamed_sensor_unique_id(entry_id: str, unique_id: str) -> str | None:
+    """Return the replacement unique ID for a renamed sensor, if any."""
+    if unique_id == f"{entry_id}_selling_total_sold":
+        return f"{entry_id}_active_listings_quantity_sold"
+
+    legacy_suffix = "_analytics_views"
+    if unique_id.startswith(f"{entry_id}_selling_") and unique_id.endswith(
+        legacy_suffix
+    ):
+        return f"{unique_id[: -len(legacy_suffix)]}_analytics_views_30d"
+
+    return None
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:

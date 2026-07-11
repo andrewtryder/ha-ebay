@@ -59,7 +59,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     """Handle an eBay config flow."""
 
     DOMAIN = DOMAIN
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self) -> None:
         """Initialize the flow."""
