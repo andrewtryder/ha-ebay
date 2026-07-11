@@ -174,6 +174,39 @@ def test_analytics_views_and_summary_are_bounded() -> None:
     assert len(summary["items_with_offers"]) == 1
 
 
+def test_summary_ending_soon_excludes_already_ended_items() -> None:
+    summary = summarize_payload(
+        watched={
+            "ended": {
+                "item_id": "ended",
+                "title": "Ended",
+                "seconds_left": 0,
+                "end_time": datetime.now(timezone.utc) - timedelta(minutes=5),
+            },
+            "soon": {
+                "item_id": "soon",
+                "title": "Soon",
+                "seconds_left": 120,
+                "end_time": datetime.now(timezone.utc) + timedelta(minutes=2),
+            },
+        },
+        bidding={},
+        selling={
+            "ended-selling": {
+                "item_id": "ended-selling",
+                "title": "Ended selling",
+                "seconds_left": 0,
+                "end_time": datetime.now(timezone.utc) - timedelta(minutes=5),
+            }
+        },
+        ending_soon_threshold_seconds=3600,
+    )
+
+    assert summary["watched_ending_soon"] == 1
+    assert summary["selling_ending_soon"] == 0
+    assert [item["item_id"] for item in summary["items_ending_soon"]] == ["soon"]
+
+
 def test_oauth_callback_params_and_raw_code() -> None:
     callback_url = "https://example.test/callback?code=v%5E1&state=expected"
 
@@ -356,6 +389,140 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
     payload = asyncio.run(run())
 
     assert payload["partial_failures"] == ["analytics_views"]
+
+
+def test_optional_transport_timeout_becomes_partial_failure() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name == SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList><ItemArray><Item>
+                        <ItemID>s1</ItemID><Title>Sell</Title>
+                        <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                      </Item></ItemArray></ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            if call_name == SELLER_LIST_CALL_NAME:
+                raise TimeoutError
+            if call_name == BEST_OFFERS_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                    </GetBestOffersResponse>
+                    """
+                )
+            raise AssertionError(call_name)
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+
+    assert payload["partial_failures"] == ["seller_list_views"]
+
+
+def test_analytics_views_do_not_overwrite_seller_list_views() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name == SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList><ItemArray><Item>
+                        <ItemID>s1</ItemID><Title>Sell</Title>
+                        <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                      </Item></ItemArray></ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            if call_name == SELLER_LIST_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetSellerListResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ItemArray><Item><ItemID>s1</ItemID><HitCount>10</HitCount></Item></ItemArray>
+                    </GetSellerListResponse>
+                    """
+                )
+            if call_name == BEST_OFFERS_CALL_NAME:
+                return _root(
+                    f"""
+                    <GetBestOffersResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                    </GetBestOffersResponse>
+                    """
+                )
+            raise AssertionError(call_name)
+
+        async def async_get_traffic_report(
+            self, item_ids: list[str]
+        ) -> dict[str, object]:
+            return {
+                "records": [
+                    {
+                        "dimensionValues": [{"value": "s1"}],
+                        "metricValues": [{"value": "99"}],
+                    }
+                ]
+            }
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=True,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+
+    assert payload["selling"]["s1"]["views"] == 10
+    assert payload["selling"]["s1"]["analytics_views"] == 99
 
 
 def test_token_request_wraps_non_json_response() -> None:

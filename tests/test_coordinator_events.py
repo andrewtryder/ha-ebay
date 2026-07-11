@@ -13,8 +13,7 @@ from custom_components.ebay.coordinator import (
 )
 
 
-def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
-    """Items already inside the threshold should fire after event setup."""
+def _coordinator() -> EbayDataUpdateCoordinator:
     entry = Mock(entry_id="entry-1")
     coordinator = object.__new__(EbayDataUpdateCoordinator)
     coordinator.entry = entry
@@ -23,6 +22,13 @@ def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
     coordinator._event_callbacks = {}
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    return coordinator
+
+
+def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
+    """Items already inside the threshold should fire after event setup."""
+    coordinator = _coordinator()
+    entry = coordinator.entry
     item = {
         "item_id": "123",
         "title": "Watched item",
@@ -59,13 +65,8 @@ def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
 
 def test_ending_soon_callback_uses_latest_item_data() -> None:
     """Scheduled events should not emit stale data captured at schedule time."""
-    entry = Mock(entry_id="entry-1")
-    coordinator = object.__new__(EbayDataUpdateCoordinator)
-    coordinator.entry = entry
-    coordinator.options = DEFAULT_OPTIONS
-    coordinator._event_callbacks = {}
-    coordinator._scheduled = {}
-    coordinator._fired_ending_soon = set()
+    coordinator = _coordinator()
+    entry = coordinator.entry
     end_time = datetime.now(timezone.utc) + timedelta(minutes=90)
     item = {
         "item_id": "123",
@@ -106,13 +107,8 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
 
 def test_ending_soon_callback_ignores_changed_end_time() -> None:
     """A stale scheduled callback should not fire after eBay moves the end time."""
-    entry = Mock(entry_id="entry-1")
-    coordinator = object.__new__(EbayDataUpdateCoordinator)
-    coordinator.entry = entry
-    coordinator.options = DEFAULT_OPTIONS
-    coordinator._event_callbacks = {}
-    coordinator._scheduled = {}
-    coordinator._fired_ending_soon = set()
+    coordinator = _coordinator()
+    entry = coordinator.entry
     original_end_time = datetime.now(timezone.utc) + timedelta(minutes=60)
     current_end_time = original_end_time + timedelta(days=1)
     coordinator.data = {
@@ -148,3 +144,54 @@ def test_ending_soon_callback_ignores_changed_end_time() -> None:
     callback(datetime.now(timezone.utc))
 
     assert events == []
+
+
+def test_ended_items_do_not_emit_repeated_zero_to_zero_events() -> None:
+    """Polling an already-ended item again should not emit another ended event."""
+    coordinator = _coordinator()
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
+    old = {"item_id": "123", "title": "Ended", "seconds_left": 0}
+    new = {"item_id": "123", "title": "Ended", "seconds_left": 0}
+
+    coordinator._detect_watching_events({"123": old}, {"123": new})
+
+    assert events == []
+
+
+def test_ended_item_disappearance_does_not_emit_second_ended_event() -> None:
+    """An item that already reached zero should not emit ended again when removed."""
+    coordinator = _coordinator()
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["bidding"] = lambda *args: events.append(args)
+    already_ended = {"item_id": "123", "title": "Ended", "seconds_left": 0}
+
+    coordinator._detect_bidding_events({"123": already_ended}, {})
+
+    assert events == []
+
+
+def test_ending_soon_ignores_items_already_ended() -> None:
+    """Already-ended items should not qualify for ending-soon timers."""
+    coordinator = _coordinator()
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
+    end_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+    payload: dict[str, Any] = {
+        "watched": {
+            "123": {
+                "item_id": "123",
+                "title": "Ended item",
+                "end_time": end_time,
+                "seconds_left": 0,
+            }
+        },
+        "bidding": {},
+        "selling": {},
+        "summary": {},
+    }
+
+    coordinator._rebuild_ending_soon_timers(payload)
+
+    assert events == []
+    assert coordinator._scheduled == {}

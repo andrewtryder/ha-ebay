@@ -314,6 +314,7 @@ def _base_item(item: ET.Element, kind: str) -> dict[str, Any]:
         "bid_count": _to_int(_text(item, "e:SellingStatus/e:BidCount")),
         "watchers": None,
         "views": None,
+        "analytics_views": None,
         "offers": None,
         "questions": None,
         "quantity": None,
@@ -554,9 +555,7 @@ def summarize_payload(
 
     def under_threshold(item: dict[str, Any]) -> bool:
         seconds_left = item.get("seconds_left")
-        return (
-            seconds_left is not None and seconds_left <= ending_soon_threshold_seconds
-        )
+        return seconds_left is not None and 0 < seconds_left <= ending_soon_threshold_seconds
 
     selling_items = list(selling.values())
     watched_items = list(watched.values())
@@ -783,21 +782,24 @@ class EbayApiClient:
             "X-EBAY-API-SITEID": self.site_id,
             "X-EBAY-API-IAF-TOKEN": access_token,
         }
-        async with self._session.post(
-            self._endpoints.trading,
-            headers=headers,
-            data=xml_body.encode("utf-8"),
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            body = await response.text()
-            if response.status in {401, 403}:
-                raise EbayAuthError(
-                    f"eBay Trading API auth failed with HTTP {response.status}"
-                )
-            if response.status >= 400:
-                raise EbayApiError(
-                    f"eBay Trading API failed with HTTP {response.status}"
-                )
+        try:
+            async with self._session.post(
+                self._endpoints.trading,
+                headers=headers,
+                data=xml_body.encode("utf-8"),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                body = await response.text()
+                if response.status in {401, 403}:
+                    raise EbayAuthError(
+                        f"eBay Trading API auth failed with HTTP {response.status}"
+                    )
+                if response.status >= 400:
+                    raise EbayApiError(
+                        f"eBay Trading API failed with HTTP {response.status}"
+                    )
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise EbayApiError("eBay Trading API request failed") from exc
         try:
             root = ET.fromstring(body)
         except ET.ParseError as exc:
@@ -817,33 +819,36 @@ class EbayApiClient:
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=30)
         listing_ids = "{" + "|".join(item_ids) + "}"
-        async with self._session.get(
-            self._endpoints.analytics,
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            params={
-                "dimension": "LISTING",
-                "filter": f"listing_ids:{listing_ids},date_range:[{start:%Y%m%d}..{now:%Y%m%d}]",
-                "metric": "LISTING_VIEWS_TOTAL",
-                "sort": "LISTING_VIEWS_TOTAL",
-            },
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            if response.status in {400, 401, 403}:
-                raise EbayPartialFailure("analytics_views")
-            if response.status >= 400:
-                raise EbayApiError(
-                    f"eBay Sell Analytics failed with HTTP {response.status}"
-                )
-            try:
-                return await response.json(content_type=None)
-            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                raise EbayParseError(
-                    "Could not parse eBay Sell Analytics JSON"
-                ) from exc
+        try:
+            async with self._session.get(
+                self._endpoints.analytics,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                params={
+                    "dimension": "LISTING",
+                    "filter": f"listing_ids:{listing_ids},date_range:[{start:%Y%m%d}..{now:%Y%m%d}]",
+                    "metric": "LISTING_VIEWS_TOTAL",
+                    "sort": "LISTING_VIEWS_TOTAL",
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status in {400, 401, 403}:
+                    raise EbayPartialFailure("analytics_views")
+                if response.status >= 400:
+                    raise EbayApiError(
+                        f"eBay Sell Analytics failed with HTTP {response.status}"
+                    )
+                try:
+                    return await response.json(content_type=None)
+                except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                    raise EbayParseError(
+                        "Could not parse eBay Sell Analytics JSON"
+                    ) from exc
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise EbayPartialFailure("analytics_views") from exc
 
     async def _fetch_buying_pages(
         self,
@@ -918,7 +923,7 @@ class EbayApiClient:
                 for item_id, views in (await self._fetch_seller_list_views()).items():
                     if item_id in selling:
                         selling[item_id]["views"] = views
-            except EbayError as exc:
+            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug(
                     "Optional GetSellerList views failed: %s", type(exc).__name__
                 )
@@ -943,7 +948,7 @@ class EbayApiClient:
                     selling[item_id]["offers"] = count
                 if total_pages > BEST_OFFERS_MAX_PAGES:
                     partial_failures.append("active_offers_truncated")
-            except EbayError as exc:
+            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug("Optional GetBestOffers failed: %s", type(exc).__name__)
                 partial_failures.append("active_offers")
 
@@ -952,8 +957,8 @@ class EbayApiClient:
                     analytics = await self.async_get_traffic_report(list(selling))
                     for item_id, views in analytics_views_by_item_id(analytics).items():
                         if item_id in selling:
-                            selling[item_id]["views"] = views
-                except EbayError as exc:
+                            selling[item_id]["analytics_views"] = views
+                except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
                         "Optional analytics views failed: %s", type(exc).__name__
                     )

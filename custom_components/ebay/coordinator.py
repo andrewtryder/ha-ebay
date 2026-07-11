@@ -197,10 +197,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     old_value=old.get("bid_count"),
                     new_value=item.get("bid_count"),
                 )
-            if (old.get("seconds_left") or 1) > 0 and item.get("seconds_left") == 0:
+            if _was_running(old) and item.get("seconds_left") == 0:
                 self._emit("watching", "watched_item_ended", item)
         for item_id, old in previous.items():
-            if item_id not in current:
+            if item_id not in current and _was_running(old):
                 self._emit("watching", "watched_item_ended", old)
 
     def _detect_bidding_events(
@@ -214,10 +214,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emit("bidding", "outbid", item, old_value=True, new_value=False)
             if old.get("winning") is False and item.get("winning") is True:
                 self._emit("bidding", "winning", item, old_value=False, new_value=True)
-            if (old.get("seconds_left") or 1) > 0 and item.get("seconds_left") == 0:
+            if _was_running(old) and item.get("seconds_left") == 0:
                 self._emit("bidding", "bid_item_ended", item)
         for item_id, old in previous.items():
-            if item_id not in current:
+            if item_id not in current and _was_running(old):
                 self._emit("bidding", "bid_item_ended", old)
 
     def _emit_if_increased(
@@ -244,6 +244,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 end_time = item.get("end_time")
                 if not isinstance(end_time, datetime):
                     continue
+                now = datetime.now(timezone.utc)
+                if item.get("seconds_left") == 0 or end_time <= now:
+                    continue
                 normalized_end_time = _normalized_end_time(end_time)
                 key = (
                     self.entry.entry_id,
@@ -254,11 +257,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 wanted.add(key)
                 fire_at = end_time - timedelta(seconds=threshold)
-                now = datetime.now(timezone.utc)
                 if fire_at <= now:
                     if (
-                        item.get("seconds_left") is not None
-                        and item["seconds_left"] <= threshold
+                        _is_active_ending_soon(item, threshold)
                     ):
                         if key not in self._fired_ending_soon:
                             if self._emit(kind, event_type, item):
@@ -308,6 +309,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 or _normalized_end_time(end_time) != scheduled_end_time
             ):
                 return
+            if not _is_active_ending_soon(item, self.ending_soon_threshold_seconds):
+                return
             if self._emit(kind, event_type, item):
                 self._fired_ending_soon.add(key)
 
@@ -323,3 +326,15 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 def _normalized_end_time(end_time: datetime) -> str:
     """Return a stable UTC identity for an eBay end time."""
     return end_time.astimezone(timezone.utc).isoformat()
+
+
+def _was_running(item: dict[str, Any]) -> bool:
+    """Return whether an item had positive time remaining."""
+    seconds_left = item.get("seconds_left")
+    return seconds_left is not None and seconds_left > 0
+
+
+def _is_active_ending_soon(item: dict[str, Any], threshold: int) -> bool:
+    """Return whether an item is still active and inside the ending-soon window."""
+    seconds_left = item.get("seconds_left")
+    return seconds_left is not None and 0 < seconds_left <= threshold
