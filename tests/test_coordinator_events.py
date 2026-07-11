@@ -108,6 +108,7 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
     assert len(events) == 1
     assert events[0][1]["title"] == "Updated title"
     assert events[0][1]["price"] == 12.5
+    assert events[0][1]["seconds_left"] == coordinator.ending_soon_threshold_seconds
 
 
 def test_ending_soon_callback_ignores_changed_end_time() -> None:

@@ -260,7 +260,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if fire_at <= now:
                     if _is_active_ending_soon(item, threshold, now):
                         if key not in self._fired_ending_soon:
-                            if self._emit(kind, event_type, item):
+                            if self._emit(
+                                kind,
+                                event_type,
+                                _with_current_seconds_left(item, now),
+                            ):
                                 self._fired_ending_soon.add(key)
                         continue
                     fire_at = now
@@ -311,7 +315,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 item, self.ending_soon_threshold_seconds, now
             ):
                 return
-            if self._emit(kind, event_type, item):
+            if self._emit(kind, event_type, _with_current_seconds_left(item, now)):
                 self._fired_ending_soon.add(key)
 
         return fire
@@ -341,5 +345,20 @@ def _is_active_ending_soon(
     end_time = item.get("end_time")
     if not isinstance(end_time, datetime):
         return False
-    seconds_left = int((end_time - now.astimezone(timezone.utc)).total_seconds())
+    seconds_left = _seconds_until(end_time, now)
     return 0 < seconds_left <= threshold
+
+
+def _with_current_seconds_left(
+    item: dict[str, Any], now: datetime
+) -> dict[str, Any]:
+    """Return event item data with seconds_left calculated for the emission time."""
+    end_time = item.get("end_time")
+    if not isinstance(end_time, datetime):
+        return item
+    return {**item, "seconds_left": _seconds_until(end_time, now)}
+
+
+def _seconds_until(end_time: datetime, now: datetime) -> int:
+    """Return whole seconds from now until end_time."""
+    return max(0, int((end_time - now.astimezone(timezone.utc)).total_seconds()))

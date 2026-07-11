@@ -9,6 +9,7 @@ from homeassistant.components.sensor import SensorEntity, SensorEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -113,10 +114,43 @@ async def async_setup_entry(
     """Set up eBay sensors."""
     coordinator: EbayDataUpdateCoordinator = entry.runtime_data
     known_item_ids: set[str] = set()
+    registry = _entity_registry(hass)
+    platform = _current_entity_platform()
 
-    def _new_item_sensors() -> list["EbayItemSensor"]:
+    def _selected_item_sensors() -> list["EbayItemSensor"]:
+        return _item_sensors(coordinator, entry)
+
+    async def _async_remove_item_sensor(unique_id: str) -> None:
+        if registry is None:
+            return
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        if entity_id is None:
+            return
+        registry.async_remove(entity_id)
+        if platform is not None and entity_id in platform.entities:
+            try:
+                await platform.async_remove_entity(entity_id)
+            except KeyError:
+                pass
+
+    async def _async_remove_stale_item_sensors(selected_ids: set[str]) -> None:
+        stale_ids = (
+            known_item_ids
+            | (
+                _registered_item_sensor_unique_ids(registry, entry.entry_id)
+                if registry is not None
+                else set()
+            )
+        ) - selected_ids
+        for unique_id in stale_ids:
+            await _async_remove_item_sensor(unique_id)
+            known_item_ids.discard(unique_id)
+
+    def _new_item_sensors(
+        selected_sensors: list["EbayItemSensor"],
+    ) -> list["EbayItemSensor"]:
         sensors: list[EbayItemSensor] = []
-        for sensor in _item_sensors(coordinator, entry):
+        for sensor in selected_sensors:
             unique_id = sensor.unique_id
             if unique_id is None or unique_id in known_item_ids:
                 continue
@@ -124,20 +158,69 @@ async def async_setup_entry(
             sensors.append(sensor)
         return sensors
 
+    selected_sensors = _selected_item_sensors()
+    await _async_remove_stale_item_sensors(_unique_ids(selected_sensors))
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
         for description in SUMMARY_SENSORS
     ]
-    entities.extend(_new_item_sensors())
+    entities.extend(_new_item_sensors(selected_sensors))
     async_add_entities(entities)
 
-    @callback
-    def _handle_coordinator_update() -> None:
-        new_sensors = _new_item_sensors()
+    async def _async_reconcile_item_sensors() -> None:
+        selected_sensors = _selected_item_sensors()
+        await _async_remove_stale_item_sensors(_unique_ids(selected_sensors))
+        new_sensors = _new_item_sensors(selected_sensors)
         if new_sensors:
             async_add_entities(new_sensors)
 
+    @callback
+    def _handle_coordinator_update() -> None:
+        hass.async_create_task(_async_reconcile_item_sensors())
+
     entry.async_on_unload(coordinator.async_add_listener(_handle_coordinator_update))
+
+
+def _current_entity_platform() -> entity_platform.EntityPlatform | None:
+    """Return the current entity platform when running inside HA setup."""
+    try:
+        return entity_platform.async_get_current_platform()
+    except RuntimeError:
+        return None
+
+
+def _entity_registry(hass: HomeAssistant) -> er.EntityRegistry | None:
+    """Return the entity registry when a real Home Assistant object is available."""
+    try:
+        return er.async_get(hass)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _unique_ids(sensors: list["EbayItemSensor"]) -> set[str]:
+    return {sensor.unique_id for sensor in sensors if sensor.unique_id is not None}
+
+
+def _registered_item_sensor_unique_ids(
+    registry: er.EntityRegistry, entry_id: str
+) -> set[str]:
+    """Return per-item sensor unique IDs already registered for this entry."""
+    return {
+        registry_entry.unique_id
+        for registry_entry in er.async_entries_for_config_entry(registry, entry_id)
+        if registry_entry.domain == "sensor"
+        and registry_entry.platform == DOMAIN
+        and _is_item_sensor_unique_id(entry_id, registry_entry.unique_id)
+    }
+
+
+def _is_item_sensor_unique_id(entry_id: str, unique_id: str) -> bool:
+    """Return whether a unique ID belongs to a generated per-item sensor."""
+    for kind, fields in ITEM_SENSOR_FIELDS.items():
+        if not unique_id.startswith(f"{entry_id}_{kind}_"):
+            continue
+        return any(unique_id.endswith(f"_{suffix}") for suffix, _, _ in fields)
+    return False
 
 
 def _item_sensors(
