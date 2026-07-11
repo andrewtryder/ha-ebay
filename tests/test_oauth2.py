@@ -536,3 +536,34 @@ def _schema_fields(schema: Any) -> dict[str, Any]:
 
 async def _async_noop(*args: Any, **kwargs: Any) -> None:
     """Async no-op for patched config-flow helpers."""
+
+
+def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    import voluptuous as vol
+
+    entry = type("Entry", (), {"options": {}})()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    result = asyncio.run(flow.async_step_init())
+    assert result["type"] == "form"
+    schema = result["data_schema"]
+    with pytest.raises(vol.Invalid):
+        schema({"poll_interval": 1, "ending_soon_threshold": 60, "entity_mode": "balanced", "per_item_cap": 25, "analytics_enabled": True, "buying_enabled": True, "selling_enabled": True})
+    created = asyncio.run(
+        flow.async_step_init(
+            {
+                "poll_interval": 30,
+                "ending_soon_threshold": 60,
+                "entity_mode": "detailed",
+                "per_item_cap": 50,
+                "pinned_item_ids": "1",
+                "analytics_enabled": False,
+                "buying_enabled": True,
+                "selling_enabled": True,
+            }
+        )
+    )
+    assert created["type"] == "create_entry"
+    assert created["data"]["entity_mode"] == "detailed"
+    assert created["data"]["analytics_enabled"] is False

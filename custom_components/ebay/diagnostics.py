@@ -81,6 +81,8 @@ async def async_get_config_entry_diagnostics(
         "last_successful_update": summary.get("last_successful_update"),
         "last_error_category": coordinator.last_error_category,
         "partial_failure_categories": data.get("partial_failures", []),
+        "truncated_collections": data.get("truncated_collections", {}),
+        "api_warnings": data.get("api_warnings", []),
         "redacted": sorted(TO_REDACT),
     }
 

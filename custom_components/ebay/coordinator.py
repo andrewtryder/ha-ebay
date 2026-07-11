@@ -17,20 +17,28 @@ from .const import (
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_ENDING_SOON_THRESHOLD,
+    CONF_ENTITY_MODE,
+    CONF_PER_ITEM_CAP,
+    CONF_PINNED_ITEM_IDS,
     CONF_POLL_INTERVAL,
     CONF_SELLING_ENABLED,
     DOMAIN,
+    ENTITY_MODE_DETAILED,
+    ENTITY_MODE_MINIMAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 EventCallback = Callable[[str, dict[str, Any]], None]
 EndingSoonKey = tuple[str, str, str, int, str]
+SelectedItemKey = tuple[str, str]
 
 COLLECTION_BY_EVENT_KIND = {
     "watching": "watched",
     "bidding": "bidding",
 }
+
+_BASELINE_COLLECTIONS = ("watched", "bidding", "selling")
 
 
 class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -48,6 +56,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.options = options
         self.previous_payload: dict[str, Any] | None = None
         self.last_error_category: str | None = None
+        self.selected_item_keys: set[SelectedItemKey] = set()
         self._event_callbacks: dict[str, EventCallback] = {}
         self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
         self._fired_ending_soon: set[EndingSoonKey] = set()
@@ -99,12 +108,36 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_successful_update"
         ].isoformat()
         payload["summary"]["partial_failures"] = payload["partial_failures"]
+        payload["summary"]["truncated_collections"] = payload.get(
+            "truncated_collections", {}
+        )
+        payload["summary"]["api_warnings"] = payload.get("api_warnings", [])
         self.last_error_category = None
 
         self._detect_transition_events(self.previous_payload, payload)
         self._rebuild_ending_soon_timers(payload)
-        self.previous_payload = payload
+        self.previous_payload = _baseline_payload(self.previous_payload, payload)
+        self.refresh_selected_item_keys(payload)
         return payload
+
+    def refresh_selected_item_keys(
+        self, data: dict[str, Any] | None = None
+    ) -> set[SelectedItemKey]:
+        """Compute and cache the current per-item selection."""
+        payload = data if data is not None else self.data
+        mode = self.options[CONF_ENTITY_MODE]
+        if mode == ENTITY_MODE_MINIMAL or not payload:
+            self.selected_item_keys = set()
+            return self.selected_item_keys
+        selected = _select_item_entities(
+            payload,
+            mode,
+            int(self.options[CONF_PER_ITEM_CAP]),
+            _pinned_ids(self.options.get(CONF_PINNED_ITEM_IDS, "")),
+            self.ending_soon_threshold_seconds,
+        )
+        self.selected_item_keys = set(selected)
+        return self.selected_item_keys
 
     def _emit(
         self, kind: str, event_type: str, item: dict[str, Any], **extra: Any
@@ -146,12 +179,28 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         if previous is None:
             return
-        self._detect_selling_events(previous["selling"], current["selling"])
-        self._detect_watching_events(previous["watched"], current["watched"])
-        self._detect_bidding_events(previous["bidding"], current["bidding"])
+        self._detect_selling_events(
+            previous["selling"],
+            current["selling"],
+            suppress_disappearance=_collection_truncated(previous, current, "selling"),
+        )
+        self._detect_watching_events(
+            previous["watched"],
+            current["watched"],
+            suppress_disappearance=_collection_truncated(previous, current, "watched"),
+        )
+        self._detect_bidding_events(
+            previous["bidding"],
+            current["bidding"],
+            suppress_disappearance=_collection_truncated(previous, current, "bidding"),
+        )
 
     def _detect_selling_events(
-        self, previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]]
+        self,
+        previous: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]],
+        *,
+        suppress_disappearance: bool,
     ) -> None:
         for item_id, item in current.items():
             old = previous.get(item_id)
@@ -170,12 +219,18 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._emit_if_increased(
                 "selling", "quantity_sold_increased", old, item, "quantity_sold"
             )
+        if suppress_disappearance:
+            return
         for item_id, old in previous.items():
             if item_id not in current:
                 self._emit("selling", "item_disappeared_unknown", old)
 
     def _detect_watching_events(
-        self, previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]]
+        self,
+        previous: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]],
+        *,
+        suppress_disappearance: bool,
     ) -> None:
         for item_id, item in current.items():
             old = previous.get(item_id)
@@ -199,12 +254,18 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             if _was_running(old) and item.get("seconds_left") == 0:
                 self._emit("watching", "watched_item_ended", item)
+        if suppress_disappearance:
+            return
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
                 self._emit("watching", "watched_item_disappeared_unknown", old)
 
     def _detect_bidding_events(
-        self, previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]]
+        self,
+        previous: dict[str, dict[str, Any]],
+        current: dict[str, dict[str, Any]],
+        *,
+        suppress_disappearance: bool,
     ) -> None:
         for item_id, item in current.items():
             old = previous.get(item_id)
@@ -216,6 +277,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emit("bidding", "winning", item, old_value=False, new_value=True)
             if _was_running(old) and item.get("seconds_left") == 0:
                 self._emit("bidding", "bid_item_ended", item)
+        if suppress_disappearance:
+            return
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
                 self._emit("bidding", "bid_item_disappeared_unknown", old)
@@ -260,7 +323,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if fire_at <= now:
                     if _is_active_ending_soon(item, threshold, now):
                         if key not in self._fired_ending_soon:
-                            if self._emit(kind, event_type, item):
+                            if self._emit(
+                                kind,
+                                event_type,
+                                _with_current_seconds_left(item, now),
+                            ):
                                 self._fired_ending_soon.add(key)
                         continue
                     fire_at = now
@@ -311,7 +378,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 item, self.ending_soon_threshold_seconds, now
             ):
                 return
-            if self._emit(kind, event_type, item):
+            if self._emit(kind, event_type, _with_current_seconds_left(item, now)):
                 self._fired_ending_soon.add(key)
 
         return fire
@@ -321,6 +388,65 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for cancel in self._scheduled.values():
             cancel()
         self._scheduled.clear()
+
+
+def _baseline_payload(
+    previous: dict[str, Any] | None, current: dict[str, Any]
+) -> dict[str, Any]:
+    """Return the next event-comparison baseline, preserving truncated collections."""
+    baseline = dict(current)
+    if previous is None:
+        return baseline
+    truncated = current.get("truncated_collections") or {}
+    for key in _BASELINE_COLLECTIONS:
+        if truncated.get(key):
+            baseline[key] = previous.get(key, {})
+    return baseline
+
+
+def _collection_truncated(
+    previous: dict[str, Any], current: dict[str, Any], key: str
+) -> bool:
+    """Return whether either snapshot reports the collection as truncated."""
+    for payload in (previous, current):
+        if (payload.get("truncated_collections") or {}).get(key):
+            return True
+    return False
+
+
+def _pinned_ids(value: str) -> set[str]:
+    return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
+
+
+def _select_item_entities(
+    data: dict[str, Any],
+    mode: str,
+    cap: int,
+    pinned: set[str],
+    ending_soon_threshold: int,
+) -> list[SelectedItemKey]:
+    candidates: list[tuple[int, str, str]] = []
+    for kind in ("selling", "watched", "bidding"):
+        for item_id, item in data.get(kind, {}).items():
+            priority = 100
+            if item_id in pinned:
+                priority = 0
+            elif kind == "selling" and (
+                (item.get("bid_count") or 0) > 0
+                or (item.get("offers") or 0) > 0
+                or (item.get("questions") or 0) > 0
+            ):
+                priority = 10
+            elif (
+                item.get("seconds_left") is not None
+                and 0 < item["seconds_left"] <= ending_soon_threshold
+            ):
+                priority = 20
+            elif mode != ENTITY_MODE_DETAILED:
+                continue
+            candidates.append((priority, kind, item_id))
+    candidates.sort(key=lambda value: (value[0], value[1], value[2]))
+    return [(kind, item_id) for _, kind, item_id in candidates[:cap]]
 
 
 def _normalized_end_time(end_time: datetime) -> str:
@@ -341,5 +467,20 @@ def _is_active_ending_soon(
     end_time = item.get("end_time")
     if not isinstance(end_time, datetime):
         return False
-    seconds_left = int((end_time - now.astimezone(timezone.utc)).total_seconds())
+    seconds_left = _seconds_until(end_time, now)
     return 0 < seconds_left <= threshold
+
+
+def _with_current_seconds_left(
+    item: dict[str, Any], now: datetime
+) -> dict[str, Any]:
+    """Return event item data with seconds_left calculated for the emission time."""
+    end_time = item.get("end_time")
+    if not isinstance(end_time, datetime):
+        return item
+    return {**item, "seconds_left": _seconds_until(end_time, now)}
+
+
+def _seconds_until(end_time: datetime, now: datetime) -> int:
+    """Return whole seconds from now until end_time."""
+    return max(0, int((end_time - now.astimezone(timezone.utc)).total_seconds()))

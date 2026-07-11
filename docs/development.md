@@ -35,6 +35,14 @@ Run the fast local checks with:
 .venv/bin/python -m compileall custom_components
 ```
 
+`pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
+floor of 80%.
+
+The pytest harness currently installs Home Assistant `2026.2.3` via
+`pytest-homeassistant-custom-component` (latest on PyPI). The declared HACS
+minimum remains `2026.3.0` for runtime/docker; add a second CI matrix entry when
+a matching harness pin is published.
+
 Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
 
 ```bash

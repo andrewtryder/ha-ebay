@@ -36,6 +36,8 @@ DEFAULT_SCOPE = (
 )
 TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 MAX_PAGES = 20
+ANALYTICS_BATCH_SIZE = 100
+_WARNING_MESSAGE_MAX_LEN = 240
 
 
 class EbayError(Exception):
@@ -248,6 +250,45 @@ def _auth_like_error(root: ET.Element) -> bool:
     return False
 
 
+def _sanitize_warning_text(value: str | None) -> str | None:
+    """Truncate and redact credential-like substrings from Trading API warnings."""
+    if not value:
+        return None
+    sanitized = value
+    for marker in ("Bearer ", "token=", "refresh_token", "access_token"):
+        if marker.lower() in sanitized.lower():
+            sanitized = "[redacted]"
+            break
+    if len(sanitized) > _WARNING_MESSAGE_MAX_LEN:
+        sanitized = f"{sanitized[:_WARNING_MESSAGE_MAX_LEN]}…"
+    return sanitized
+
+
+def extract_trading_warnings(root: ET.Element) -> list[dict[str, str | None]]:
+    """Return sanitized Trading API warning entries from an Ack=Warning response."""
+    warnings: list[dict[str, str | None]] = []
+    for error in root.findall("e:Errors", namespaces=NS):
+        severity = (_text(error, "e:SeverityCode") or "").lower()
+        if severity and severity != "warning":
+            continue
+        warnings.append(
+            {
+                "code": _text(error, "e:ErrorCode"),
+                "severity": _text(error, "e:SeverityCode"),
+                "short_message": _sanitize_warning_text(_text(error, "e:ShortMessage")),
+                "long_message": _sanitize_warning_text(_text(error, "e:LongMessage")),
+            }
+        )
+    return warnings
+
+
+def chunk_item_ids(item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE) -> list[list[str]]:
+    """Split item IDs into bounded Analytics request batches."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    return [item_ids[index : index + batch_size] for index in range(0, len(item_ids), batch_size)]
+
+
 def _money(item: ET.Element, path: str) -> tuple[float | None, str | None]:
     node = item.find(path, namespaces=NS)
     if node is None or node.text is None:
@@ -319,7 +360,7 @@ def _base_item(item: ET.Element, kind: str) -> dict[str, Any]:
         "bid_count": _to_int(_text(item, "e:SellingStatus/e:BidCount")),
         "watchers": None,
         "views": None,
-        "analytics_views": None,
+        "analytics_views_30d": None,
         "offers": None,
         "questions": None,
         "quantity": None,
@@ -601,7 +642,7 @@ def summarize_payload(
         "bidding_items": len(bidding),
         "selling_total_bids": sum(item.get("bid_count") or 0 for item in selling_items),
         "selling_total_offers": sum(item.get("offers") or 0 for item in selling_items),
-        "selling_total_sold": sum(
+        "active_listings_quantity_sold": sum(
             item.get("quantity_sold") or 0 for item in selling_items
         ),
         "selling_total_watchers": sum(
@@ -649,6 +690,7 @@ class EbayApiClient:
         self._endpoints = endpoints_for(environment)
         self._access_token: str | None = None
         self._access_token_expires_at: datetime | None = None
+        self._api_warnings: list[dict[str, str | None]] = []
 
     async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
         """Exchange an authorization code for OAuth tokens."""
@@ -814,10 +856,12 @@ class EbayApiClient:
             if _auth_like_error(root):
                 raise EbayAuthError(f"eBay Trading API returned Ack={ack!r}")
             raise EbayApiError(f"eBay Trading API returned Ack={ack!r}")
+        if ack == "Warning":
+            self._api_warnings.extend(extract_trading_warnings(root))
         return root
 
     async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
-        """Fetch optional Sell Analytics traffic report."""
+        """Fetch optional Sell Analytics traffic report for one ID batch."""
         if not item_ids:
             return {}
         access_token = await self.async_get_access_token()
@@ -855,15 +899,33 @@ class EbayApiClient:
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise EbayPartialFailure("analytics_views") from exc
 
+    async def async_fetch_analytics_views(
+        self, item_ids: list[str]
+    ) -> tuple[dict[str, int], bool]:
+        """Fetch 30-day Analytics views in batches; merge successes on partial failure."""
+        if not item_ids:
+            return {}, False
+        merged: dict[str, int] = {}
+        partial_failure = False
+        for batch in chunk_item_ids(item_ids):
+            try:
+                payload = await self.async_get_traffic_report(batch)
+            except (EbayError, aiohttp.ClientError, TimeoutError):
+                partial_failure = True
+                continue
+            merged.update(analytics_views_by_item_id(payload))
+        return merged, partial_failure
+
     async def _fetch_buying_pages(
         self,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], bool]:
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], bool, bool]:
         """Fetch all configured buying pages up to MAX_PAGES."""
         watched_items: list[dict[str, Any]] = []
         bidding_items: list[dict[str, Any]] = []
         page = 1
         total_pages = 1
-        truncated = False
+        watched_truncated = False
+        bidding_truncated = False
         while page <= total_pages:
             root = await self.async_call_trading_api(
                 READ_ONLY_CALL_NAME, build_get_my_ebay_buying_xml(page=page)
@@ -872,7 +934,8 @@ class EbayApiClient:
             bidding_items.extend(parse_container(root, "BidList", "bidding"))
             watch_pages = _reported_total_pages(root, "WatchList")
             bid_pages = _reported_total_pages(root, "BidList")
-            truncated = truncated or watch_pages > MAX_PAGES or bid_pages > MAX_PAGES
+            watched_truncated = watched_truncated or watch_pages > MAX_PAGES
+            bidding_truncated = bidding_truncated or bid_pages > MAX_PAGES
             total_pages = max(
                 total_pages,
                 min(watch_pages, MAX_PAGES),
@@ -882,7 +945,8 @@ class EbayApiClient:
         return (
             _dict_by_item_id(watched_items),
             _dict_by_item_id(bidding_items),
-            truncated,
+            watched_truncated,
+            bidding_truncated,
         )
 
     async def _fetch_selling_pages(self) -> tuple[dict[str, dict[str, Any]], bool]:
@@ -928,14 +992,25 @@ class EbayApiClient:
         ending_soon_threshold_seconds: int,
     ) -> dict[str, Any]:
         """Fetch and normalize all configured read-only telemetry."""
+        self._api_warnings = []
         partial_failures: list[str] = []
         watched: dict[str, dict[str, Any]] = {}
         bidding: dict[str, dict[str, Any]] = {}
         selling: dict[str, dict[str, Any]] = {}
+        watched_truncated = False
+        bidding_truncated = False
+        selling_truncated = False
+        seller_list_views_truncated = False
+        active_offers_truncated = False
 
         if buying_enabled:
-            watched, bidding, buying_truncated = await self._fetch_buying_pages()
-            if buying_truncated:
+            (
+                watched,
+                bidding,
+                watched_truncated,
+                bidding_truncated,
+            ) = await self._fetch_buying_pages()
+            if watched_truncated or bidding_truncated:
                 partial_failures.append("buying_truncated")
 
         if selling_enabled:
@@ -943,13 +1018,13 @@ class EbayApiClient:
             if selling_truncated:
                 partial_failures.append("selling_truncated")
             try:
-                seller_list_views, seller_list_truncated = (
+                seller_list_views, seller_list_views_truncated = (
                     await self._fetch_seller_list_views()
                 )
                 for item_id, views in seller_list_views.items():
                     if item_id in selling:
                         selling[item_id]["views"] = views
-                if seller_list_truncated:
+                if seller_list_views_truncated:
                     partial_failures.append("seller_list_views_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug(
@@ -975,6 +1050,7 @@ class EbayApiClient:
                 for item_id, count in active_offer_counts.items():
                     selling[item_id]["offers"] = count
                 if total_pages > BEST_OFFERS_MAX_PAGES:
+                    active_offers_truncated = True
                     partial_failures.append("active_offers_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug("Optional GetBestOffers failed: %s", type(exc).__name__)
@@ -982,15 +1058,31 @@ class EbayApiClient:
 
             if analytics_enabled:
                 try:
-                    analytics = await self.async_get_traffic_report(list(selling))
-                    for item_id, views in analytics_views_by_item_id(analytics).items():
+                    views_by_id, analytics_partial = await self.async_fetch_analytics_views(
+                        list(selling)
+                    )
+                    for item_id, views in views_by_id.items():
                         if item_id in selling:
-                            selling[item_id]["analytics_views"] = views
+                            selling[item_id]["analytics_views_30d"] = views
+                    if analytics_partial:
+                        partial_failures.append("analytics_views")
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
                         "Optional analytics views failed: %s", type(exc).__name__
                     )
                     partial_failures.append("analytics_views")
+
+        api_warnings = list(self._api_warnings)
+        if api_warnings and "trading_warning" not in partial_failures:
+            partial_failures.append("trading_warning")
+
+        truncated_collections = {
+            "watched": watched_truncated,
+            "bidding": bidding_truncated,
+            "selling": selling_truncated,
+            "seller_list_views": seller_list_views_truncated,
+            "active_offers": active_offers_truncated,
+        }
 
         now = datetime.now(timezone.utc)
         summary = summarize_payload(
@@ -1004,4 +1096,6 @@ class EbayApiClient:
             "last_update": now,
             "last_successful_update": now,
             "partial_failures": partial_failures,
+            "truncated_collections": truncated_collections,
+            "api_warnings": api_warnings,
         }

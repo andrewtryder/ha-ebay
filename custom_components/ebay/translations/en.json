@@ -11,7 +11,7 @@
       },
       "prepare_application": {
         "title": "Prepare your eBay application",
-        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}"
+        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}\n\nAuthorization always requests the base eBay API scope and sell.analytics.readonly (Sell Analytics). Analytics enrichment can later be disabled in integration options without removing the granted scope."
       },
       "credentials": {
         "title": "Enter eBay application credentials",
@@ -36,14 +36,14 @@
       },
       "oauth": {
         "title": "Authorize eBay",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the base API scope and Sell Analytics read-only access. You can disable Analytics enrichment later in options without revoking the granted scope.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
       },
       "manual": {
         "title": "Authorize eBay manually",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the base API scope and Sell Analytics read-only access. You can disable Analytics enrichment later in options without revoking the granted scope.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
@@ -71,7 +71,7 @@
           "entity_mode": "Per-item entity mode",
           "per_item_cap": "Tracked item cap",
           "pinned_item_ids": "Pinned item IDs",
-          "analytics_enabled": "Enable Sell Analytics views",
+          "analytics_enabled": "Enable Sell Analytics 30-day views",
           "buying_enabled": "Enable buying and watch data",
           "selling_enabled": "Enable selling data"
         },
@@ -83,21 +83,47 @@
   },
   "entity": {
     "sensor": {
-      "active_selling_items": { "name": "Active selling items" },
-      "watched_items": { "name": "Watched items" },
-      "bidding_items": { "name": "Bidding items" },
-      "selling_total_bids": { "name": "Selling total bids" },
-      "selling_total_offers": { "name": "Selling total offers" },
-      "selling_total_sold": { "name": "Selling total sold" },
-      "selling_total_watchers": { "name": "Selling total watchers" },
-      "selling_total_views": { "name": "Selling total views" },
-      "watched_ending_soon": { "name": "Watched ending soon" },
-      "selling_ending_soon": { "name": "Selling ending soon" }
+      "active_selling_items": {
+        "name": "Active selling items"
+      },
+      "watched_items": {
+        "name": "Watched items"
+      },
+      "bidding_items": {
+        "name": "Bidding items"
+      },
+      "selling_total_bids": {
+        "name": "Selling total bids"
+      },
+      "selling_total_offers": {
+        "name": "Selling total offers"
+      },
+      "active_listings_quantity_sold": {
+        "name": "Quantity sold across active listings"
+      },
+      "selling_total_watchers": {
+        "name": "Selling total watchers"
+      },
+      "selling_total_views": {
+        "name": "Selling total views"
+      },
+      "watched_ending_soon": {
+        "name": "Watched ending soon"
+      },
+      "selling_ending_soon": {
+        "name": "Selling ending soon"
+      }
     },
     "event": {
-      "selling_activity": { "name": "Selling activity" },
-      "watching_activity": { "name": "Watching activity" },
-      "bidding_activity": { "name": "Bidding activity" }
+      "selling_activity": {
+        "name": "Selling activity"
+      },
+      "watching_activity": {
+        "name": "Watching activity"
+      },
+      "bidding_activity": {
+        "name": "Bidding activity"
+      }
     }
   }
 }

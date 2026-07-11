@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import Mock
@@ -108,6 +110,7 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
     assert len(events) == 1
     assert events[0][1]["title"] == "Updated title"
     assert events[0][1]["price"] == 12.5
+    assert events[0][1]["seconds_left"] == coordinator.ending_soon_threshold_seconds
 
 
 def test_ending_soon_callback_ignores_changed_end_time() -> None:
@@ -159,7 +162,9 @@ def test_ended_items_do_not_emit_repeated_zero_to_zero_events() -> None:
     old = {"item_id": "123", "title": "Ended", "seconds_left": 0}
     new = {"item_id": "123", "title": "Ended", "seconds_left": 0}
 
-    coordinator._detect_watching_events({"123": old}, {"123": new})
+    coordinator._detect_watching_events(
+        {"123": old}, {"123": new}, suppress_disappearance=False
+    )
 
     assert events == []
 
@@ -171,7 +176,9 @@ def test_ended_item_disappearance_does_not_emit_second_ended_event() -> None:
     coordinator._event_callbacks["bidding"] = lambda *args: events.append(args)
     already_ended = {"item_id": "123", "title": "Ended", "seconds_left": 0}
 
-    coordinator._detect_bidding_events({"123": already_ended}, {})
+    coordinator._detect_bidding_events(
+        {"123": already_ended}, {}, suppress_disappearance=False
+    )
 
     assert events == []
 
@@ -183,7 +190,9 @@ def test_watched_item_disappearance_emits_unknown_not_ended() -> None:
     coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
     running = {"item_id": "123", "title": "Removed", "seconds_left": 600}
 
-    coordinator._detect_watching_events({"123": running}, {})
+    coordinator._detect_watching_events(
+        {"123": running}, {}, suppress_disappearance=False
+    )
 
     assert len(events) == 1
     assert events[0][0] == "watched_item_disappeared_unknown"
@@ -198,7 +207,9 @@ def test_bid_item_disappearance_emits_unknown_not_ended() -> None:
     coordinator._event_callbacks["bidding"] = lambda *args: events.append(args)
     running = {"item_id": "123", "title": "Removed", "seconds_left": 600}
 
-    coordinator._detect_bidding_events({"123": running}, {})
+    coordinator._detect_bidding_events(
+        {"123": running}, {}, suppress_disappearance=False
+    )
 
     assert len(events) == 1
     assert events[0][0] == "bid_item_disappeared_unknown"
@@ -230,3 +241,200 @@ def test_ending_soon_ignores_items_already_ended() -> None:
 
     assert events == []
     assert coordinator._scheduled == {}
+
+
+def test_no_events_on_initial_startup() -> None:
+    """First successful payload should not emit transition events."""
+    coordinator = _coordinator()
+    events: list[tuple[str, str]] = []
+
+    def capture(kind: str):
+        def _cb(event_type: str, event_data: dict[str, Any]) -> None:
+            events.append((kind, event_type))
+
+        return _cb
+
+    coordinator._event_callbacks["selling"] = capture("selling")
+    coordinator._event_callbacks["watching"] = capture("watching")
+    coordinator._event_callbacks["bidding"] = capture("bidding")
+    current = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2, "seconds_left": 100}},
+        "watched": {"w1": {"item_id": "w1", "current_price": 5, "seconds_left": 100}},
+        "bidding": {"b1": {"item_id": "b1", "winning": True, "seconds_left": 100}},
+        "truncated_collections": {},
+    }
+    coordinator._detect_transition_events(None, current)
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    ("field", "event_type", "old_value", "new_value"),
+    [
+        ("bid_count", "bid_count_increased", 1, 2),
+        ("offers", "offer_received", 0, 1),
+        ("questions", "question_received", 0, 1),
+        ("watchers", "watcher_count_increased", 3, 4),
+        ("quantity_sold", "quantity_sold_increased", 1, 2),
+    ],
+)
+def test_selling_increase_events(
+    field: str, event_type: str, old_value: int, new_value: int
+) -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    old = {"item_id": "s1", "title": "Sell", field: old_value}
+    new = {"item_id": "s1", "title": "Sell", field: new_value}
+    coordinator._detect_selling_events(
+        {"s1": old}, {"s1": new}, suppress_disappearance=False
+    )
+    assert events == [event_type]
+
+
+@pytest.mark.parametrize(
+    ("field", "event_type", "old_value", "new_value"),
+    [
+        ("bid_count", "bid_count_increased", 2, 2),
+        ("offers", "offer_received", 2, 1),
+        ("questions", "question_received", 1, 0),
+    ],
+)
+def test_selling_increase_only_counters_ignore_unchanged_or_decrease(
+    field: str, event_type: str, old_value: int, new_value: int
+) -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    old = {"item_id": "s1", field: old_value}
+    new = {"item_id": "s1", field: new_value}
+    coordinator._detect_selling_events(
+        {"s1": old}, {"s1": new}, suppress_disappearance=False
+    )
+    assert events == []
+
+
+def test_watched_price_and_bid_count_changes() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, ed: events.append(et)
+    old = {"item_id": "w1", "current_price": 10.0, "bid_count": 1, "seconds_left": 100}
+    new = {"item_id": "w1", "current_price": 12.0, "bid_count": 2, "seconds_left": 90}
+    coordinator._detect_watching_events(
+        {"w1": old}, {"w1": new}, suppress_disappearance=False
+    )
+    assert events == [
+        "watched_item_price_changed",
+        "watched_item_bid_count_changed",
+    ]
+
+
+def test_watched_item_ended_positive() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, ed: events.append(et)
+    old = {"item_id": "w1", "seconds_left": 30}
+    new = {"item_id": "w1", "seconds_left": 0}
+    coordinator._detect_watching_events(
+        {"w1": old}, {"w1": new}, suppress_disappearance=False
+    )
+    assert events == ["watched_item_ended"]
+
+
+def test_winning_and_outbid_transitions() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["bidding"] = lambda et, ed: events.append(et)
+    coordinator._detect_bidding_events(
+        {"b1": {"item_id": "b1", "winning": True, "seconds_left": 100}},
+        {"b1": {"item_id": "b1", "winning": False, "seconds_left": 90}},
+        suppress_disappearance=False,
+    )
+    coordinator._detect_bidding_events(
+        {"b2": {"item_id": "b2", "winning": False, "seconds_left": 100}},
+        {"b2": {"item_id": "b2", "winning": True, "seconds_left": 90}},
+        suppress_disappearance=False,
+    )
+    assert events == ["outbid", "winning"]
+
+
+def test_bid_item_ended_positive() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["bidding"] = lambda et, ed: events.append(et)
+    coordinator._detect_bidding_events(
+        {"b1": {"item_id": "b1", "winning": True, "seconds_left": 10}},
+        {"b1": {"item_id": "b1", "winning": True, "seconds_left": 0}},
+        suppress_disappearance=False,
+    )
+    assert events == ["bid_item_ended"]
+
+
+def test_selling_disappearance_emits_unknown() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {"s1": {"item_id": "s1", "title": "Gone"}},
+        {},
+        suppress_disappearance=False,
+    )
+    assert events == ["item_disappeared_unknown"]
+
+
+def test_truncated_snapshot_suppresses_disappearance_events() -> None:
+    coordinator = _coordinator()
+    events: list[tuple[str, str]] = []
+
+    def capture(kind: str):
+        def _cb(event_type: str, event_data: dict[str, Any]) -> None:
+            events.append((kind, event_type))
+
+        return _cb
+
+    coordinator._event_callbacks["selling"] = capture("selling")
+    coordinator._event_callbacks["watching"] = capture("watching")
+    coordinator._event_callbacks["bidding"] = capture("bidding")
+    previous = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 1}, "s2": {"item_id": "s2"}},
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {"b1": {"item_id": "b1", "seconds_left": 100}},
+        "truncated_collections": {},
+    }
+    current = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {
+            "selling": True,
+            "watched": True,
+            "bidding": True,
+        },
+    }
+    coordinator._detect_transition_events(previous, current)
+    assert ("selling", "item_disappeared_unknown") not in events
+    assert ("watching", "watched_item_disappeared_unknown") not in events
+    assert ("bidding", "bid_item_disappeared_unknown") not in events
+    assert ("selling", "bid_count_increased") in events
+
+
+def test_truncated_baseline_keeps_prior_collection() -> None:
+    from custom_components.ebay.coordinator import _baseline_payload
+
+    previous = {
+        "selling": {"s1": {"item_id": "s1"}, "s2": {"item_id": "s2"}},
+        "watched": {},
+        "bidding": {},
+        "truncated_collections": {},
+    }
+    current = {
+        "selling": {"s1": {"item_id": "s1"}},
+        "watched": {},
+        "bidding": {},
+        "summary": {"x": 1},
+        "truncated_collections": {"selling": True, "watched": False, "bidding": False},
+        "partial_failures": ["selling_truncated"],
+    }
+    baseline = _baseline_payload(previous, current)
+    assert baseline["selling"] == previous["selling"]
+    assert baseline["summary"] == current["summary"]
+    assert baseline["truncated_collections"]["selling"] is True
