@@ -10,12 +10,17 @@ permissions:
 
 jobs:
   python:
-    name: Python
+    name: Python (HA ${{ matrix.ha-label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.13"]
+        include:
+          # Current published phcc/HA pin (2026.2.3). Add a second include
+          # entry for the declared HACS minimum (2026.3.0) once available on PyPI.
+          - python-version: "3.13"
+            ha-label: "2026.2.3-current"
+            requirements-ha: requirements-ha.txt
 
     steps:
       - uses: actions/checkout@v4
@@ -32,10 +37,10 @@ jobs:
           if [ -f requirements-dev.txt ]; then
             python -m pip install -r requirements-dev.txt
           else
-            python -m pip install pytest ruff pillow
+            python -m pip install pytest pytest-cov ruff pillow
           fi
-          if [ -f requirements-ha.txt ]; then
-            python -m pip install -r requirements-ha.txt
+          if [ -f "${{ matrix.requirements-ha }}" ]; then
+            python -m pip install -r "${{ matrix.requirements-ha }}"
           else
             python -m pip install pytest-homeassistant-custom-component
           fi
@@ -60,7 +65,7 @@ jobs:
             echo "No custom_components directory yet; skipping compileall."
           fi
 
-      - name: Tests
+      - name: Tests with coverage
         run: |
           if [ -d tests ]; then
             pytest -q

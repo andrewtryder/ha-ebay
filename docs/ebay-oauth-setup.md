@@ -62,6 +62,18 @@ first if you do not already have an account.
 This developer account can be different from the regular eBay account you will
 authorize later.
 
+## OAuth scopes
+
+Home Assistant always requests both:
+
+- the base eBay API scope
+- `sell.analytics.readonly` (Sell Analytics)
+
+Analytics enrichment can be turned off later in integration options. That stops
+Analytics API calls but does not revoke the granted scope; a new authorization
+would be required to change consented scopes.
+
+
 ## 3. Create or open an application keyset
 
 Create an application if needed, or open the application you want Home
@@ -213,7 +225,7 @@ available.
 | OAuth or API calls fail immediately | Confirm that the selected environment matches the Production or Sandbox keyset |
 | Setup used a token copied from the developer portal | Restart setup and authorize from Home Assistant instead |
 | US account data is missing or incorrect | Confirm that Site ID is `0` |
-| Sell Analytics views are unavailable | Reauthorize with the analytics read-only scope, or disable analytics in the integration options |
+| Sell Analytics 30-day views are unavailable | Reauthorize so consent includes `sell.analytics.readonly`, or disable analytics in the integration options |
 | Browser does not return to Home Assistant | Use the manual authorization fallback and paste the complete final callback URL |
 
 ## Security notes

@@ -13,15 +13,8 @@ from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    CONF_ENTITY_MODE,
-    CONF_PER_ITEM_CAP,
-    CONF_PINNED_ITEM_IDS,
-    DOMAIN,
-    ENTITY_MODE_DETAILED,
-    ENTITY_MODE_MINIMAL,
-)
-from .coordinator import EbayDataUpdateCoordinator
+from .const import DOMAIN
+from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -54,9 +47,9 @@ SUMMARY_SENSORS = [
         value_key="selling_total_offers",
     ),
     EbaySummarySensorDescription(
-        key="selling_total_sold",
-        translation_key="selling_total_sold",
-        value_key="selling_total_sold",
+        key="active_listings_quantity_sold",
+        translation_key="active_listings_quantity_sold",
+        value_key="active_listings_quantity_sold",
     ),
     EbaySummarySensorDescription(
         key="selling_total_watchers",
@@ -84,7 +77,7 @@ ITEM_SENSOR_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
     "selling": [
         ("price", "current_price", None),
         ("views", "views", None),
-        ("analytics_views", "analytics_views", None),
+        ("analytics_views_30d", "analytics_views_30d", None),
         ("watchers", "watchers", None),
         ("bids", "bid_count", None),
         ("offers", "offers", None),
@@ -117,9 +110,6 @@ async def async_setup_entry(
     registry = _entity_registry(hass)
     platform = _current_entity_platform()
 
-    def _selected_item_sensors() -> list["EbayItemSensor"]:
-        return _item_sensors(coordinator, entry)
-
     async def _async_remove_item_sensor(unique_id: str) -> None:
         if registry is None:
             return
@@ -146,31 +136,38 @@ async def async_setup_entry(
             await _async_remove_item_sensor(unique_id)
             known_item_ids.discard(unique_id)
 
-    def _new_item_sensors(
-        selected_sensors: list["EbayItemSensor"],
-    ) -> list["EbayItemSensor"]:
+    def _new_item_sensors(selected: set[SelectedItemKey]) -> list[EbayItemSensor]:
         sensors: list[EbayItemSensor] = []
-        for sensor in selected_sensors:
-            unique_id = sensor.unique_id
-            if unique_id is None or unique_id in known_item_ids:
-                continue
-            known_item_ids.add(unique_id)
-            sensors.append(sensor)
+        for kind, item_id in selected:
+            for suffix, field, unit in ITEM_SENSOR_FIELDS[kind]:
+                unique_id = f"{entry.entry_id}_{kind}_{item_id}_{suffix}"
+                if unique_id in known_item_ids:
+                    continue
+                known_item_ids.add(unique_id)
+                sensors.append(
+                    EbayItemSensor(
+                        coordinator, entry, kind, item_id, suffix, field, unit
+                    )
+                )
         return sensors
 
-    selected_sensors = _selected_item_sensors()
-    await _async_remove_stale_item_sensors(_unique_ids(selected_sensors))
+    selected = coordinator.refresh_selected_item_keys()
+    await _async_remove_stale_item_sensors(
+        _item_sensor_unique_ids(entry.entry_id, selected)
+    )
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
         for description in SUMMARY_SENSORS
     ]
-    entities.extend(_new_item_sensors(selected_sensors))
+    entities.extend(_new_item_sensors(selected))
     async_add_entities(entities)
 
     async def _async_reconcile_item_sensors() -> None:
-        selected_sensors = _selected_item_sensors()
-        await _async_remove_stale_item_sensors(_unique_ids(selected_sensors))
-        new_sensors = _new_item_sensors(selected_sensors)
+        selected = coordinator.refresh_selected_item_keys()
+        await _async_remove_stale_item_sensors(
+            _item_sensor_unique_ids(entry.entry_id, selected)
+        )
+        new_sensors = _new_item_sensors(selected)
         if new_sensors:
             async_add_entities(new_sensors)
 
@@ -197,8 +194,15 @@ def _entity_registry(hass: HomeAssistant) -> er.EntityRegistry | None:
         return None
 
 
-def _unique_ids(sensors: list["EbayItemSensor"]) -> set[str]:
-    return {sensor.unique_id for sensor in sensors if sensor.unique_id is not None}
+def _item_sensor_unique_ids(
+    entry_id: str, selected: set[SelectedItemKey]
+) -> set[str]:
+    """Return unique IDs for the current capped selection without building entities."""
+    unique_ids: set[str] = set()
+    for kind, item_id in selected:
+        for suffix, _, _ in ITEM_SENSOR_FIELDS[kind]:
+            unique_ids.add(f"{entry_id}_{kind}_{item_id}_{suffix}")
+    return unique_ids
 
 
 def _registered_item_sensor_unique_ids(
@@ -221,61 +225,6 @@ def _is_item_sensor_unique_id(entry_id: str, unique_id: str) -> bool:
             continue
         return any(unique_id.endswith(f"_{suffix}") for suffix, _, _ in fields)
     return False
-
-
-def _item_sensors(
-    coordinator: EbayDataUpdateCoordinator, entry: ConfigEntry
-) -> list["EbayItemSensor"]:
-    mode = coordinator.options[CONF_ENTITY_MODE]
-    if mode == ENTITY_MODE_MINIMAL or not coordinator.data:
-        return []
-    selected = _select_item_entities(
-        coordinator.data,
-        mode,
-        int(coordinator.options[CONF_PER_ITEM_CAP]),
-        _pinned_ids(coordinator.options.get(CONF_PINNED_ITEM_IDS, "")),
-        coordinator.ending_soon_threshold_seconds,
-    )
-    sensors: list[EbayItemSensor] = []
-    for kind, item_id in selected:
-        for suffix, field, unit in ITEM_SENSOR_FIELDS[kind]:
-            sensors.append(EbayItemSensor(coordinator, entry, kind, item_id, suffix, field, unit))
-    return sensors
-
-
-def _pinned_ids(value: str) -> set[str]:
-    return {part.strip() for part in value.replace("\n", ",").split(",") if part.strip()}
-
-
-def _select_item_entities(
-    data: dict[str, Any],
-    mode: str,
-    cap: int,
-    pinned: set[str],
-    ending_soon_threshold: int,
-) -> list[tuple[str, str]]:
-    candidates: list[tuple[int, str, str]] = []
-    for kind in ("selling", "watched", "bidding"):
-        for item_id, item in data.get(kind, {}).items():
-            priority = 100
-            if item_id in pinned:
-                priority = 0
-            elif kind == "selling" and (
-                (item.get("bid_count") or 0) > 0
-                or (item.get("offers") or 0) > 0
-                or (item.get("questions") or 0) > 0
-            ):
-                priority = 10
-            elif (
-                item.get("seconds_left") is not None
-                and 0 < item["seconds_left"] <= ending_soon_threshold
-            ):
-                priority = 20
-            elif mode != ENTITY_MODE_DETAILED:
-                continue
-            candidates.append((priority, kind, item_id))
-    candidates.sort(key=lambda value: (value[0], value[1], value[2]))
-    return [(kind, item_id) for _, kind, item_id in candidates[:cap]]
 
 
 class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
@@ -318,6 +267,8 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             "last_update": summary.get("last_update"),
             "last_successful_update": summary.get("last_successful_update"),
             "partial_failures": summary.get("partial_failures"),
+            "truncated_collections": summary.get("truncated_collections"),
+            "api_warnings": summary.get("api_warnings"),
         }
 
 
@@ -357,14 +308,7 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
 
     @property
     def _is_selected(self) -> bool:
-        selected = _select_item_entities(
-            self.coordinator.data,
-            self.coordinator.options[CONF_ENTITY_MODE],
-            int(self.coordinator.options[CONF_PER_ITEM_CAP]),
-            _pinned_ids(self.coordinator.options.get(CONF_PINNED_ITEM_IDS, "")),
-            self.coordinator.ending_soon_threshold_seconds,
-        )
-        return (self.kind, self.item_id) in selected
+        return (self.kind, self.item_id) in self.coordinator.selected_item_keys
 
     @property
     def available(self) -> bool:
@@ -373,25 +317,27 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
 
     @property
     def native_value(self) -> Any:
-        """Return item field value."""
+        """Return the item field value."""
         item = self._item
-        return item.get(self.field) if item else None
+        if item is None:
+            return None
+        return item.get(self.field)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return item context."""
-        item = self._item or {}
+        """Return item context attributes."""
+        item = self._item
+        if item is None:
+            return {}
         end_time = item.get("end_time")
         return {
-            "item_id": self.item_id,
             "title": item.get("title"),
+            "item_id": item.get("item_id"),
             "url": item.get("url"),
             "image": item.get("image"),
-            "listing_type": item.get("listing_type"),
-            "kind": self.kind,
-            "end_time": end_time.isoformat() if hasattr(end_time, "isoformat") else end_time,
             "currency": item.get("currency"),
-            "last_seen": self.coordinator.data.get("last_successful_update").isoformat()
-            if self.coordinator.data.get("last_successful_update")
-            else None,
+            "end_time": end_time.isoformat()
+            if hasattr(end_time, "isoformat")
+            else end_time,
+            "time_left": item.get("time_left"),
         }

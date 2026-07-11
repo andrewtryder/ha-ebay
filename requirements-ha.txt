@@ -1,1 +1,4 @@
+# Primary pytest harness. Latest pytest-homeassistant-custom-component currently
+# pins homeassistant==2026.2.3. Declared HACS minimum is 2026.3.0 (runtime/
+# docker images); bump this pin when a matching phcc release is published.
 pytest-homeassistant-custom-component==0.13.316

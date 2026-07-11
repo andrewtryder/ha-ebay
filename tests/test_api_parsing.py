@@ -433,6 +433,13 @@ def test_core_pagination_truncation_is_reported() -> None:
         "selling_truncated",
         "seller_list_views_truncated",
     ]
+    assert payload["truncated_collections"] == {
+        "watched": True,
+        "bidding": False,
+        "selling": True,
+        "seller_list_views": True,
+        "active_offers": False,
+    }
 
 
 def test_optional_analytics_errors_become_partial_failure() -> None:
@@ -624,7 +631,7 @@ def test_analytics_views_do_not_overwrite_seller_list_views() -> None:
     payload = asyncio.run(run())
 
     assert payload["selling"]["s1"]["views"] == 10
-    assert payload["selling"]["s1"]["analytics_views"] == 99
+    assert payload["selling"]["s1"]["analytics_views_30d"] == 99
 
 
 def test_token_request_wraps_non_json_response() -> None:

@@ -112,7 +112,11 @@ state.
 - Pinned item IDs
 - Enable/disable buying/watch data
 - Enable/disable selling data
-- Enable/disable Sell Analytics views enrichment
+- Enable/disable Sell Analytics 30-day views enrichment
+
+Authorization always requests the base eBay API scope and `sell.analytics.readonly`.
+Disabling Analytics in options stops enrichment requests but does not remove the
+granted OAuth scope.
 
 ## Summary Sensors
 
@@ -123,13 +127,13 @@ Always-created sensors:
 - `sensor.ebay_bidding_items`
 - `sensor.ebay_selling_total_bids`
 - `sensor.ebay_selling_total_offers`
-- `sensor.ebay_selling_total_sold`
+- `sensor.ebay_active_listings_quantity_sold` (quantity sold across currently active listings)
 - `sensor.ebay_selling_total_watchers`
 - `sensor.ebay_selling_total_views`
 - `sensor.ebay_watched_ending_soon`
 - `sensor.ebay_selling_ending_soon`
 
-Attributes contain bounded context such as items ending soon, items with offers, items with bids, items with questions, highest watcher/view items, update timestamps, and partial failure categories.
+Attributes contain bounded context such as items ending soon, items with offers, items with bids, items with questions, highest watcher/view items, update timestamps, partial failure categories, truncated collections, and Trading API warnings.
 
 ## Event Entities
 
