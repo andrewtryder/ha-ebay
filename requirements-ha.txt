@@ -1,3 +1,5 @@
-# Default local HA pytest harness (matches CI "current").
-# CI also installs requirements-ha-min.txt for the declared HACS minimum.
--r requirements-ha-current.txt
+# Last pytest-homeassistant-custom-component release that supports Python 3.13.
+# 0.13.317+ require Python >=3.14 and pin Home Assistant 2026.3.1+.
+# HACS declares homeassistant>=2026.3.0 for runtime; this harness still covers
+# the integration tests under the last 3.13-compatible pin (HA 2026.2.3).
+pytest-homeassistant-custom-component==0.13.316
