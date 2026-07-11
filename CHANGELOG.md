@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/andrewtryder/ha-ebay/compare/v0.3.5...v0.4.0) (2026-07-11)
+
+
+### Features
+
+* Add debug visibility for eBay refreshes ([ac23449](https://github.com/andrewtryder/ha-ebay/commit/ac234496808bf3cde2d1fc26938eb13605c1f0fa))
+
 ## [0.3.5](https://github.com/andrewtryder/ha-ebay/compare/v0.3.4...v0.3.5) (2026-07-11)
 
 
