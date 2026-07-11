@@ -154,6 +154,12 @@ After Home Assistant restarts, hard-refresh the browser before adding the HACS i
 
 The HACS test mode needs the GitHub repository to be public, or HACS needs access to the private repository through a configured GitHub token.
 
+## Release process
+
+Release Please owns the release version. It updates `version.txt` as the primary version file and mirrors the same version into `custom_components/ebay/manifest.json`.
+
+Use squash merges for feature and fix PRs, with the squash commit title matching the semantic PR title. Regular merge commits can repeat the PR's conventional commit title in the merge commit body, which makes Release Please list the same change twice in the generated changelog.
+
 Home Assistant `2026.3.0+` loads local custom integration brand assets from:
 
 ```text
