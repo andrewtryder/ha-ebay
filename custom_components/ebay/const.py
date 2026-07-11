@@ -68,11 +68,7 @@ SELLING_EVENT_TYPES = [
     "question_received",
     "watcher_count_increased",
     "quantity_sold_increased",
-    "item_sold",
-    "item_ended",
-    "item_ended_unsold",
     "item_disappeared_unknown",
-    "item_disappeared",
 ]
 
 WATCHING_EVENT_TYPES = [

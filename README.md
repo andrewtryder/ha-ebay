@@ -112,7 +112,7 @@ state.
 - Pinned item IDs
 - Enable/disable buying/watch data
 - Enable/disable selling data
-- Enable/disable Sell Analytics views
+- Enable/disable Sell Analytics views enrichment
 
 ## Summary Sensors
 
@@ -146,11 +146,7 @@ Selling event types:
 - `question_received`
 - `watcher_count_increased`
 - `quantity_sold_increased`
-- `item_sold`
-- `item_ended`
-- `item_ended_unsold`
 - `item_disappeared_unknown`
-- `item_disappeared`
 
 Watching event types:
 
@@ -180,10 +176,7 @@ The cap is always enforced, and pinned/actionable items have priority.
 
 ## Development
 
-See:
-
-- [`docs/development.md`](docs/development.md) for devcontainer, source-mounted Home Assistant, and HACS custom-repository test flows.
-- [`docs/branding.md`](docs/branding.md) for local brand asset requirements in `custom_components/ebay/brand/` and generation.
+See [`docs/development.md`](docs/development.md) for devcontainer, source-mounted Home Assistant, and HACS custom-repository test flows.
 
 To generate local Home Assistant brand assets:
 

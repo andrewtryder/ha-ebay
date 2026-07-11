@@ -83,6 +83,7 @@ ITEM_SENSOR_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
     "selling": [
         ("price", "current_price", None),
         ("views", "views", None),
+        ("analytics_views", "analytics_views", None),
         ("watchers", "watchers", None),
         ("bids", "bid_count", None),
         ("offers", "offers", None),
@@ -184,7 +185,7 @@ def _select_item_entities(
                 priority = 10
             elif (
                 item.get("seconds_left") is not None
-                and item["seconds_left"] <= ending_soon_threshold
+                and 0 < item["seconds_left"] <= ending_soon_threshold
             ):
                 priority = 20
             elif mode != ENTITY_MODE_DETAILED:
