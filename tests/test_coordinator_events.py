@@ -21,11 +21,13 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     entry = Mock(entry_id="entry-1")
     coordinator = object.__new__(EbayDataUpdateCoordinator)
     coordinator.entry = entry
-    coordinator.options = DEFAULT_OPTIONS
+    coordinator.options = dict(DEFAULT_OPTIONS)
     coordinator.data = None
+    coordinator.previous_payload = None
     coordinator._event_callbacks = {}
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._price_drop_below_active = set()
     return coordinator
 
 
@@ -345,14 +347,28 @@ def test_watched_price_and_bid_count_changes() -> None:
     coordinator = _coordinator()
     events: list[str] = []
     coordinator._event_callbacks["watching"] = lambda et, ed: events.append(et)
-    old = {"item_id": "w1", "current_price": 10.0, "bid_count": 1, "seconds_left": 100}
-    new = {"item_id": "w1", "current_price": 12.0, "bid_count": 2, "seconds_left": 90}
+    old = {
+        "item_id": "w1",
+        "current_price": 10.0,
+        "currency": "USD",
+        "bid_count": 1,
+        "seconds_left": 100,
+    }
+    new = {
+        "item_id": "w1",
+        "current_price": 12.0,
+        "currency": "USD",
+        "bid_count": 2,
+        "seconds_left": 90,
+    }
     coordinator._detect_watching_events(
         {"w1": old}, {"w1": new}, suppress_disappearance=False
     )
     assert events == [
         "watched_item_price_changed",
+        "watched_item_price_increased",
         "watched_item_bid_count_changed",
+        "watched_item_bid_count_increased",
     ]
 
 
@@ -526,3 +542,392 @@ def test_truncated_baseline_merge_avoids_repeated_change_events() -> None:
 
     coordinator._detect_transition_events(baseline, complete_3)
     assert events == ["bid_count_increased"]
+
+
+def test_initial_baseline_emits_no_added_events() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    coordinator._event_callbacks["bidding"] = lambda et, _ed: events.append(et)
+    coordinator._event_callbacks["selling"] = lambda et, _ed: events.append(et)
+    current = {
+        "watched": {"w1": {"item_id": "w1", "title": "W", "seconds_left": 100}},
+        "bidding": {"b1": {"item_id": "b1", "title": "B", "seconds_left": 100}},
+        "selling": {"s1": {"item_id": "s1", "title": "S"}},
+        "truncated_collections": {},
+    }
+    coordinator._detect_transition_events(None, current)
+    assert events == []
+
+
+def test_reload_baseline_emits_no_added_events() -> None:
+    """Coordinator reconstruction (reload) starts with previous_payload None."""
+    coordinator = _coordinator()
+    assert coordinator.previous_payload is None
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    payload = {
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    coordinator._detect_transition_events(coordinator.previous_payload, payload)
+    assert events == []
+
+
+def test_watched_item_added_after_baseline() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    previous = {"w1": {"item_id": "w1", "title": "Old", "seconds_left": 100}}
+    current = {
+        "w1": {"item_id": "w1", "title": "Old", "seconds_left": 90},
+        "w2": {"item_id": "w2", "title": "New", "seconds_left": 200},
+    }
+    coordinator._detect_watching_events(previous, current, suppress_incomplete=False)
+    assert events == ["watched_item_added"]
+
+
+def test_bidding_and_selling_item_added_after_baseline() -> None:
+    coordinator = _coordinator()
+    events: list[tuple[str, str]] = []
+    coordinator._event_callbacks["bidding"] = lambda et, _ed: events.append(("bidding", et))
+    coordinator._event_callbacks["selling"] = lambda et, _ed: events.append(("selling", et))
+    coordinator._detect_bidding_events(
+        {},
+        {"b1": {"item_id": "b1", "winning": False, "seconds_left": 100}},
+        suppress_incomplete=False,
+    )
+    coordinator._detect_selling_events(
+        {},
+        {"s1": {"item_id": "s1", "title": "Sell"}},
+        suppress_incomplete=False,
+    )
+    assert events == [
+        ("bidding", "bid_item_added"),
+        ("selling", "selling_item_added"),
+    ]
+
+
+def test_repeated_poll_does_not_duplicate_added_event() -> None:
+    from custom_components.ebay.coordinator import _baseline_payload
+
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    baseline = {
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    with_new = {
+        "watched": {
+            "w1": {"item_id": "w1", "seconds_left": 90},
+            "w2": {"item_id": "w2", "seconds_left": 200},
+        },
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    coordinator._detect_transition_events(baseline, with_new)
+    assert events == ["watched_item_added"]
+    events.clear()
+    baseline = _baseline_payload(baseline, with_new)
+    coordinator._detect_transition_events(baseline, with_new)
+    assert events == []
+
+
+def test_truncated_previous_or_current_suppresses_added_event() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    previous = {
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {"watched": True},
+    }
+    current = {
+        "watched": {
+            "w1": {"item_id": "w1", "seconds_left": 90},
+            "w2": {"item_id": "w2", "seconds_left": 200},
+        },
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    coordinator._detect_transition_events(previous, current)
+    assert "watched_item_added" not in events
+
+    events.clear()
+    previous["truncated_collections"] = {}
+    current["truncated_collections"] = {"watched": True}
+    coordinator._detect_transition_events(previous, current)
+    assert "watched_item_added" not in events
+
+
+def test_failed_refresh_recovery_does_not_false_add() -> None:
+    """Failed refresh leaves previous_payload untouched."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    baseline = {
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    coordinator.previous_payload = baseline
+    # Simulate failed refresh: previous_payload unchanged, then same data recovers.
+    coordinator._detect_transition_events(coordinator.previous_payload, baseline)
+    assert events == []
+
+
+def test_active_watched_disappearance_remains_unknown() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    payloads: list[dict[str, Any]] = []
+    coordinator._event_callbacks["watching"] = lambda et, ed: (
+        events.append(et),
+        payloads.append(ed),
+    )
+    running = {
+        "item_id": "123",
+        "title": "Still listed somewhere",
+        "seconds_left": 600,
+        "end_time": datetime.now(timezone.utc) + timedelta(hours=1),
+    }
+    coordinator._detect_watching_events({"123": running}, {}, suppress_incomplete=False)
+    assert events == ["watched_item_disappeared_unknown"]
+    assert "watched_item_removed" not in events
+
+
+def test_addition_and_disappearance_across_polls() -> None:
+    from custom_components.ebay.coordinator import _baseline_payload
+
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    poll1 = {
+        "watched": {"w1": {"item_id": "w1", "seconds_left": 100}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    poll2 = {
+        "watched": {
+            "w1": {"item_id": "w1", "seconds_left": 90},
+            "w2": {"item_id": "w2", "seconds_left": 200},
+        },
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    poll3 = {
+        "watched": {"w2": {"item_id": "w2", "seconds_left": 180}},
+        "bidding": {},
+        "selling": {},
+        "truncated_collections": {},
+    }
+    baseline = poll1
+    coordinator._detect_transition_events(baseline, poll2)
+    assert events == ["watched_item_added"]
+    baseline = _baseline_payload(baseline, poll2)
+    events.clear()
+    coordinator._detect_transition_events(baseline, poll3)
+    assert events == ["watched_item_disappeared_unknown"]
+
+
+def test_event_type_declarations_include_new_types() -> None:
+    from custom_components.ebay.const import (
+        BIDDING_EVENT_TYPES,
+        SELLING_EVENT_TYPES,
+        WATCHING_EVENT_TYPES,
+    )
+
+    assert "watched_item_added" in WATCHING_EVENT_TYPES
+    assert "watched_item_removed" in WATCHING_EVENT_TYPES
+    assert "watched_item_price_increased" in WATCHING_EVENT_TYPES
+    assert "watched_item_price_decreased" in WATCHING_EVENT_TYPES
+    assert "watched_item_price_dropped_below" in WATCHING_EVENT_TYPES
+    assert "watched_item_bid_count_increased" in WATCHING_EVENT_TYPES
+    assert "bid_item_added" in BIDDING_EVENT_TYPES
+    assert "selling_item_added" in SELLING_EVENT_TYPES
+
+
+def test_price_increase_and_decrease_with_threshold() -> None:
+    coordinator = _coordinator()
+    coordinator.options["watched_price_change_min_percent"] = 10
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda et, ed: events.append((et, ed))
+
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 112, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert [et for et, _ in events] == [
+        "watched_item_price_changed",
+        "watched_item_price_increased",
+    ]
+    assert events[-1][1]["direction"] == "increased"
+    assert events[-1][1]["percent_change"] == 12
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 105, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == []
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 80, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert [et for et, _ in events] == [
+        "watched_item_price_changed",
+        "watched_item_price_decreased",
+    ]
+
+
+def test_price_unchanged_missing_zero_currency_mismatch() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == []
+
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": None, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 5, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == []
+
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 0, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 5, "currency": "USD", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == []
+
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "current_price": 5, "currency": "EUR", "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == []
+
+
+def test_global_and_per_item_dropped_below() -> None:
+    coordinator = _coordinator()
+    coordinator.options["watched_price_drop_threshold"] = "100"
+    coordinator.options["watched_price_drop_currency"] = "USD"
+    coordinator.options["pinned_item_price_targets"] = "w2=50 USD"
+    coordinator.options["pinned_item_ids"] = "w2"
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda et, ed: events.append((et, ed))
+
+    coordinator._detect_watching_events(
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 120,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 90,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
+        suppress_incomplete=False,
+    )
+    drop_events = [ed for et, ed in events if et == "watched_item_price_dropped_below"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["threshold_source"] == "global"
+    assert drop_events[0]["threshold"] == 100
+
+    events.clear()
+    # No repeat while remaining below.
+    coordinator._detect_watching_events(
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 90,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 85,
+                "currency": "USD",
+                "seconds_left": 8,
+            }
+        },
+        suppress_incomplete=False,
+    )
+    assert not any(et == "watched_item_price_dropped_below" for et, _ in events)
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {
+            "w2": {
+                "item_id": "w2",
+                "current_price": 80,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w2": {
+                "item_id": "w2",
+                "current_price": 40,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
+        suppress_incomplete=False,
+    )
+    drop_events = [ed for et, ed in events if et == "watched_item_price_dropped_below"]
+    assert len(drop_events) == 1
+    assert drop_events[0]["threshold_source"] == "pinned_item"
+    assert drop_events[0]["threshold"] == 50
+
+
+def test_bid_count_increase_versus_decrease() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "bid_count": 2, "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "bid_count": 3, "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == [
+        "watched_item_bid_count_changed",
+        "watched_item_bid_count_increased",
+    ]
+    events.clear()
+    coordinator._detect_watching_events(
+        {"w1": {"item_id": "w1", "bid_count": 3, "seconds_left": 10}},
+        {"w1": {"item_id": "w1", "bid_count": 1, "seconds_left": 9}},
+        suppress_incomplete=False,
+    )
+    assert events == ["watched_item_bid_count_changed"]

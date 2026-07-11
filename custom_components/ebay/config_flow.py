@@ -31,10 +31,14 @@ from .const import (
     CONF_ENVIRONMENT,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
+    CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_RUNAME,
     CONF_SELLING_ENABLED,
     CONF_SITE_ID,
+    CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
+    CONF_WATCHED_PRICE_DROP_CURRENCY,
+    CONF_WATCHED_PRICE_DROP_THRESHOLD,
     DEFAULT_OPTIONS,
     DEFAULT_SITE_ID,
     DOMAIN,
@@ -43,6 +47,7 @@ from .const import (
     OAUTH_MODE_CALLBACK,
     OAUTH_MODE_MANUAL,
 )
+from .options_parse import validate_price_options
 from .oauth2 import (
     DEVELOPER_CONSOLE_URL,
     OAUTH_SETUP_GUIDE_URL,
@@ -299,10 +304,16 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Manage options."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            data = dict(user_input)
+            errors = validate_price_options(data)
+            if not errors:
+                return self.async_create_entry(title="", data=data)
 
         options = {**DEFAULT_OPTIONS, **self._config_entry.options}
+        if user_input is not None:
+            options = {**options, **user_input}
         schema = vol.Schema(
             {
                 vol.Required(
@@ -321,6 +332,22 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_PINNED_ITEM_IDS, default=options[CONF_PINNED_ITEM_IDS]
                 ): str,
+                vol.Optional(
+                    CONF_PINNED_ITEM_PRICE_TARGETS,
+                    default=options.get(CONF_PINNED_ITEM_PRICE_TARGETS, ""),
+                ): str,
+                vol.Optional(
+                    CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
+                    default=options.get(CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT, 0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+                vol.Optional(
+                    CONF_WATCHED_PRICE_DROP_THRESHOLD,
+                    default=options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, ""),
+                ): str,
+                vol.Optional(
+                    CONF_WATCHED_PRICE_DROP_CURRENCY,
+                    default=options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, ""),
+                ): str,
                 vol.Required(
                     CONF_ANALYTICS_ENABLED, default=options[CONF_ANALYTICS_ENABLED]
                 ): bool,
@@ -332,7 +359,9 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                 ): bool,
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init", data_schema=schema, errors=errors
+        )
 
 
 def _non_empty_string(value: Any) -> str:

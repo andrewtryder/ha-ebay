@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 import time
 from typing import Any, Callable
@@ -21,12 +22,17 @@ from .const import (
     CONF_ENTITY_MODE,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
+    CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_SELLING_ENABLED,
+    CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
+    CONF_WATCHED_PRICE_DROP_CURRENCY,
+    CONF_WATCHED_PRICE_DROP_THRESHOLD,
     DOMAIN,
     ENTITY_MODE_DETAILED,
     ENTITY_MODE_MINIMAL,
 )
+from .options_parse import parse_price_targets, pinned_ids, to_decimal
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +72,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_callbacks: dict[str, EventCallback] = {}
         self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
         self._fired_ending_soon: set[EndingSoonKey] = set()
+        # Items currently at/below their effective drop threshold (no repeat events).
+        self._price_drop_below_active: set[str] = set()
         super().__init__(
             hass,
             _LOGGER,
@@ -177,7 +185,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             payload,
             mode,
             int(self.options[CONF_PER_ITEM_CAP]),
-            _pinned_ids(self.options.get(CONF_PINNED_ITEM_IDS, "")),
+            pinned_ids(self.options.get(CONF_PINNED_ITEM_IDS, "")),
             self.ending_soon_threshold_seconds,
         )
         self.selected_item_keys = set(selected)
@@ -239,17 +247,17 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._detect_selling_events(
             previous["selling"],
             current["selling"],
-            suppress_disappearance=_collection_truncated(previous, current, "selling"),
+            suppress_incomplete=_collection_truncated(previous, current, "selling"),
         )
         self._detect_watching_events(
             previous["watched"],
             current["watched"],
-            suppress_disappearance=_collection_truncated(previous, current, "watched"),
+            suppress_incomplete=_collection_truncated(previous, current, "watched"),
         )
         self._detect_bidding_events(
             previous["bidding"],
             current["bidding"],
-            suppress_disappearance=_collection_truncated(previous, current, "bidding"),
+            suppress_incomplete=_collection_truncated(previous, current, "bidding"),
         )
 
     def _detect_selling_events(
@@ -257,11 +265,16 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous: dict[str, dict[str, Any]],
         current: dict[str, dict[str, Any]],
         *,
-        suppress_disappearance: bool,
+        suppress_incomplete: bool = False,
+        suppress_disappearance: bool | None = None,
     ) -> None:
+        if suppress_disappearance is None:
+            suppress_disappearance = suppress_incomplete
         for item_id, item in current.items():
             old = previous.get(item_id)
             if not old:
+                if not suppress_incomplete:
+                    self._emit("selling", "selling_item_added", item)
                 continue
             self._emit_if_increased(
                 "selling", "bid_count_increased", old, item, "bid_count"
@@ -287,34 +300,29 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous: dict[str, dict[str, Any]],
         current: dict[str, dict[str, Any]],
         *,
-        suppress_disappearance: bool,
+        suppress_incomplete: bool = False,
+        suppress_disappearance: bool | None = None,
     ) -> None:
+        if suppress_disappearance is None:
+            suppress_disappearance = suppress_incomplete
         for item_id, item in current.items():
             old = previous.get(item_id)
             if not old:
+                if not suppress_incomplete:
+                    self._emit("watching", "watched_item_added", item)
                 continue
-            if old.get("current_price") != item.get("current_price"):
-                self._emit(
-                    "watching",
-                    "watched_item_price_changed",
-                    item,
-                    old_value=old.get("current_price"),
-                    new_value=item.get("current_price"),
-                )
-            if old.get("bid_count") != item.get("bid_count"):
-                self._emit(
-                    "watching",
-                    "watched_item_bid_count_changed",
-                    item,
-                    old_value=old.get("bid_count"),
-                    new_value=item.get("bid_count"),
-                )
+            self._detect_watched_price_events(
+                old, item, allow_dropped_below=not suppress_incomplete
+            )
+            self._detect_watched_bid_count_events(old, item)
             if _was_running(old) and item.get("seconds_left") == 0:
                 self._emit("watching", "watched_item_ended", item)
         if suppress_disappearance:
             return
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
+                # WatchList APIs do not affirm manual unwatch; never emit
+                # watched_item_removed with the current read-only buying APIs.
                 self._emit("watching", "watched_item_disappeared_unknown", old)
 
     def _detect_bidding_events(
@@ -322,11 +330,16 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous: dict[str, dict[str, Any]],
         current: dict[str, dict[str, Any]],
         *,
-        suppress_disappearance: bool,
+        suppress_incomplete: bool = False,
+        suppress_disappearance: bool | None = None,
     ) -> None:
+        if suppress_disappearance is None:
+            suppress_disappearance = suppress_incomplete
         for item_id, item in current.items():
             old = previous.get(item_id)
             if not old:
+                if not suppress_incomplete:
+                    self._emit("bidding", "bid_item_added", item)
                 continue
             if old.get("winning") is True and item.get("winning") is False:
                 self._emit("bidding", "outbid", item, old_value=True, new_value=False)
@@ -339,6 +352,157 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
                 self._emit("bidding", "bid_item_disappeared_unknown", old)
+
+    def _detect_watched_price_events(
+        self,
+        old: dict[str, Any],
+        item: dict[str, Any],
+        *,
+        allow_dropped_below: bool,
+    ) -> None:
+        """Emit legacy + directional watched price events and drop-below crossings."""
+        old_price = to_decimal(old.get("current_price"))
+        new_price = to_decimal(item.get("current_price"))
+        old_currency = _normalize_currency(old.get("currency"))
+        new_currency = _normalize_currency(item.get("currency"))
+        item_id = str(item.get("item_id") or "")
+
+        if (
+            old_price is not None
+            and new_price is not None
+            and _currencies_compatible(old_currency, new_currency)
+            and old_price != new_price
+        ):
+            direction = "increased" if new_price > old_price else "decreased"
+            percent_change = _percent_change(old_price, new_price)
+            min_percent = to_decimal(
+                self.options.get(CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT, 0)
+            ) or Decimal("0")
+            meets_threshold = (
+                old_price > 0
+                and percent_change is not None
+                and abs(percent_change) >= min_percent
+            )
+            if meets_threshold:
+                extras = {
+                    "old_value": _decimal_payload(old_price),
+                    "new_value": _decimal_payload(new_price),
+                    "percent_change": _decimal_payload(percent_change),
+                    "direction": direction,
+                }
+                # Legacy compatibility first; canonical directional second.
+                self._emit(
+                    "watching",
+                    "watched_item_price_changed",
+                    item,
+                    **extras,
+                )
+                canonical = (
+                    "watched_item_price_increased"
+                    if direction == "increased"
+                    else "watched_item_price_decreased"
+                )
+                self._emit("watching", canonical, item, **extras)
+
+        if allow_dropped_below:
+            self._detect_price_dropped_below(old, item, old_price, new_price, item_id)
+
+    def _detect_price_dropped_below(
+        self,
+        old: dict[str, Any],
+        item: dict[str, Any],
+        old_price: Decimal | None,
+        new_price: Decimal | None,
+        item_id: str,
+    ) -> None:
+        """Emit dropped-below only on a true threshold crossing."""
+        threshold, currency, source = self._effective_price_drop_target(item_id)
+        if threshold is None or not currency or not item_id:
+            if item_id:
+                self._price_drop_below_active.discard(item_id)
+            return
+        item_currency = _normalize_currency(item.get("currency"))
+        old_currency = _normalize_currency(old.get("currency"))
+        if (
+            old_price is None
+            or new_price is None
+            or not item_currency
+            or item_currency != currency
+            or old_currency != currency
+        ):
+            return
+
+        below = new_price <= threshold
+        was_above = old_price > threshold
+        if not below:
+            self._price_drop_below_active.discard(item_id)
+            return
+        if item_id in self._price_drop_below_active:
+            return
+        if not was_above:
+            # Already at/below without a crossing in this transition.
+            self._price_drop_below_active.add(item_id)
+            return
+
+        percent_change = _percent_change(old_price, new_price)
+        self._emit(
+            "watching",
+            "watched_item_price_dropped_below",
+            item,
+            old_value=_decimal_payload(old_price),
+            new_value=_decimal_payload(new_price),
+            percent_change=_decimal_payload(percent_change)
+            if percent_change is not None
+            else None,
+            direction="decreased",
+            threshold=_decimal_payload(threshold),
+            threshold_currency=currency,
+            threshold_source=source,
+        )
+        self._price_drop_below_active.add(item_id)
+
+    def _effective_price_drop_target(
+        self, item_id: str
+    ) -> tuple[Decimal | None, str | None, str | None]:
+        """Return (amount, currency, source) for the active drop threshold."""
+        try:
+            targets = parse_price_targets(
+                str(self.options.get(CONF_PINNED_ITEM_PRICE_TARGETS, "") or "")
+            )
+        except ValueError:
+            targets = {}
+        if item_id in targets:
+            amount, currency = targets[item_id]
+            return amount, currency, "pinned_item"
+        raw_threshold = self.options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, "")
+        raw_currency = self.options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, "")
+        threshold = to_decimal(raw_threshold) if str(raw_threshold or "").strip() else None
+        currency = _normalize_currency(raw_currency)
+        if threshold is None or not currency:
+            return None, None, None
+        return threshold, currency, "global"
+
+    def _detect_watched_bid_count_events(
+        self, old: dict[str, Any], item: dict[str, Any]
+    ) -> None:
+        old_count = old.get("bid_count")
+        new_count = item.get("bid_count")
+        if old_count is None or new_count is None or old_count == new_count:
+            return
+        extras = {"old_value": old_count, "new_value": new_count}
+        self._emit(
+            "watching",
+            "watched_item_bid_count_changed",
+            item,
+            **extras,
+        )
+        if new_count > old_count:
+            self._emit(
+                "watching",
+                "watched_item_bid_count_increased",
+                item,
+                **extras,
+            )
 
     def _emit_if_increased(
         self,
@@ -554,9 +718,39 @@ def _collection_truncated(
 
 
 def _pinned_ids(value: str) -> set[str]:
-    return {
-        part.strip() for part in value.replace("\n", ",").split(",") if part.strip()
-    }
+    """Compatibility wrapper for pinned ID parsing."""
+    return pinned_ids(value)
+
+
+def _normalize_currency(value: Any) -> str | None:
+    """Return an uppercase currency code, or None if blank."""
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
+def _currencies_compatible(left: str | None, right: str | None) -> bool:
+    """Return whether two currency codes may be compared."""
+    if left is None and right is None:
+        return True
+    return bool(left and right and left == right)
+
+
+def _percent_change(old_price: Decimal, new_price: Decimal) -> Decimal | None:
+    """Return percent change from old to new, or None when undefined."""
+    if old_price == 0:
+        return None
+    return ((new_price - old_price) / old_price) * Decimal("100")
+
+
+def _decimal_payload(value: Decimal | None) -> float | int | None:
+    """Serialize Decimal for event payloads as int when whole, else float."""
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
 
 
 def _select_item_entities(
