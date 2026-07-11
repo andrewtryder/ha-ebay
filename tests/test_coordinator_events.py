@@ -176,6 +176,36 @@ def test_ended_item_disappearance_does_not_emit_second_ended_event() -> None:
     assert events == []
 
 
+def test_watched_item_disappearance_emits_unknown_not_ended() -> None:
+    """A missing watched item should not be reported as a confirmed ending."""
+    coordinator = _coordinator()
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
+    running = {"item_id": "123", "title": "Removed", "seconds_left": 600}
+
+    coordinator._detect_watching_events({"123": running}, {})
+
+    assert len(events) == 1
+    assert events[0][0] == "watched_item_disappeared_unknown"
+    assert events[0][1]["event_type"] == "watched_item_disappeared_unknown"
+    assert events[0][1]["item_id"] == "123"
+
+
+def test_bid_item_disappearance_emits_unknown_not_ended() -> None:
+    """A missing bid item should not be reported as a confirmed ending."""
+    coordinator = _coordinator()
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["bidding"] = lambda *args: events.append(args)
+    running = {"item_id": "123", "title": "Removed", "seconds_left": 600}
+
+    coordinator._detect_bidding_events({"123": running}, {})
+
+    assert len(events) == 1
+    assert events[0][0] == "bid_item_disappeared_unknown"
+    assert events[0][1]["event_type"] == "bid_item_disappeared_unknown"
+    assert events[0][1]["item_id"] == "123"
+
+
 def test_ending_soon_ignores_items_already_ended() -> None:
     """Already-ended items should not qualify for ending-soon timers."""
     coordinator = _coordinator()

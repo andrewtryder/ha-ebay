@@ -201,7 +201,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emit("watching", "watched_item_ended", item)
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
-                self._emit("watching", "watched_item_ended", old)
+                self._emit("watching", "watched_item_disappeared_unknown", old)
 
     def _detect_bidding_events(
         self, previous: dict[str, dict[str, Any]], current: dict[str, dict[str, Any]]
@@ -218,7 +218,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._emit("bidding", "bid_item_ended", item)
         for item_id, old in previous.items():
             if item_id not in current and _was_running(old):
-                self._emit("bidding", "bid_item_ended", old)
+                self._emit("bidding", "bid_item_disappeared_unknown", old)
 
     def _emit_if_increased(
         self,

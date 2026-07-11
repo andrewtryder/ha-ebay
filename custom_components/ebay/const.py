@@ -76,6 +76,7 @@ WATCHING_EVENT_TYPES = [
     "watched_item_price_changed",
     "watched_item_bid_count_changed",
     "watched_item_ended",
+    "watched_item_disappeared_unknown",
 ]
 
 BIDDING_EVENT_TYPES = [
@@ -83,4 +84,5 @@ BIDDING_EVENT_TYPES = [
     "winning",
     "bidding_item_ending_soon",
     "bid_item_ended",
+    "bid_item_disappeared_unknown",
 ]
