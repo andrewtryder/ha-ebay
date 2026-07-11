@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from datetime import datetime, timedelta, timezone
@@ -65,8 +67,11 @@ def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
     assert key in coordinator._fired_ending_soon
 
 
-def test_ending_soon_callback_uses_latest_item_data() -> None:
+def test_ending_soon_callback_uses_latest_item_data(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Scheduled events should not emit stale data captured at schedule time."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     coordinator = _coordinator()
     entry = coordinator.entry
     scheduled_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
@@ -111,10 +116,21 @@ def test_ending_soon_callback_uses_latest_item_data() -> None:
     assert events[0][1]["title"] == "Updated title"
     assert events[0][1]["price"] == 12.5
     assert events[0][1]["seconds_left"] == coordinator.ending_soon_threshold_seconds
+    assert (
+        "Firing scheduled eBay ending-soon timer kind=watching item_id=123"
+        in caplog.text
+    )
+    assert (
+        "Emitted eBay event kind=watching event_type=watched_item_ending_soon item_id=123"
+        in caplog.text
+    )
 
 
-def test_ending_soon_callback_ignores_changed_end_time() -> None:
+def test_ending_soon_callback_ignores_changed_end_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A stale scheduled callback should not fire after eBay moves the end time."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     coordinator = _coordinator()
     entry = coordinator.entry
     original_end_time = datetime.now(timezone.utc) + timedelta(minutes=60)
@@ -152,6 +168,9 @@ def test_ending_soon_callback_ignores_changed_end_time() -> None:
     callback(datetime.now(timezone.utc))
 
     assert events == []
+    assert (
+        "Skipping stale eBay ending-soon timer kind=watching item_id=123" in caplog.text
+    )
 
 
 def test_ended_items_do_not_emit_repeated_zero_to_zero_events() -> None:
@@ -278,8 +297,13 @@ def test_no_events_on_initial_startup() -> None:
     ],
 )
 def test_selling_increase_events(
-    field: str, event_type: str, old_value: int, new_value: int
+    field: str,
+    event_type: str,
+    old_value: int,
+    new_value: int,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.coordinator")
     coordinator = _coordinator()
     events: list[str] = []
     coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
@@ -289,6 +313,10 @@ def test_selling_increase_events(
         {"s1": old}, {"s1": new}, suppress_disappearance=False
     )
     assert events == [event_type]
+    assert (
+        f"Emitted eBay event kind=selling event_type={event_type} item_id=s1"
+        in caplog.text
+    )
 
 
 @pytest.mark.parametrize(
@@ -452,8 +480,8 @@ def test_truncated_baseline_merge_avoids_repeated_change_events() -> None:
 
     coordinator = _coordinator()
     events: list[str] = []
-    coordinator._event_callbacks["selling"] = (
-        lambda event_type, _event_data: events.append(event_type)
+    coordinator._event_callbacks["selling"] = lambda event_type, _event_data: (
+        events.append(event_type)
     )
 
     complete_1 = {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import ExitStack
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -134,8 +135,11 @@ def test_migrate_rejects_future_version() -> None:
     assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is False
 
 
-def test_migrate_v2_renames_legacy_sensor_unique_ids() -> None:
+def test_migrate_v2_renames_legacy_sensor_unique_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Legacy summary and analytics unique IDs must become the release names."""
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay")
     from types import SimpleNamespace
 
     hass = Mock()
@@ -182,11 +186,17 @@ def test_migrate_v2_renames_legacy_sensor_unique_ids() -> None:
             f"{entry.entry_id}_selling_abc_analytics_views_30d",
         ),
     ]
+    assert (
+        "Migrated eBay config entry sensor unique IDs entry_id=entry-1 "
+        "renamed_count=2 to_version=3" in caplog.text
+    )
 
 
 def test_renamed_sensor_unique_id_mapping() -> None:
     assert (
-        ebay_integration._renamed_sensor_unique_id("entry-1", "entry-1_selling_total_sold")
+        ebay_integration._renamed_sensor_unique_id(
+            "entry-1", "entry-1_selling_total_sold"
+        )
         == "entry-1_active_listings_quantity_sold"
     )
     assert (

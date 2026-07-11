@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 import xml.etree.ElementTree as ET
@@ -277,11 +278,38 @@ def dedupe_trading_warnings(
     return deduped
 
 
-def chunk_item_ids(item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE) -> list[list[str]]:
+def chunk_item_ids(
+    item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE
+) -> list[list[str]]:
     """Split item IDs into bounded Analytics request batches."""
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
-    return [item_ids[index : index + batch_size] for index in range(0, len(item_ids), batch_size)]
+    return [
+        item_ids[index : index + batch_size]
+        for index in range(0, len(item_ids), batch_size)
+    ]
+
+
+def _duration_ms(start: float) -> float:
+    """Return elapsed monotonic time in milliseconds."""
+    return (time.monotonic() - start) * 1000
+
+
+def _safe_exception_context(exc: BaseException) -> str:
+    """Return safe exception class and message context for debug logs."""
+    detail = str(exc)
+    if not detail:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {detail}"
+
+
+def _page_number_from_xml(xml_body: str) -> int | None:
+    """Extract a Trading API page number from generated XML without logging XML."""
+    try:
+        root = ET.fromstring(xml_body)
+    except ET.ParseError:
+        return None
+    return _to_int(_text(root, ".//e:PageNumber"))
 
 
 def _money(item: ET.Element, path: str) -> tuple[float | None, str | None]:
@@ -596,7 +624,10 @@ def summarize_payload(
 
     def under_threshold(item: dict[str, Any]) -> bool:
         seconds_left = item.get("seconds_left")
-        return seconds_left is not None and 0 < seconds_left <= ending_soon_threshold_seconds
+        return (
+            seconds_left is not None
+            and 0 < seconds_left <= ending_soon_threshold_seconds
+        )
 
     selling_items = list(selling.values())
     watched_items = list(watched.values())
@@ -826,6 +857,7 @@ class EbayApiClient:
     ) -> ET.Element:
         """Call a Trading API operation once."""
         access_token = await self.async_get_access_token()
+        page = _page_number_from_xml(xml_body)
         headers = {
             "Content-Type": "text/xml;charset=UTF-8",
             "X-EBAY-API-COMPATIBILITY-LEVEL": COMPATIBILITY_LEVEL,
@@ -833,6 +865,7 @@ class EbayApiClient:
             "X-EBAY-API-SITEID": self.site_id,
             "X-EBAY-API-IAF-TOKEN": access_token,
         }
+        start = time.monotonic()
         try:
             async with self._session.post(
                 self._endpoints.trading,
@@ -842,10 +875,24 @@ class EbayApiClient:
             ) as response:
                 body = await response.text()
                 if response.status in {401, 403}:
+                    _LOGGER.debug(
+                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
+                        call_name,
+                        page,
+                        response.status,
+                        _duration_ms(start),
+                    )
                     raise EbayAuthError(
                         f"eBay Trading API auth failed with HTTP {response.status}"
                     )
                 if response.status >= 400:
+                    _LOGGER.debug(
+                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
+                        call_name,
+                        page,
+                        response.status,
+                        _duration_ms(start),
+                    )
                     raise EbayApiError(
                         f"eBay Trading API failed with HTTP {response.status}"
                     )
@@ -854,14 +901,35 @@ class EbayApiClient:
         try:
             root = ET.fromstring(body)
         except ET.ParseError as exc:
+            _LOGGER.debug(
+                "Trading API parse failed call=%s page=%s duration_ms=%.1f",
+                call_name,
+                page,
+                _duration_ms(start),
+            )
             raise EbayParseError("Could not parse eBay Trading API XML") from exc
         ack = _text(root, "e:Ack")
         if ack not in {"Success", "Warning"}:
+            _LOGGER.debug(
+                "Trading API call failed call=%s page=%s ack=%s duration_ms=%.1f",
+                call_name,
+                page,
+                ack,
+                _duration_ms(start),
+            )
             if _auth_like_error(root):
                 raise EbayAuthError(f"eBay Trading API returned Ack={ack!r}")
             raise EbayApiError(f"eBay Trading API returned Ack={ack!r}")
         if ack == "Warning":
             self._api_warnings.extend(extract_trading_warnings(root))
+        _LOGGER.debug(
+            "Trading API call completed call=%s page=%s status=%s ack=%s duration_ms=%.1f",
+            call_name,
+            page,
+            response.status,
+            ack,
+            _duration_ms(start),
+        )
         return root
 
     async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
@@ -886,6 +954,7 @@ class EbayApiClient:
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=30)
         listing_ids = "{" + "|".join(item_ids) + "}"
+        request_start = time.monotonic()
         try:
             async with self._session.get(
                 self._endpoints.analytics,
@@ -903,21 +972,52 @@ class EbayApiClient:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status == 401:
+                    _LOGGER.debug(
+                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
+                        response.status,
+                        len(item_ids),
+                        _duration_ms(request_start),
+                    )
                     raise EbayAuthError(
                         f"eBay Sell Analytics auth failed with HTTP {response.status}"
                     )
                 if response.status in {400, 403}:
+                    _LOGGER.debug(
+                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
+                        response.status,
+                        len(item_ids),
+                        _duration_ms(request_start),
+                    )
                     raise EbayPartialFailure("analytics_views")
                 if response.status >= 400:
+                    _LOGGER.debug(
+                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
+                        response.status,
+                        len(item_ids),
+                        _duration_ms(request_start),
+                    )
                     raise EbayApiError(
                         f"eBay Sell Analytics failed with HTTP {response.status}"
                     )
                 try:
-                    return await response.json(content_type=None)
+                    payload = await response.json(content_type=None)
                 except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                    _LOGGER.debug(
+                        "Sell Analytics parse failed status=%s item_count=%s duration_ms=%.1f",
+                        response.status,
+                        len(item_ids),
+                        _duration_ms(request_start),
+                    )
                     raise EbayParseError(
                         "Could not parse eBay Sell Analytics JSON"
                     ) from exc
+                _LOGGER.debug(
+                    "Sell Analytics call completed status=%s item_count=%s duration_ms=%.1f",
+                    response.status,
+                    len(item_ids),
+                    _duration_ms(request_start),
+                )
+                return payload
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise EbayPartialFailure("analytics_views") from exc
 
@@ -929,15 +1029,34 @@ class EbayApiClient:
             return {}, False
         merged: dict[str, int] = {}
         partial_failure = False
-        for batch in chunk_item_ids(item_ids):
+        batches = chunk_item_ids(item_ids)
+        for batch_number, batch in enumerate(batches, start=1):
+            _LOGGER.debug(
+                "Fetching Sell Analytics batch batch=%s item_count=%s",
+                batch_number,
+                len(batch),
+            )
             try:
                 payload = await self.async_get_traffic_report(batch)
             except EbayAuthError:
                 raise
-            except (EbayError, aiohttp.ClientError, TimeoutError):
+            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                _LOGGER.debug(
+                    "Sell Analytics batch failed batch=%s item_count=%s error=%s",
+                    batch_number,
+                    len(batch),
+                    _safe_exception_context(exc),
+                )
                 partial_failure = True
                 continue
-            merged.update(analytics_views_by_item_id(payload))
+            batch_views = analytics_views_by_item_id(payload)
+            merged.update(batch_views)
+            _LOGGER.debug(
+                "Sell Analytics batch completed batch=%s item_count=%s view_count=%s",
+                batch_number,
+                len(batch),
+                len(batch_views),
+            )
         return merged, partial_failure
 
     async def _fetch_buying_pages(
@@ -954,8 +1073,10 @@ class EbayApiClient:
             root = await self.async_call_trading_api(
                 READ_ONLY_CALL_NAME, build_get_my_ebay_buying_xml(page=page)
             )
-            watched_items.extend(parse_container(root, "WatchList", "watched"))
-            bidding_items.extend(parse_container(root, "BidList", "bidding"))
+            watched_page = parse_container(root, "WatchList", "watched")
+            bidding_page = parse_container(root, "BidList", "bidding")
+            watched_items.extend(watched_page)
+            bidding_items.extend(bidding_page)
             watch_pages = _reported_total_pages(root, "WatchList")
             bid_pages = _reported_total_pages(root, "BidList")
             watched_truncated = watched_truncated or watch_pages > MAX_PAGES
@@ -964,6 +1085,15 @@ class EbayApiClient:
                 total_pages,
                 min(watch_pages, MAX_PAGES),
                 min(bid_pages, MAX_PAGES),
+            )
+            _LOGGER.debug(
+                "Fetched buying page page=%s watched_count=%s bidding_count=%s total_pages=%s watched_truncated=%s bidding_truncated=%s",
+                page,
+                len(watched_page),
+                len(bidding_page),
+                total_pages,
+                watched_truncated,
+                bidding_truncated,
             )
             page += 1
         return (
@@ -983,10 +1113,18 @@ class EbayApiClient:
             root = await self.async_call_trading_api(
                 SELLING_CALL_NAME, build_get_my_ebay_selling_xml(page=page)
             )
-            selling_items.extend(parse_selling_container(root))
+            selling_page = parse_selling_container(root)
+            selling_items.extend(selling_page)
             active_pages = _reported_total_pages(root, "ActiveList")
             truncated = truncated or active_pages > MAX_PAGES
             total_pages = max(total_pages, min(active_pages, MAX_PAGES))
+            _LOGGER.debug(
+                "Fetched selling page page=%s selling_count=%s total_pages=%s truncated=%s",
+                page,
+                len(selling_page),
+                total_pages,
+                truncated,
+            )
             page += 1
         return _dict_by_item_id(selling_items), truncated
 
@@ -1000,10 +1138,18 @@ class EbayApiClient:
             root = await self.async_call_trading_api(
                 SELLER_LIST_CALL_NAME, build_get_seller_list_xml(page=page)
             )
-            views.update(seller_list_views_by_item_id(root))
+            page_views = seller_list_views_by_item_id(root)
+            views.update(page_views)
             seller_list_pages = _reported_total_pages(root)
             truncated = truncated or seller_list_pages > MAX_PAGES
             total_pages = max(total_pages, min(seller_list_pages, MAX_PAGES))
+            _LOGGER.debug(
+                "Fetched seller-list views page=%s view_count=%s total_pages=%s truncated=%s",
+                page,
+                len(page_views),
+                total_pages,
+                truncated,
+            )
             page += 1
         return views, truncated
 
@@ -1016,6 +1162,13 @@ class EbayApiClient:
         ending_soon_threshold_seconds: int,
     ) -> dict[str, Any]:
         """Fetch and normalize all configured read-only telemetry."""
+        refresh_start = time.monotonic()
+        _LOGGER.debug(
+            "eBay API refresh started buying_enabled=%s selling_enabled=%s analytics_enabled=%s",
+            buying_enabled,
+            selling_enabled,
+            analytics_enabled,
+        )
         self._api_warnings = []
         partial_failures: list[str] = []
         watched: dict[str, dict[str, Any]] = {}
@@ -1042,9 +1195,10 @@ class EbayApiClient:
             if selling_truncated:
                 partial_failures.append("selling_truncated")
             try:
-                seller_list_views, seller_list_views_truncated = (
-                    await self._fetch_seller_list_views()
-                )
+                (
+                    seller_list_views,
+                    seller_list_views_truncated,
+                ) = await self._fetch_seller_list_views()
                 for item_id, views in seller_list_views.items():
                     if item_id in selling:
                         selling[item_id]["views"] = views
@@ -1052,7 +1206,8 @@ class EbayApiClient:
                     partial_failures.append("seller_list_views_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug(
-                    "Optional GetSellerList views failed: %s", type(exc).__name__
+                    "Optional GetSellerList views failed error=%s",
+                    _safe_exception_context(exc),
                 )
                 partial_failures.append("seller_list_views")
 
@@ -1065,11 +1220,18 @@ class EbayApiClient:
                         BEST_OFFERS_CALL_NAME, build_get_best_offers_xml(page=page)
                     )
                     total_pages = pagination_total_pages(offers)
-                    for item_id, count in active_offers_by_item_id(offers).items():
+                    page_offers = active_offers_by_item_id(offers)
+                    for item_id, count in page_offers.items():
                         if item_id in selling:
                             active_offer_counts[item_id] = (
                                 active_offer_counts.get(item_id, 0) + count
                             )
+                    _LOGGER.debug(
+                        "Fetched active offers page=%s offer_item_count=%s total_pages=%s",
+                        page,
+                        len(page_offers),
+                        total_pages,
+                    )
                     page += 1
                 for item_id, count in active_offer_counts.items():
                     selling[item_id]["offers"] = count
@@ -1077,14 +1239,18 @@ class EbayApiClient:
                     active_offers_truncated = True
                     partial_failures.append("active_offers_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                _LOGGER.debug("Optional GetBestOffers failed: %s", type(exc).__name__)
+                _LOGGER.debug(
+                    "Optional GetBestOffers failed error=%s",
+                    _safe_exception_context(exc),
+                )
                 partial_failures.append("active_offers")
 
             if analytics_enabled:
                 try:
-                    views_by_id, analytics_partial = await self.async_fetch_analytics_views(
-                        list(selling)
-                    )
+                    (
+                        views_by_id,
+                        analytics_partial,
+                    ) = await self.async_fetch_analytics_views(list(selling))
                     for item_id, views in views_by_id.items():
                         if item_id in selling:
                             selling[item_id]["analytics_views_30d"] = views
@@ -1094,7 +1260,8 @@ class EbayApiClient:
                     raise
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
-                        "Optional analytics views failed: %s", type(exc).__name__
+                        "Optional analytics views failed error=%s",
+                        _safe_exception_context(exc),
                     )
                     partial_failures.append("analytics_views")
 
@@ -1113,6 +1280,15 @@ class EbayApiClient:
         now = datetime.now(timezone.utc)
         summary = summarize_payload(
             watched, bidding, selling, ending_soon_threshold_seconds
+        )
+        _LOGGER.debug(
+            "eBay API refresh completed watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
+            len(watched),
+            len(bidding),
+            len(selling),
+            partial_failures,
+            truncated_collections,
+            _duration_ms(refresh_start),
         )
         return {
             "watched": watched,
