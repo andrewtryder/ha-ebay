@@ -33,7 +33,13 @@ from .const import (
     ENTITY_MODE_DETAILED,
     ENTITY_MODE_MINIMAL,
     LEGACY_COMPATIBILITY_EVENT_TYPES,
+    MANUAL_REFRESH_COOLDOWN_SECONDS,
     RECENT_EVENTS_MAX,
+    REFRESH_RESULT_AUTH_ERROR,
+    REFRESH_RESULT_ERROR,
+    REFRESH_RESULT_PARTIAL,
+    REFRESH_RESULT_SUCCESS,
+    REFRESH_RESULT_UNKNOWN,
     TITLE_HISTORY_MAX_LEN,
 )
 from .options_parse import parse_price_targets, pinned_ids, to_decimal
@@ -72,6 +78,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.options = options
         self.previous_payload: dict[str, Any] | None = None
         self.last_error_category: str | None = None
+        self.last_attempt_at: datetime | None = None
+        self.last_refresh_duration_seconds: float | None = None
+        self.last_refresh_result: str = REFRESH_RESULT_UNKNOWN
         self.selected_item_keys: set[SelectedItemKey] = set()
         self._event_callbacks: dict[str, EventCallback] = {}
         self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
@@ -85,6 +94,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         # Ending-soon keys already recorded to history without an entity callback.
         self._recent_history_ending_soon: set[EndingSoonKey] = set()
+        self._manual_refresh_last_requested: float | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -124,6 +134,48 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return unsubscribe
 
+    async def async_request_manual_refresh(self) -> bool:
+        """Request a coordinator refresh subject to the manual cooldown.
+
+        Returns True when a refresh was requested, False when ignored.
+        """
+        now = time.monotonic()
+        if self._manual_refresh_last_requested is not None:
+            elapsed = now - self._manual_refresh_last_requested
+            if elapsed < MANUAL_REFRESH_COOLDOWN_SECONDS:
+                _LOGGER.debug(
+                    "Ignoring eBay manual refresh during cooldown entry_id=%s remaining_s=%.1f",
+                    self.entry.entry_id,
+                    MANUAL_REFRESH_COOLDOWN_SECONDS - elapsed,
+                )
+                return False
+        refresh_task = getattr(self, "_refresh_task", None)
+        if refresh_task is not None and not refresh_task.done():
+            _LOGGER.debug(
+                "Ignoring eBay manual refresh while refresh already running entry_id=%s",
+                self.entry.entry_id,
+            )
+            return False
+        self._manual_refresh_last_requested = now
+        _LOGGER.debug(
+            "Requesting eBay manual refresh entry_id=%s", self.entry.entry_id
+        )
+        await self.async_request_refresh()
+        return True
+
+    def _record_refresh_attempt(
+        self,
+        *,
+        start: float,
+        result: str,
+        error_category: str | None = None,
+    ) -> None:
+        """Store safe refresh health metadata for diagnostic entities."""
+        self.last_attempt_at = datetime.now(timezone.utc)
+        self.last_refresh_duration_seconds = max(0.0, time.monotonic() - start)
+        self.last_refresh_result = result
+        self.last_error_category = error_category
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data and detect events."""
         start = time.monotonic()
@@ -145,7 +197,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
             )
         except EbayAuthError as exc:
-            self.last_error_category = "auth"
+            self._record_refresh_attempt(
+                start=start,
+                result=REFRESH_RESULT_AUTH_ERROR,
+                error_category="auth",
+            )
             _LOGGER.debug(
                 "eBay coordinator refresh auth failed entry_id=%s duration_ms=%.1f",
                 self.entry.entry_id,
@@ -153,7 +209,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             raise ConfigEntryAuthFailed("eBay authentication failed") from exc
         except EbayError as exc:
-            self.last_error_category = type(exc).__name__
+            self._record_refresh_attempt(
+                start=start,
+                result=REFRESH_RESULT_ERROR,
+                error_category=type(exc).__name__,
+            )
             _LOGGER.debug(
                 "eBay coordinator refresh failed entry_id=%s error=%s duration_ms=%.1f",
                 self.entry.entry_id,
@@ -172,7 +232,12 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         warnings = payload.get("api_warnings") or []
         payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]
-        self.last_error_category = None
+        result = (
+            REFRESH_RESULT_PARTIAL
+            if payload.get("partial_failures")
+            else REFRESH_RESULT_SUCCESS
+        )
+        self._record_refresh_attempt(start=start, result=result, error_category=None)
 
         self._detect_transition_events(self.previous_payload, payload)
         self._rebuild_ending_soon_timers(payload)

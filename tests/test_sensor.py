@@ -18,11 +18,14 @@ from custom_components.ebay.const import (
 )
 from custom_components.ebay.coordinator import _select_item_entities, _pinned_ids
 from custom_components.ebay.sensor import (
+    DIAGNOSTIC_SENSORS,
     ITEM_SENSOR_FIELDS,
     SUMMARY_SENSORS,
     EbayItemSensor,
     async_setup_entry,
 )
+
+_FIXED_SENSORS = len(SUMMARY_SENSORS) + len(DIAGNOSTIC_SENSORS)
 
 
 class _SelectionCoordinator:
@@ -89,7 +92,7 @@ def test_item_sensors_are_added_after_late_coordinator_data() -> None:
 
     asyncio.run(async_setup_entry(hass, entry, async_add_entities))
 
-    assert [len(batch) for batch in added] == [len(SUMMARY_SENSORS)]
+    assert [len(batch) for batch in added] == [_FIXED_SENSORS]
     assert listener is not None
     assert len(unloads) == 1
 
@@ -114,7 +117,7 @@ def test_item_sensors_are_added_after_late_coordinator_data() -> None:
     asyncio.run(tasks.pop(0))
 
     assert [len(batch) for batch in added] == [
-        len(SUMMARY_SENSORS),
+        _FIXED_SENSORS,
         len(ITEM_SENSOR_FIELDS["selling"]),
     ]
     assert {sensor.item_id for sensor in added[1]} == {"123"}

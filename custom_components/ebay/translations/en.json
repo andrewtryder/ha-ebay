@@ -127,6 +127,27 @@
       },
       "selling_ending_soon": {
         "name": "Selling ending soon"
+      },
+      "last_successful_update": {
+        "name": "Last successful update"
+      },
+      "partial_failure_count": {
+        "name": "Partial failure count"
+      },
+      "truncated_collection_count": {
+        "name": "Truncated collection count"
+      },
+      "api_warning_count": {
+        "name": "API warning count"
+      },
+      "last_refresh_duration": {
+        "name": "Last refresh duration"
+      },
+      "last_refresh_result": {
+        "name": "Last refresh result"
+      },
+      "scheduled_ending_soon_timer_count": {
+        "name": "Scheduled ending-soon timer count"
       }
     },
     "event": {
@@ -149,6 +170,11 @@
       },
       "selling_items": {
         "name": "Selling items"
+      }
+    },
+    "button": {
+      "refresh": {
+        "name": "Refresh"
       }
     }
   }

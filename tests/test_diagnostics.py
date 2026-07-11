@@ -27,6 +27,10 @@ def _coordinator(*, data: dict[str, Any] | None = None, error: str | None = None
         CONF_PINNED_ITEM_IDS: "1,2",
     }
     coordinator.last_error_category = error
+    coordinator.last_attempt_at = None
+    coordinator.last_refresh_duration_seconds = None
+    coordinator.last_refresh_result = "unknown"
+    coordinator.scheduled_ending_soon_count = 0
     return coordinator
 
 

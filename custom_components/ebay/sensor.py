@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTime
+from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, REFRESH_RESULT_UNKNOWN
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,6 +33,14 @@ class EbaySummarySensorDescription(SensorEntityDescription):
     """Describe a summary sensor."""
 
     value_key: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class EbayDiagnosticSensorDescription(SensorEntityDescription):
+    """Describe a disabled-by-default diagnostic sensor."""
+
+    value_fn: Callable[[EbayDataUpdateCoordinator], StateType | datetime]
+    attrs_fn: Callable[[EbayDataUpdateCoordinator], dict[str, Any]] | None = None
 
 
 SUMMARY_SENSORS = [
@@ -73,6 +89,117 @@ SUMMARY_SENSORS = [
         key="selling_ending_soon",
         translation_key="selling_ending_soon",
         value_key="selling_ending_soon",
+    ),
+]
+
+
+def _truncated_collection_names(coordinator: EbayDataUpdateCoordinator) -> list[str]:
+    truncated = (coordinator.data or {}).get("truncated_collections") or {}
+    return sorted(name for name, is_truncated in truncated.items() if is_truncated)
+
+
+def _partial_failure_categories(coordinator: EbayDataUpdateCoordinator) -> list[str]:
+    data = coordinator.data or {}
+    return list(data.get("partial_failures") or data.get("summary", {}).get("partial_failures") or [])
+
+
+def _api_warnings(coordinator: EbayDataUpdateCoordinator) -> list[Any]:
+    data = coordinator.data or {}
+    return list(
+        data.get("summary", {}).get("api_warnings")
+        or data.get("api_warnings")
+        or []
+    )
+
+
+def _parse_successful_update(coordinator: EbayDataUpdateCoordinator) -> datetime | None:
+    raw = (coordinator.data or {}).get("summary", {}).get("last_successful_update")
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    return None
+
+
+DIAGNOSTIC_SENSORS = [
+    EbayDiagnosticSensorDescription(
+        key="last_successful_update",
+        translation_key="last_successful_update",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=_parse_successful_update,
+    ),
+    EbayDiagnosticSensorDescription(
+        key="partial_failure_count",
+        translation_key="partial_failure_count",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: len(_partial_failure_categories(coordinator)),
+        attrs_fn=lambda coordinator: {
+            "partial_failure_categories": _partial_failure_categories(coordinator)
+        },
+    ),
+    EbayDiagnosticSensorDescription(
+        key="truncated_collection_count",
+        translation_key="truncated_collection_count",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: len(_truncated_collection_names(coordinator)),
+        attrs_fn=lambda coordinator: {
+            "truncated_collections": _truncated_collection_names(coordinator)
+        },
+    ),
+    EbayDiagnosticSensorDescription(
+        key="api_warning_count",
+        translation_key="api_warning_count",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: len(_api_warnings(coordinator)),
+        attrs_fn=lambda coordinator: {"api_warnings": _api_warnings(coordinator)},
+    ),
+    EbayDiagnosticSensorDescription(
+        key="last_refresh_duration",
+        translation_key="last_refresh_duration",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: coordinator.last_refresh_duration_seconds,
+    ),
+    EbayDiagnosticSensorDescription(
+        key="last_refresh_result",
+        translation_key="last_refresh_result",
+        device_class=SensorDeviceClass.ENUM,
+        options=[
+            "unknown",
+            "success",
+            "partial",
+            "error",
+            "auth_error",
+        ],
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: coordinator.last_refresh_result
+        or REFRESH_RESULT_UNKNOWN,
+        attrs_fn=lambda coordinator: {
+            "error_category": coordinator.last_error_category
+        },
+    ),
+    EbayDiagnosticSensorDescription(
+        key="scheduled_ending_soon_timer_count",
+        translation_key="scheduled_ending_soon_timer_count",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda coordinator: coordinator.scheduled_ending_soon_count,
     ),
 ]
 
@@ -166,6 +293,10 @@ async def async_setup_entry(
         EbaySummarySensor(coordinator, entry, description)
         for description in SUMMARY_SENSORS
     ]
+    entities.extend(
+        EbayDiagnosticSensor(coordinator, entry, description)
+        for description in DIAGNOSTIC_SENSORS
+    )
     initial_item_sensors = _new_item_sensors(selected)
     entities.extend(initial_item_sensors)
     _LOGGER.debug(
@@ -219,6 +350,8 @@ def _entity_registry(hass: HomeAssistant) -> er.EntityRegistry | None:
 
 
 _SUMMARY_SENSOR_KEYS = {description.key for description in SUMMARY_SENSORS}
+_DIAGNOSTIC_SENSOR_KEYS = {description.key for description in DIAGNOSTIC_SENSORS}
+_FIXED_SENSOR_KEYS = _SUMMARY_SENSOR_KEYS | _DIAGNOSTIC_SENSOR_KEYS
 
 
 def _item_sensor_unique_ids(entry_id: str, selected: set[SelectedItemKey]) -> set[str]:
@@ -245,7 +378,7 @@ def _registered_item_sensor_unique_ids(
 
 def _is_item_sensor_unique_id(entry_id: str, unique_id: str) -> bool:
     """Return whether a unique ID belongs to a generated per-item sensor."""
-    if unique_id.removeprefix(f"{entry_id}_") in _SUMMARY_SENSOR_KEYS:
+    if unique_id.removeprefix(f"{entry_id}_") in _FIXED_SENSOR_KEYS:
         return False
     for kind, fields in ITEM_SENSOR_FIELDS.items():
         prefix = f"{entry_id}_{kind}_"
@@ -305,6 +438,42 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             "truncated_collections": summary.get("truncated_collections"),
             "api_warnings": summary.get("api_warnings"),
         }
+
+
+class EbayDiagnosticSensor(
+    CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity
+):
+    """Disabled-by-default diagnostic health sensor."""
+
+    entity_description: EbayDiagnosticSensorDescription
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: EbayDataUpdateCoordinator,
+        entry: ConfigEntry,
+        description: EbayDiagnosticSensorDescription,
+    ) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "eBay",
+            "manufacturer": "eBay",
+        }
+
+    @property
+    def native_value(self) -> StateType | datetime:
+        """Return the diagnostic value."""
+        return self.entity_description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return safe diagnostic attributes."""
+        if self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(self.coordinator)
 
 
 class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
