@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.4](https://github.com/andrewtryder/ha-ebay/compare/v0.3.3...v0.3.4) (2026-07-11)
+
+
+### Bug Fixes
+
+* ebay telemetry edge cases ([e3c23a3](https://github.com/andrewtryder/ha-ebay/commit/e3c23a332bf6d4b46114053b05b79a0d1c0880eb))
+* ending-soon stale timer validation ([c0d20c6](https://github.com/andrewtryder/ha-ebay/commit/c0d20c67b416fa38cdfc9786d201fee3b977a1d3))
+
 ## [0.3.3](https://github.com/andrewtryder/ha-ebay/compare/v0.3.2...v0.3.3) (2026-07-11)
 
 
