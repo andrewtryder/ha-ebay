@@ -12,7 +12,9 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from homeassistant import config_entries
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import _decode_jwt
+from voluptuous_serialize import convert
 
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
@@ -328,6 +330,14 @@ def test_credentials_form_has_expected_fields_and_defaults(
     assert fields[CONF_SITE_ID].default() == "0"
 
 
+def test_credentials_schema_is_frontend_serializable() -> None:
+    """Credential schema must serialize for Home Assistant's frontend forms."""
+    flow = EbayConfigFlow()
+    schema = flow._credentials_schema({})
+
+    convert(schema, custom_serializer=cv.custom_serializer)
+
+
 def test_credentials_reject_blank_required_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,6 +493,57 @@ def test_reauth_credentials_prefill_safe_fields_only(
     assert fields[CONF_CLIENT_SECRET].default() == ""
     assert fields[CONF_RUNAME].default() == "Example-Runame"
     assert fields[CONF_SITE_ID].default() == "77"
+
+
+def test_reauth_confirm_credentials_form_serializes_and_validates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reauth confirmation reaches a serializable credentials form before OAuth."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": _flow_data(client_secret="stored-secret"),
+            "title": "eBay",
+        },
+    )()
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+
+    confirm = asyncio.run(flow.async_step_reauth(entry.data))
+    assert confirm["type"] == "form"
+    assert confirm["step_id"] == "reauth_confirm"
+
+    credentials = asyncio.run(flow.async_step_reauth_confirm({}))
+    assert credentials["type"] == "form"
+    assert credentials["step_id"] == "credentials"
+    convert(credentials["data_schema"], custom_serializer=cv.custom_serializer)
+
+    blank = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id=" ",
+                client_secret="",
+                runame="\n",
+                site_id=" ",
+            )
+        )
+    )
+    assert blank["type"] == "form"
+    assert blank["step_id"] == "credentials"
+    assert blank["errors"] == {
+        CONF_CLIENT_ID: "required",
+        CONF_CLIENT_SECRET: "required",
+        CONF_RUNAME: "required",
+        CONF_SITE_ID: "required",
+    }
+
+    oauth = asyncio.run(flow.async_step_credentials(_flow_data()))
+    assert oauth["type"] == "external"
 
 
 def test_legacy_manual_alias_still_uses_manual_step(
