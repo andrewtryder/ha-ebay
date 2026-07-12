@@ -70,7 +70,7 @@ Home Assistant always requests:
 - `sell.analytics.readonly`
 - `sell.fulfillment.readonly`
 - `sell.payment.dispute` (GET-only in this integration; no `.readonly` variant)
-- `commerce.feedback.readonly`
+- `commerce.feedback` (GET-only in this integration; `.readonly` is Client Credential Grant only)
 - `commerce.message` (GET-only in this integration; no `.readonly` variant)
 
 Feature toggles in integration options stop API calls for Analytics views,
