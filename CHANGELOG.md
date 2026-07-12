@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.2](https://github.com/andrewtryder/ha-ebay/compare/v0.5.1...v0.5.2) (2026-07-12)
+
+
+### Bug Fixes
+
+* use valid feedback OAuth scope ([30f6ad0](https://github.com/andrewtryder/ha-ebay/commit/30f6ad0c665f764c78b833fddb35df7b58fe2bce))
+* use valid feedback OAuth scope ([4e5187d](https://github.com/andrewtryder/ha-ebay/commit/4e5187dd078a6cbda806c5caa9c2b7c6cf496b72))
+
 ## [0.5.1](https://github.com/andrewtryder/ha-ebay/compare/v0.5.0...v0.5.1) (2026-07-12)
 
 
