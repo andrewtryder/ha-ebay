@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.3](https://github.com/andrewtryder/ha-ebay/compare/v0.5.2...v0.5.3) (2026-07-12)
+
+
+### Bug Fixes
+
+* use Home Assistant calendar entity descriptions ([156308d](https://github.com/andrewtryder/ha-ebay/commit/156308d9a32d0692d0f00083822afd83d0944ac9))
+* use Home Assistant calendar entity descriptions ([bd92eed](https://github.com/andrewtryder/ha-ebay/commit/bd92eed6814be90e10d060cbf6c1b0dff0331f7c))
+
 ## [0.5.2](https://github.com/andrewtryder/ha-ebay/compare/v0.5.1...v0.5.2) (2026-07-12)
 
 
