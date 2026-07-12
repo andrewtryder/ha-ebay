@@ -1,0 +1,20 @@
+# Runs the same local quality gates as docs/development.md / CI before each commit.
+# Install once: pip install -r requirements-dev.txt && pre-commit install
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.21
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        args: [custom_components, tests]
+        pass_filenames: false
+        always_run: true
+
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest with coverage
+        language: system
+        entry: bash -c 'if [ -x .venv/bin/python ]; then exec .venv/bin/python -m pytest -q; else exec python -m pytest -q; fi'
+        pass_filenames: false
+        always_run: true

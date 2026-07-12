@@ -29,7 +29,21 @@ Python installed:
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-Run the fast local checks with:
+Install the git pre-commit hook so every commit runs ruff and pytest (including
+the coverage floor from `pytest.ini`):
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/pre-commit install
+```
+
+Run the same checks manually with:
+
+```bash
+.venv/bin/pre-commit run --all-files
+```
+
+Or individually:
 
 ```bash
 .venv/bin/python -m ruff check custom_components tests
@@ -37,10 +51,10 @@ Run the fast local checks with:
 .venv/bin/python -m compileall custom_components
 ```
 
-Platforms under test include `sensor`, `event`, `calendar`, and `button`.
+Platforms under test include `sensor`, `binary_sensor`, `event`, `calendar`, and `button`.
 
 `pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
-floor of 80%.
+floor of 80%. The pre-commit hook fails the commit if coverage drops below that.
 
 CI uses one Python 3.14 job with `requirements-ha.txt`
 (`pytest-homeassistant-custom-component==0.13.346` → Home Assistant `2026.7.2`).
