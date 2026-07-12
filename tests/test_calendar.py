@@ -95,9 +95,7 @@ def test_bidding_calendar_includes_winning_metadata() -> None:
     entity = EbayListingCalendar(
         _coordinator(data), Mock(entry_id="entry-1"), description
     )
-    events = asyncio.run(
-        entity.async_get_events(Mock(), now, now + timedelta(days=1))
-    )
+    events = asyncio.run(entity.async_get_events(Mock(), now, now + timedelta(days=1)))
     assert len(events) == 1
     assert "Winning: True" in (events[0].description or "")
 
@@ -119,9 +117,7 @@ def test_selling_calendar_events() -> None:
     entity = EbayListingCalendar(
         _coordinator(data), Mock(entry_id="entry-1"), description
     )
-    events = asyncio.run(
-        entity.async_get_events(Mock(), now, now + timedelta(days=1))
-    )
+    events = asyncio.run(entity.async_get_events(Mock(), now, now + timedelta(days=1)))
     assert len(events) == 1
     assert events[0].summary == "Sell item"
 
@@ -152,9 +148,7 @@ def test_date_range_filtering_and_missing_invalid_end_times() -> None:
     entity = EbayListingCalendar(
         _coordinator(data), Mock(entry_id="entry-1"), description
     )
-    events = asyncio.run(
-        entity.async_get_events(Mock(), now, now + timedelta(days=1))
-    )
+    events = asyncio.run(entity.async_get_events(Mock(), now, now + timedelta(days=1)))
     assert [event.uid for event in events] == ["watched:in"]
 
 

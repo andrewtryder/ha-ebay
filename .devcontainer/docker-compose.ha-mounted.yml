@@ -8,5 +8,5 @@ services:
     ports:
       - "8123:8123"
     environment:
-      TZ: ${TZ:-Etc/UTC}
+      TZ: ${TZ:-America/New_York}
     restart: unless-stopped

@@ -5,10 +5,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from homeassistant.exceptions import ConfigEntryAuthFailed
+
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
+    CONF_OAUTH_SCOPES,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     CONF_SITE_ID,
@@ -35,8 +38,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.helpers import config_entry_oauth2_flow
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-    from .api import EbayApiClient
+    from .api import DEFAULT_SCOPE, EbayApiClient
     from .coordinator import EbayDataUpdateCoordinator
+
+    if entry.data.get(CONF_OAUTH_SCOPES) != DEFAULT_SCOPE:
+        raise ConfigEntryAuthFailed(
+            "eBay OAuth scopes were expanded; reauthorize to continue"
+        )
 
     options = {**DEFAULT_OPTIONS, **entry.options}
     oauth_session = None
@@ -81,7 +89,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate config entries to the current schema and entity unique IDs."""
-    if entry.version > 3:
+    if entry.version > 4:
         _LOGGER.debug(
             "Rejecting eBay config entry migration entry_id=%s version=%s",
             entry.entry_id,
@@ -119,6 +127,16 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Migrated eBay config entry sensor unique IDs entry_id=%s renamed_count=%s to_version=3",
             entry.entry_id,
             renamed_count,
+        )
+
+    if entry.version < 4:
+        # Drop stale scope marker so setup requires reauth for expanded scopes.
+        data = dict(entry.data)
+        data.pop(CONF_OAUTH_SCOPES, None)
+        hass.config_entries.async_update_entry(entry, data=data, version=4)
+        _LOGGER.debug(
+            "Migrated eBay config entry for expanded OAuth scopes entry_id=%s to_version=4",
+            entry.entry_id,
         )
 
     _LOGGER.debug(

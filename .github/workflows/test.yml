@@ -35,6 +35,9 @@ jobs:
             python -m pip install pytest-homeassistant-custom-component
           fi
 
+      - name: Pre-commit (all files)
+        run: pre-commit run --all-files
+
       - name: Ruff
         run: |
           if [ -d custom_components ]; then

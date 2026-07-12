@@ -30,9 +30,7 @@ async def async_setup_entry(
     async_add_entities([EbayRefreshButton(coordinator, entry)])
 
 
-class EbayRefreshButton(
-    CoordinatorEntity[EbayDataUpdateCoordinator], ButtonEntity
-):
+class EbayRefreshButton(CoordinatorEntity[EbayDataUpdateCoordinator], ButtonEntity):
     """Button that requests a rate-limited coordinator refresh."""
 
     _attr_has_entity_name = True
@@ -49,8 +47,15 @@ class EbayRefreshButton(
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
+
+    @property
+    def available(self) -> bool:
+        """Keep the refresh button usable after a failed coordinator update."""
+        return (
+            self.coordinator.last_attempt_at is not None
+            or self.coordinator.data is not None
+        )
 
     async def async_press(self) -> None:
         """Request a manual refresh, ignoring presses during cooldown."""

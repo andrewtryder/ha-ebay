@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     BIDDING_EVENT_TYPES,
     DOMAIN,
+    SELLER_OPS_EVENT_TYPES,
     SELLING_EVENT_TYPES,
     WATCHING_EVENT_TYPES,
 )
@@ -45,6 +46,12 @@ EVENTS = [
         translation_key="bidding_activity",
         kind="bidding",
         event_types=BIDDING_EVENT_TYPES,
+    ),
+    EbayEventEntityDescription(
+        key="seller_ops_activity",
+        translation_key="seller_ops_activity",
+        kind="seller_ops",
+        event_types=SELLER_OPS_EVENT_TYPES,
     ),
 ]
 
@@ -80,7 +87,6 @@ class EbayActivityEvent(CoordinatorEntity[EbayDataUpdateCoordinator], EventEntit
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
         self._unsubscribe_event_callback: CALLBACK_TYPE | None = None
 

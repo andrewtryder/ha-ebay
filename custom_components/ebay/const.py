@@ -18,11 +18,16 @@ CONF_ANALYTICS_ENABLED = "analytics_enabled"
 CONF_BUYING_ENABLED = "buying_enabled"
 CONF_ENDING_SOON_THRESHOLD = "ending_soon_threshold"
 CONF_ENTITY_MODE = "entity_mode"
+CONF_FEEDBACK_ENABLED = "feedback_enabled"
+CONF_FULFILLMENT_ENABLED = "fulfillment_enabled"
+CONF_MESSAGES_ENABLED = "messages_enabled"
+CONF_OAUTH_SCOPES = "oauth_scopes"
 CONF_PER_ITEM_CAP = "per_item_cap"
 CONF_PINNED_ITEM_IDS = "pinned_item_ids"
 CONF_PINNED_ITEM_PRICE_TARGETS = "pinned_item_price_targets"
 CONF_POLL_INTERVAL = "poll_interval"
 CONF_SELLING_ENABLED = "selling_enabled"
+CONF_SELLER_STANDARDS_ENABLED = "seller_standards_enabled"
 CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT = "watched_price_change_min_percent"
 CONF_WATCHED_PRICE_DROP_CURRENCY = "watched_price_drop_currency"
 CONF_WATCHED_PRICE_DROP_THRESHOLD = "watched_price_drop_threshold"
@@ -65,9 +70,13 @@ DEFAULT_OPTIONS = {
     CONF_ANALYTICS_ENABLED: True,
     CONF_BUYING_ENABLED: True,
     CONF_SELLING_ENABLED: True,
+    CONF_FULFILLMENT_ENABLED: True,
+    CONF_SELLER_STANDARDS_ENABLED: True,
+    CONF_FEEDBACK_ENABLED: True,
+    CONF_MESSAGES_ENABLED: True,
 }
 
-PLATFORMS = ["sensor", "event", "calendar", "button"]
+PLATFORMS = ["sensor", "binary_sensor", "event", "calendar", "button"]
 
 SCAN_INTERVAL = timedelta(minutes=DEFAULT_POLL_INTERVAL)
 
@@ -85,9 +94,26 @@ SELLING_EVENT_TYPES = [
     "item_disappeared_unknown",
 ]
 
+SELLER_OPS_EVENT_TYPES = [
+    "order_received",
+    "order_paid",
+    "shipment_due_soon",
+    "shipment_overdue",
+    "order_marked_shipped",
+    "tracking_added",
+    "payment_dispute_opened",
+    "seller_level_changed",
+    "seller_standard_at_risk",
+    "service_metric_above_peer_benchmark",
+    "feedback_received",
+    "negative_feedback_received",
+    "feedback_rating_changed",
+    "new_buyer_question",
+    "new_message_received",
+]
+
 WATCHING_EVENT_TYPES = [
     "watched_item_added",
-    "watched_item_removed",
     "watched_item_ending_soon",
     "watched_item_price_changed",
     "watched_item_price_increased",

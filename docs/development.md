@@ -29,18 +29,19 @@ Python installed:
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-Install the git pre-commit hook so every commit runs ruff and pytest (including
-the coverage floor from `pytest.ini`):
+Install the git hooks so every commit runs fast lint/file checks and every push
+runs pytest (including the coverage floor from `pytest.ini`):
 
 ```bash
 .venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/pre-commit install
+.venv/bin/pre-commit install --hook-types pre-commit --hook-types pre-push
 ```
 
 Run the same checks manually with:
 
 ```bash
 .venv/bin/pre-commit run --all-files
+.venv/bin/pre-commit run --all-files --hook-stage pre-push
 ```
 
 Or individually:
@@ -54,11 +55,20 @@ Or individually:
 Platforms under test include `sensor`, `binary_sensor`, `event`, `calendar`, and `button`.
 
 `pytest.ini` enables coverage for `custom_components/ebay` with a no-regression
-floor of 80%. The pre-commit hook fails the commit if coverage drops below that.
+floor of 80%. The pre-push hook fails the push if coverage drops below that.
 
-CI uses one Python 3.14 job with `requirements-ha.txt`
+CI runs `pre-commit run --all-files` plus the authoritative `ruff` / `compileall` /
+`pytest` suite on Python 3.14 with `requirements-ha.txt`
 (`pytest-homeassistant-custom-component==0.13.346` → Home Assistant `2026.7.2`).
 The HACS minimum remains `2026.3.0` for runtime/docker.
+
+### Conventional commits and Release Please
+
+Pull request titles drive Release Please changelog categories:
+
+- Use `feat:` for new platforms or public user-facing behavior (minor bump, Features).
+- Use `fix:` for bug fixes only (patch bump, Bug Fixes).
+- Use `docs:`, `test:`, `chore:`, or `ci:` for non-user-facing work.
 
 Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
 

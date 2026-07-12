@@ -22,6 +22,11 @@ Home Assistant may store item titles, listing metadata, event details, and
 summary values in entity state, attributes, recorder history, backups, logs, or
 diagnostics according to the user's Home Assistant configuration.
 
+The integration intentionally does **not** store buyer usernames, feedback
+comments, or full message bodies in entity state attributes or diagnostics.
+Seller-ops event payloads may include order/listing IDs, subjects, and
+timestamps only.
+
 Diagnostics and log output are intended to redact credentials, OAuth tokens,
 and other secret values.
 

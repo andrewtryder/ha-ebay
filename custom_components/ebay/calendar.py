@@ -71,9 +71,7 @@ async def async_setup_entry(
     )
 
 
-class EbayListingCalendar(
-    CoordinatorEntity[EbayDataUpdateCoordinator], CalendarEntity
-):
+class EbayListingCalendar(CoordinatorEntity[EbayDataUpdateCoordinator], CalendarEntity):
     """Calendar of listing end times from already-fetched coordinator data."""
 
     _attr_has_entity_name = True
@@ -92,7 +90,6 @@ class EbayListingCalendar(
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
 
     @property
@@ -101,7 +98,9 @@ class EbayListingCalendar(
         if not super().available:
             return False
         options = self.coordinator.options
-        if self._description.requires_buying and not options.get(CONF_BUYING_ENABLED, True):
+        if self._description.requires_buying and not options.get(
+            CONF_BUYING_ENABLED, True
+        ):
             return False
         if self._description.requires_selling and not options.get(
             CONF_SELLING_ENABLED, True

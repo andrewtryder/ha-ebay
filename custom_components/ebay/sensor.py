@@ -22,6 +22,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import API_WARNINGS_STATE_ATTR_MAX
 from .const import DOMAIN, REFRESH_RESULT_UNKNOWN
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
@@ -90,6 +91,123 @@ SUMMARY_SENSORS = [
         translation_key="selling_ending_soon",
         value_key="selling_ending_soon",
     ),
+    EbaySummarySensorDescription(
+        key="orders_awaiting_shipment",
+        translation_key="orders_awaiting_shipment",
+        value_key="orders_awaiting_shipment",
+    ),
+    EbaySummarySensorDescription(
+        key="orders_shipping_today",
+        translation_key="orders_shipping_today",
+        value_key="orders_shipping_today",
+    ),
+    EbaySummarySensorDescription(
+        key="orders_overdue",
+        translation_key="orders_overdue",
+        value_key="orders_overdue",
+    ),
+    EbaySummarySensorDescription(
+        key="orders_shipped",
+        translation_key="orders_shipped",
+        value_key="orders_shipped",
+    ),
+    EbaySummarySensorDescription(
+        key="orders_partially_fulfilled",
+        translation_key="orders_partially_fulfilled",
+        value_key="orders_partially_fulfilled",
+    ),
+    EbaySummarySensorDescription(
+        key="open_payment_disputes",
+        translation_key="open_payment_disputes",
+        value_key="open_payment_disputes",
+    ),
+    EbaySummarySensorDescription(
+        key="seller_level",
+        translation_key="seller_level",
+        value_key="seller_level",
+    ),
+    EbaySummarySensorDescription(
+        key="transaction_defect_rate",
+        translation_key="transaction_defect_rate",
+        value_key="transaction_defect_rate",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="late_shipment_rate",
+        translation_key="late_shipment_rate",
+        value_key="late_shipment_rate",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="cases_closed_without_seller_resolution",
+        translation_key="cases_closed_without_seller_resolution",
+        value_key="cases_closed_without_seller_resolution",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="item_not_received_metric",
+        translation_key="item_not_received_metric",
+        value_key="item_not_received_metric",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="item_not_as_described_metric",
+        translation_key="item_not_as_described_metric",
+        value_key="item_not_as_described_metric",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="seller_next_evaluation_date",
+        translation_key="seller_next_evaluation_date",
+        value_key="seller_next_evaluation_date",
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    EbaySummarySensorDescription(
+        key="feedback_score",
+        translation_key="feedback_score",
+        value_key="feedback_score",
+    ),
+    EbaySummarySensorDescription(
+        key="positive_feedback_percent",
+        translation_key="positive_feedback_percent",
+        value_key="positive_feedback_percent",
+    ),
+    EbaySummarySensorDescription(
+        key="recent_positive_feedback",
+        translation_key="recent_positive_feedback",
+        value_key="recent_positive_feedback",
+    ),
+    EbaySummarySensorDescription(
+        key="recent_neutral_feedback",
+        translation_key="recent_neutral_feedback",
+        value_key="recent_neutral_feedback",
+    ),
+    EbaySummarySensorDescription(
+        key="recent_negative_feedback",
+        translation_key="recent_negative_feedback",
+        value_key="recent_negative_feedback",
+    ),
+    EbaySummarySensorDescription(
+        key="items_awaiting_feedback",
+        translation_key="items_awaiting_feedback",
+        value_key="items_awaiting_feedback",
+    ),
+    EbaySummarySensorDescription(
+        key="unread_conversations",
+        translation_key="unread_conversations",
+        value_key="unread_conversations",
+    ),
+    EbaySummarySensorDescription(
+        key="buyer_question_conversations",
+        translation_key="buyer_question_conversations",
+        value_key="buyer_question_conversations",
+    ),
+    EbaySummarySensorDescription(
+        key="oldest_unanswered_message_hours",
+        translation_key="oldest_unanswered_message_hours",
+        value_key="oldest_unanswered_message_hours",
+        native_unit_of_measurement=UnitOfTime.HOURS,
+    ),
 ]
 
 
@@ -100,16 +218,22 @@ def _truncated_collection_names(coordinator: EbayDataUpdateCoordinator) -> list[
 
 def _partial_failure_categories(coordinator: EbayDataUpdateCoordinator) -> list[str]:
     data = coordinator.data or {}
-    return list(data.get("partial_failures") or data.get("summary", {}).get("partial_failures") or [])
-
-
-def _api_warnings(coordinator: EbayDataUpdateCoordinator) -> list[Any]:
-    data = coordinator.data or {}
     return list(
-        data.get("summary", {}).get("api_warnings")
-        or data.get("api_warnings")
+        data.get("partial_failures")
+        or data.get("summary", {}).get("partial_failures")
         or []
     )
+
+
+def _api_warnings_all(coordinator: EbayDataUpdateCoordinator) -> list[Any]:
+    """Return the full deduplicated warning list from coordinator payload."""
+    data = coordinator.data or {}
+    return list(data.get("api_warnings") or [])
+
+
+def _api_warnings_for_attrs(coordinator: EbayDataUpdateCoordinator) -> list[Any]:
+    """Return a capped warning list suitable for entity state attributes."""
+    return _api_warnings_all(coordinator)[:API_WARNINGS_STATE_ATTR_MAX]
 
 
 def _parse_successful_update(coordinator: EbayDataUpdateCoordinator) -> datetime | None:
@@ -161,8 +285,10 @@ DIAGNOSTIC_SENSORS = [
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda coordinator: len(_api_warnings(coordinator)),
-        attrs_fn=lambda coordinator: {"api_warnings": _api_warnings(coordinator)},
+        value_fn=lambda coordinator: len(_api_warnings_all(coordinator)),
+        attrs_fn=lambda coordinator: {
+            "api_warnings": _api_warnings_for_attrs(coordinator)
+        },
     ),
     EbayDiagnosticSensorDescription(
         key="last_refresh_duration",
@@ -187,8 +313,9 @@ DIAGNOSTIC_SENSORS = [
         ],
         entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=False,
-        value_fn=lambda coordinator: coordinator.last_refresh_result
-        or REFRESH_RESULT_UNKNOWN,
+        value_fn=lambda coordinator: (
+            coordinator.last_refresh_result or REFRESH_RESULT_UNKNOWN
+        ),
         attrs_fn=lambda coordinator: {
             "error_category": coordinator.last_error_category
         },
@@ -413,7 +540,6 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
 
     @property
@@ -440,9 +566,7 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
         }
 
 
-class EbayDiagnosticSensor(
-    CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity
-):
+class EbayDiagnosticSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
     """Disabled-by-default diagnostic health sensor."""
 
     entity_description: EbayDiagnosticSensorDescription
@@ -460,8 +584,27 @@ class EbayDiagnosticSensor(
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to coordinator updates and optional timer-count changes."""
+        await super().async_added_to_hass()
+        if self.entity_description.key != "scheduled_ending_soon_timer_count":
+            return
+
+        @callback
+        def _timer_updated() -> None:
+            self.async_write_ha_state()
+
+        self.async_on_remove(self.coordinator.async_add_timer_listener(_timer_updated))
+
+    @property
+    def available(self) -> bool:
+        """Keep health telemetry visible after a failed refresh."""
+        return (
+            self.coordinator.last_attempt_at is not None
+            or self.coordinator.data is not None
+        )
 
     @property
     def native_value(self) -> StateType | datetime:
@@ -501,7 +644,6 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
-            "manufacturer": "eBay",
         }
 
     @property

@@ -64,14 +64,21 @@ authorize later.
 
 ## OAuth scopes
 
-Home Assistant always requests both:
+Home Assistant always requests:
 
 - the base eBay API scope
-- `sell.analytics.readonly` (Sell Analytics)
+- `sell.analytics.readonly`
+- `sell.fulfillment.readonly`
+- `sell.payment.dispute` (GET-only in this integration; no `.readonly` variant)
+- `commerce.feedback.readonly`
+- `commerce.message` (GET-only in this integration; no `.readonly` variant)
 
-Analytics enrichment can be turned off later in integration options. That stops
-Analytics API calls but does not revoke the granted scope; a new authorization
-would be required to change consented scopes.
+Feature toggles in integration options stop API calls for Analytics views,
+orders/fulfillment, seller standards, feedback, and messages. They do not revoke
+granted scopes; a new authorization is required to change consented scopes.
+
+Upgrading from earlier versions that only requested Analytics scopes requires
+one reauthorization so the expanded scopes are granted.
 
 
 ## 3. Create or open an application keyset

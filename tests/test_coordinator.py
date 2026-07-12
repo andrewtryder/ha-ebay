@@ -32,6 +32,7 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     coordinator.last_refresh_result = "unknown"
     coordinator.selected_item_keys = set()
     coordinator._event_callbacks = {}
+    coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
     coordinator._price_drop_below_active = set()
@@ -43,6 +44,7 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
         "bidding": deque(maxlen=RECENT_EVENTS_MAX),
         "selling": deque(maxlen=RECENT_EVENTS_MAX),
+        "seller_ops": deque(maxlen=RECENT_EVENTS_MAX),
     }
     coordinator._recent_history_ending_soon = set()
     coordinator._manual_refresh_last_requested = None
