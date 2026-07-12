@@ -11,7 +11,7 @@
       },
       "prepare_application": {
         "title": "Prepare your eBay application",
-        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}\n\nAuthorization always requests the base eBay API scope and sell.analytics.readonly (Sell Analytics). Analytics enrichment can later be disabled in integration options without removing the granted scope."
+        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}\n\nAuthorization always requests the base eBay API scope plus read-only Sell Analytics, Fulfillment, Feedback, and Message scopes used for seller-ops monitoring. Feature toggles in options stop API calls but do not revoke granted scopes."
       },
       "credentials": {
         "title": "Enter eBay application credentials",
@@ -36,14 +36,14 @@
       },
       "oauth": {
         "title": "Authorize eBay",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the base API scope and Sell Analytics read-only access. You can disable Analytics enrichment later in options without revoking the granted scope.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the expanded read-only seller-ops OAuth scopes (Analytics, Fulfillment, Feedback, and Messages). You can disable individual features later in options without revoking granted scopes.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
       },
       "manual": {
         "title": "Authorize eBay manually",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the base API scope and Sell Analytics read-only access. You can disable Analytics enrichment later in options without revoking the granted scope.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the expanded read-only seller-ops OAuth scopes (Analytics, Fulfillment, Feedback, and Messages). You can disable individual features later in options without revoking granted scopes.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
@@ -77,14 +77,22 @@
           "watched_price_drop_currency": "Global watched price-drop currency",
           "analytics_enabled": "Enable Sell Analytics 30-day views",
           "buying_enabled": "Enable buying and watch data",
-          "selling_enabled": "Enable selling data"
+          "selling_enabled": "Enable selling data",
+          "fulfillment_enabled": "Enable orders and fulfillment data",
+          "seller_standards_enabled": "Enable seller standards and service metrics",
+          "feedback_enabled": "Enable feedback monitoring",
+          "messages_enabled": "Enable buyer messages monitoring"
         },
         "data_description": {
           "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
           "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY. Item IDs must also appear in pinned item IDs. Per-item targets override the global threshold.",
           "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change.",
           "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency.",
-          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD)."
+          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD).",
+          "fulfillment_enabled": "Requires selling data. Fetches paid orders, shipment status, and open payment disputes.",
+          "seller_standards_enabled": "Requires selling data. Fetches seller level and customer-service metrics.",
+          "feedback_enabled": "Requires selling data. Fetches feedback score and recent rating counts.",
+          "messages_enabled": "Requires selling data. Fetches unread conversation counts without storing message bodies."
         }
       }
     },
@@ -128,6 +136,72 @@
       "selling_ending_soon": {
         "name": "Selling ending soon"
       },
+      "orders_awaiting_shipment": {
+        "name": "Orders awaiting shipment"
+      },
+      "orders_shipping_today": {
+        "name": "Orders shipping today"
+      },
+      "orders_overdue": {
+        "name": "Orders overdue for shipment"
+      },
+      "orders_shipped": {
+        "name": "Shipped orders"
+      },
+      "orders_partially_fulfilled": {
+        "name": "Partially fulfilled orders"
+      },
+      "open_payment_disputes": {
+        "name": "Open payment disputes"
+      },
+      "seller_level": {
+        "name": "Seller level"
+      },
+      "transaction_defect_rate": {
+        "name": "Transaction defect rate"
+      },
+      "late_shipment_rate": {
+        "name": "Late shipment rate"
+      },
+      "cases_closed_without_seller_resolution": {
+        "name": "Cases closed without seller resolution"
+      },
+      "item_not_received_metric": {
+        "name": "Item not received metric"
+      },
+      "item_not_as_described_metric": {
+        "name": "Item not as described metric"
+      },
+      "seller_next_evaluation_date": {
+        "name": "Next seller evaluation date"
+      },
+      "feedback_score": {
+        "name": "Feedback score"
+      },
+      "positive_feedback_percent": {
+        "name": "Positive feedback percent"
+      },
+      "recent_positive_feedback": {
+        "name": "Recent positive feedback"
+      },
+      "recent_neutral_feedback": {
+        "name": "Recent neutral feedback"
+      },
+      "recent_negative_feedback": {
+        "name": "Recent negative feedback"
+      },
+      "items_awaiting_feedback": {
+        "name": "Items awaiting feedback"
+      },
+      "unread_conversations": {
+        "name": "Unread conversations"
+      },
+      "buyer_question_conversations": {
+        "name": "Buyer question conversations"
+      },
+      "oldest_unanswered_message_hours": {
+        "name": "Oldest unanswered message age"
+      },
       "last_successful_update": {
         "name": "Last successful update"
       },
@@ -159,6 +233,14 @@
       },
       "bidding_activity": {
         "name": "Bidding activity"
+      },
+      "seller_ops_activity": {
+        "name": "Seller ops activity"
+      }
+    },
+    "binary_sensor": {
+      "seller_standard_at_risk": {
+        "name": "Seller standard at risk"
       }
     },
     "calendar": {

@@ -44,6 +44,7 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     coordinator.last_refresh_result = "unknown"
     coordinator.selected_item_keys = set()
     coordinator._event_callbacks = {}
+    coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
     coordinator._price_drop_below_active = set()
@@ -51,6 +52,7 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
         "bidding": deque(maxlen=RECENT_EVENTS_MAX),
         "selling": deque(maxlen=RECENT_EVENTS_MAX),
+        "seller_ops": deque(maxlen=RECENT_EVENTS_MAX),
     }
     coordinator._recent_history_ending_soon = set()
     coordinator._manual_refresh_last_requested = None
@@ -193,6 +195,7 @@ def test_diagnostic_sensors_disabled_by_default() -> None:
             assert attrs["truncated_collections"] == ["watched"]
         elif description.key == "api_warning_count":
             assert value == 1
+            assert attrs["api_warnings"] == [{"code": "1", "short_message": "warn"}]
         elif description.key == "last_refresh_duration":
             assert value == 1.25
         elif description.key == "last_refresh_result":
@@ -202,3 +205,73 @@ def test_diagnostic_sensors_disabled_by_default() -> None:
         secret_blob = str(value) + str(attrs)
         assert "access_token" not in secret_blob
         assert "refresh_token" not in secret_blob
+
+
+def test_api_warning_count_uses_full_list_while_attrs_are_capped() -> None:
+    from custom_components.ebay.api import API_WARNINGS_STATE_ATTR_MAX
+
+    warnings = [
+        {"code": str(index), "short_message": f"w{index}", "long_message": None}
+        for index in range(API_WARNINGS_STATE_ATTR_MAX + 5)
+    ]
+    coordinator = _coordinator()
+    coordinator.data = _payload(
+        api_warnings=warnings,
+        summary={"api_warnings": warnings[:API_WARNINGS_STATE_ATTR_MAX]},
+    )
+    description = next(
+        item for item in DIAGNOSTIC_SENSORS if item.key == "api_warning_count"
+    )
+    entity = EbayDiagnosticSensor(coordinator, Mock(entry_id="entry-1"), description)
+    assert entity.native_value == len(warnings)
+    attrs = entity.extra_state_attributes
+    assert attrs is not None
+    assert len(attrs["api_warnings"]) == API_WARNINGS_STATE_ATTR_MAX
+
+
+def test_timer_fire_notifies_timer_listeners_only() -> None:
+    coordinator = _coordinator()
+    key = ("entry-1", "watching", "1", 3600, "t")
+    coordinator._scheduled[key] = Mock()
+    notified: list[int] = []
+    coordinator.async_add_timer_listener(
+        lambda: notified.append(coordinator.scheduled_ending_soon_count)
+    )
+    fire = coordinator._scheduled_callback(
+        "watching",
+        "watched_item_ending_soon",
+        "1",
+        "t",
+        key,
+    )
+    fire(datetime.now(timezone.utc))
+    assert coordinator._scheduled == {}
+    assert notified == [0]
+    assert coordinator.async_request_refresh.await_count == 0
+
+
+def test_diagnostic_and_button_available_after_failed_refresh() -> None:
+    coordinator = _coordinator()
+    coordinator.last_update_success = False
+    coordinator.last_attempt_at = datetime.now(timezone.utc)
+    coordinator.last_refresh_result = REFRESH_RESULT_ERROR
+    coordinator.last_refresh_duration_seconds = 0.5
+    coordinator.data = _payload()
+
+    for description in DIAGNOSTIC_SENSORS:
+        entity = EbayDiagnosticSensor(
+            coordinator, Mock(entry_id="entry-1"), description
+        )
+        assert entity.available is True
+
+    button = EbayRefreshButton(coordinator, Mock(entry_id="entry-1"))
+    assert button.available is True
+
+    coordinator.last_attempt_at = None
+    coordinator.data = None
+    for description in DIAGNOSTIC_SENSORS:
+        entity = EbayDiagnosticSensor(
+            coordinator, Mock(entry_id="entry-1"), description
+        )
+        assert entity.available is False
+    assert EbayRefreshButton(coordinator, Mock(entry_id="entry-1")).available is False

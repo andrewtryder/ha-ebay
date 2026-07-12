@@ -20,9 +20,7 @@ from custom_components.ebay.options_parse import (
 
 
 def test_parse_price_targets_normalizes() -> None:
-    targets = parse_price_targets(
-        " 123456789012=250.00 usd \n987654321098=80.00 EUR\n"
-    )
+    targets = parse_price_targets(" 123456789012=250.00 usd \n987654321098=80.00 EUR\n")
     assert targets == {
         "123456789012": (Decimal("250.00"), "USD"),
         "987654321098": (Decimal("80.00"), "EUR"),

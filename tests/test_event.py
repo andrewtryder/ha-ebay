@@ -7,7 +7,11 @@ from collections import deque
 from typing import Any
 from unittest.mock import Mock
 
-from custom_components.ebay.const import DEFAULT_OPTIONS, RECENT_EVENTS_MAX, SELLING_EVENT_TYPES
+from custom_components.ebay.const import (
+    DEFAULT_OPTIONS,
+    RECENT_EVENTS_MAX,
+    SELLING_EVENT_TYPES,
+)
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 from custom_components.ebay.event import EbayActivityEvent, EVENTS, async_setup_entry
 
@@ -19,6 +23,7 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     coordinator.options = dict(DEFAULT_OPTIONS)
     coordinator.data = None
     coordinator._event_callbacks = {}
+    coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
     coordinator._price_drop_below_active = set()
@@ -26,16 +31,19 @@ def _coordinator() -> EbayDataUpdateCoordinator:
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
         "bidding": deque(maxlen=RECENT_EVENTS_MAX),
         "selling": deque(maxlen=RECENT_EVENTS_MAX),
+        "seller_ops": deque(maxlen=RECENT_EVENTS_MAX),
     }
     coordinator._recent_history_ending_soon = set()
     return coordinator
 
 
-def test_event_setup_creates_three_entities() -> None:
+def test_event_setup_creates_entities() -> None:
     coordinator = _coordinator()
     entry = Mock(entry_id="entry-1", runtime_data=coordinator)
     added: list[list[Any]] = []
-    asyncio.run(async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities))))
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
     assert len(added[0]) == len(EVENTS)
 
 

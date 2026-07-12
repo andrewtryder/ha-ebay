@@ -23,12 +23,16 @@ from custom_components.ebay.const import (
 
 
 def _entry_data(**overrides: Any) -> dict[str, Any]:
+    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
     data = {
         CONF_ENVIRONMENT: "production",
         CONF_CLIENT_ID: "client",
         CONF_CLIENT_SECRET: "secret",
         CONF_RUNAME: "runame",
         CONF_SITE_ID: "0",
+        CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
         "token": {
             "access_token": "access",
             "refresh_token": "refresh",
@@ -123,16 +127,44 @@ def test_migrate_v1_refresh_token_to_v2() -> None:
     ):
         assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
 
-    assert entry.version == 3
+    assert entry.version == 4
     assert "token" in entry.data
     assert entry.data["token"]["refresh_token"] == "legacy-refresh"
-    assert hass.config_entries.async_update_entry.call_count == 2
+    assert hass.config_entries.async_update_entry.call_count == 3
 
 
 def test_migrate_rejects_future_version() -> None:
     hass = Mock()
-    entry = _mock_entry(version=4)
+    entry = _mock_entry(version=5)
     assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is False
+
+
+def test_migrate_v3_to_v4_clears_oauth_scopes() -> None:
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    hass = Mock()
+
+    def _update_entry(entry: Mock, **kwargs: Any) -> None:
+        if "data" in kwargs:
+            entry.data = kwargs["data"]
+        if "version" in kwargs:
+            entry.version = kwargs["version"]
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_update_entry)
+    entry = _mock_entry(
+        version=3,
+        data=_entry_data(**{CONF_OAUTH_SCOPES: "old-scope"}),
+    )
+    assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
+    assert entry.version == 4
+    assert CONF_OAUTH_SCOPES not in entry.data
+
+
+def test_async_setup_entry_requires_current_oauth_scopes() -> None:
+    hass = Mock()
+    entry = _mock_entry(data=_entry_data(oauth_scopes="stale"))
+    with pytest.raises(ConfigEntryAuthFailed):
+        asyncio.run(ebay_integration.async_setup_entry(hass, entry))
 
 
 def test_migrate_v2_renames_legacy_sensor_unique_ids(
@@ -145,6 +177,8 @@ def test_migrate_v2_renames_legacy_sensor_unique_ids(
     hass = Mock()
 
     def _update_entry(entry: Mock, **kwargs: Any) -> None:
+        if "data" in kwargs:
+            entry.data = kwargs["data"]
         if "version" in kwargs:
             entry.version = kwargs["version"]
 
@@ -175,7 +209,7 @@ def test_migrate_v2_renames_legacy_sensor_unique_ids(
     ):
         assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
 
-    assert entry.version == 3
+    assert entry.version == 4
     assert migrated == [
         (
             f"{entry.entry_id}_selling_total_sold",
@@ -281,6 +315,9 @@ def test_options_listener_reloads_entry() -> None:
 
 def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
     """Legacy entries with only refresh_token still construct a client."""
+    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
     hass = Mock()
     hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
     entry = _mock_entry(
@@ -291,6 +328,7 @@ def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
             CONF_RUNAME: "runame",
             CONF_SITE_ID: "0",
             CONF_REFRESH_TOKEN: "legacy-refresh",
+            CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
         }
     )
     coordinator = Mock()

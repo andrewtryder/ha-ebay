@@ -26,6 +26,7 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     coordinator.data = None
     coordinator.previous_payload = None
     coordinator._event_callbacks = {}
+    coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
     coordinator._price_drop_below_active = set()
@@ -33,6 +34,7 @@ def _coordinator() -> EbayDataUpdateCoordinator:
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
         "bidding": deque(maxlen=RECENT_EVENTS_MAX),
         "selling": deque(maxlen=RECENT_EVENTS_MAX),
+        "seller_ops": deque(maxlen=RECENT_EVENTS_MAX),
     }
     coordinator._recent_history_ending_soon = set()
     return coordinator
@@ -599,8 +601,12 @@ def test_watched_item_added_after_baseline() -> None:
 def test_bidding_and_selling_item_added_after_baseline() -> None:
     coordinator = _coordinator()
     events: list[tuple[str, str]] = []
-    coordinator._event_callbacks["bidding"] = lambda et, _ed: events.append(("bidding", et))
-    coordinator._event_callbacks["selling"] = lambda et, _ed: events.append(("selling", et))
+    coordinator._event_callbacks["bidding"] = lambda et, _ed: events.append(
+        ("bidding", et)
+    )
+    coordinator._event_callbacks["selling"] = lambda et, _ed: events.append(
+        ("selling", et)
+    )
     coordinator._detect_bidding_events(
         {},
         {"b1": {"item_id": "b1", "winning": False, "seconds_left": 100}},
@@ -755,7 +761,7 @@ def test_event_type_declarations_include_new_types() -> None:
     )
 
     assert "watched_item_added" in WATCHING_EVENT_TYPES
-    assert "watched_item_removed" in WATCHING_EVENT_TYPES
+    assert "watched_item_removed" not in WATCHING_EVENT_TYPES
     assert "watched_item_price_increased" in WATCHING_EVENT_TYPES
     assert "watched_item_price_decreased" in WATCHING_EVENT_TYPES
     assert "watched_item_price_dropped_below" in WATCHING_EVENT_TYPES
@@ -771,8 +777,22 @@ def test_price_increase_and_decrease_with_threshold() -> None:
     coordinator._event_callbacks["watching"] = lambda et, ed: events.append((et, ed))
 
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 112, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 100,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 112,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert [et for et, _ in events] == [
@@ -784,16 +804,44 @@ def test_price_increase_and_decrease_with_threshold() -> None:
 
     events.clear()
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 105, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 100,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 105,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert events == []
 
     events.clear()
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 100, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 80, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 100,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 80,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert [et for et, _ in events] == [
@@ -808,29 +856,85 @@ def test_price_unchanged_missing_zero_currency_mismatch() -> None:
     coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
 
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 10,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 10,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert events == []
 
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": None, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 5, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": None,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 5,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert events == []
 
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 0, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 5, "currency": "USD", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 0,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 5,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert events == []
 
     coordinator._detect_watching_events(
-        {"w1": {"item_id": "w1", "current_price": 10, "currency": "USD", "seconds_left": 10}},
-        {"w1": {"item_id": "w1", "current_price": 5, "currency": "EUR", "seconds_left": 9}},
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 10,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 5,
+                "currency": "EUR",
+                "seconds_left": 9,
+            }
+        },
         suppress_incomplete=False,
     )
     assert events == []
@@ -918,6 +1022,63 @@ def test_global_and_per_item_dropped_below() -> None:
     assert drop_events[0]["threshold"] == 50
 
 
+def test_price_drop_below_clears_on_unwatch_rewatch_recross() -> None:
+    """Stale threshold-active state must not suppress a post-rewatch crossing."""
+    coordinator = _coordinator()
+    coordinator.options["watched_price_drop_threshold"] = "100"
+    coordinator.options["watched_price_drop_currency"] = "USD"
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+
+    above = {
+        "item_id": "w1",
+        "current_price": 120,
+        "currency": "USD",
+        "seconds_left": 10,
+    }
+    below = {
+        "item_id": "w1",
+        "current_price": 90,
+        "currency": "USD",
+        "seconds_left": 9,
+    }
+
+    coordinator._detect_watching_events(
+        {"w1": above},
+        {"w1": below},
+        suppress_incomplete=False,
+    )
+    assert "watched_item_price_dropped_below" in events
+    assert "w1" in coordinator._price_drop_below_active
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {"w1": below},
+        {},
+        suppress_incomplete=False,
+    )
+    assert events == ["watched_item_disappeared_unknown"]
+    assert "w1" not in coordinator._price_drop_below_active
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {},
+        {"w1": above},
+        suppress_incomplete=False,
+    )
+    assert events == ["watched_item_added"]
+    assert "w1" not in coordinator._price_drop_below_active
+
+    events.clear()
+    coordinator._detect_watching_events(
+        {"w1": above},
+        {"w1": below},
+        suppress_incomplete=False,
+    )
+    assert "watched_item_price_dropped_below" in events
+    assert "w1" in coordinator._price_drop_below_active
+
+
 def test_bid_count_increase_versus_decrease() -> None:
     coordinator = _coordinator()
     events: list[str] = []
@@ -938,3 +1099,67 @@ def test_bid_count_increase_versus_decrease() -> None:
         suppress_incomplete=False,
     )
     assert events == ["watched_item_bid_count_changed"]
+
+
+def test_seller_ops_order_and_message_events() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {"seller_level": "TOP_RATED", "at_risk": False},
+        "feedback": {
+            "score": 10,
+            "recent_positive": 1,
+            "recent_neutral": 0,
+            "recent_negative": 0,
+        },
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "item_id": "111",
+                    "paid": True,
+                    "shipped": False,
+                    "has_tracking": False,
+                    "due_soon": True,
+                    "overdue": False,
+                }
+            }
+        },
+        "disputes": {
+            "by_id": {"d1": {"dispute_id": "d1", "order_id": "o1", "reason": "FRAUD"}}
+        },
+        "standards": {"seller_level": "ABOVE_STANDARD", "at_risk": True},
+        "feedback": {
+            "score": 11,
+            "recent_positive": 1,
+            "recent_neutral": 0,
+            "recent_negative": 1,
+        },
+        "messages": {
+            "by_id": {
+                "c1": {
+                    "conversation_id": "c1",
+                    "listing_id": "111",
+                    "subject": "Question",
+                    "is_buyer_question": True,
+                }
+            }
+        },
+    }
+    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=False)
+    assert "order_received" in events
+    assert "order_paid" in events
+    assert "shipment_due_soon" in events
+    assert "payment_dispute_opened" in events
+    assert "seller_level_changed" in events
+    assert "seller_standard_at_risk" in events
+    assert "feedback_received" in events
+    assert "negative_feedback_received" in events
+    assert "feedback_rating_changed" in events
+    assert "new_buyer_question" in events

@@ -10,15 +10,19 @@ This integration targets Home Assistant `2026.3.0+`.
 
 ## Read-only Boundary
 
-This integration is intentionally read-only. It does not place bids, buy items, create listings, revise listings, end listings, accept/counter/decline offers, send messages, change watchlists, perform shipping actions, or call eBay mutation APIs.
+This integration is intentionally read-only. It does not place bids, buy items, create listings, revise listings, end listings, accept/counter/decline offers, send messages, leave feedback, change watchlists, perform shipping actions, issue refunds, or call eBay mutation APIs.
 
-The MVP uses these read-only calls:
+The integration uses these read-only calls:
 
 - `GetMyeBayBuying`
 - `GetMyeBaySelling`
 - `GetSellerList`
 - `GetBestOffers`
 - optional Sell Analytics traffic report
+- optional Sell Fulfillment `getOrders` and payment dispute summaries
+- optional Sell Analytics seller standards and customer-service metrics
+- optional Commerce Feedback summaries
+- optional Commerce Message conversation lists
 
 `GetBestOffers` uses Trading API pagination for active offers, with a defensive
 page cap to keep polling bounded on unusually large accounts.
@@ -52,13 +56,23 @@ Current setup uniqueness is based on environment and Client ID, so only one eBay
 account can be configured per developer app credential set. To monitor multiple
 eBay accounts, create a separate eBay developer app for each account.
 
-For traffic views from Sell Analytics, mint consent with:
+For seller-ops monitoring, mint consent with these scopes (always requested):
 
 ```text
+https://api.ebay.com/oauth/api_scope
 https://api.ebay.com/oauth/api_scope/sell.analytics.readonly
+https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly
+https://api.ebay.com/oauth/api_scope/sell.payment.dispute
+https://api.ebay.com/oauth/api_scope/commerce.feedback.readonly
+https://api.ebay.com/oauth/api_scope/commerce.message
 ```
 
-The integration also requests the base eBay API scope.
+`sell.payment.dispute` and `commerce.message` have no `.readonly` variants; the
+integration still only calls GET methods. Options can disable individual
+seller-ops sections without revoking granted scopes.
+
+Existing installs must reauthorize once after upgrading to pick up the expanded
+scopes.
 
 ## OAuth Setup
 
@@ -116,10 +130,14 @@ state.
 - Enable/disable buying/watch data
 - Enable/disable selling data
 - Enable/disable Sell Analytics 30-day views enrichment
+- Enable/disable orders and fulfillment data
+- Enable/disable seller standards and service metrics
+- Enable/disable feedback monitoring
+- Enable/disable buyer messages monitoring
 
-Authorization always requests the base eBay API scope and `sell.analytics.readonly`.
-Disabling Analytics in options stops enrichment requests but does not remove the
-granted OAuth scope.
+Authorization always requests the expanded seller-ops OAuth scopes listed above.
+Disabling a feature in options stops those API calls but does not remove granted
+OAuth scopes.
 
 After installing or updating the custom-component Python code through HACS, perform a
 full Home Assistant restart before expecting new platforms or event behavior.
@@ -138,8 +156,31 @@ Always-created sensors:
 - `sensor.ebay_selling_total_views`
 - `sensor.ebay_watched_ending_soon`
 - `sensor.ebay_selling_ending_soon`
+- `sensor.ebay_orders_awaiting_shipment`
+- `sensor.ebay_orders_shipping_today`
+- `sensor.ebay_orders_overdue`
+- `sensor.ebay_orders_shipped`
+- `sensor.ebay_orders_partially_fulfilled`
+- `sensor.ebay_open_payment_disputes`
+- `sensor.ebay_seller_level`
+- `sensor.ebay_feedback_score`
+- `sensor.ebay_positive_feedback_percent`
+- `sensor.ebay_recent_positive_feedback`
+- `sensor.ebay_recent_neutral_feedback`
+- `sensor.ebay_recent_negative_feedback`
+- `sensor.ebay_items_awaiting_feedback`
+- `sensor.ebay_unread_conversations`
+- `sensor.ebay_buyer_question_conversations`
+- `sensor.ebay_oldest_unanswered_message_hours`
 
-Attributes contain bounded context such as items ending soon, items with offers, items with bids, items with questions, highest watcher/view items, update timestamps, partial failure categories, truncated collections, and Trading API warnings.
+Seller standards rate sensors (defect rate, late shipment, INR/INAD, next evaluation)
+are created as diagnostic entities.
+
+Binary sensor:
+
+- `binary_sensor.ebay_seller_standard_at_risk`
+
+Attributes contain bounded context such as items ending soon, items with offers, items with bids, items with questions, highest watcher/view items, update timestamps, partial failure categories, truncated collections, and Trading API warnings. Feedback comments, buyer usernames, and full message bodies are never stored in state attributes.
 
 ## Diagnostic Health Sensors
 
@@ -179,6 +220,7 @@ Fixed event entities remain `Unknown` until their first actual detected event:
 - `event.ebay_selling_activity`
 - `event.ebay_watching_activity`
 - `event.ebay_bidding_activity`
+- `event.ebay_seller_ops_activity`
 
 Each event entity exposes a bounded `recent_events` attribute for its own kind
 (newest first, max 20, memory-only, resets on Home Assistant restart or integration
@@ -198,7 +240,6 @@ Selling event types:
 Watching event types:
 
 - `watched_item_added`
-- `watched_item_removed` (declared for forward compatibility; not emitted yet)
 - `watched_item_ending_soon`
 - `watched_item_price_changed` (legacy compatibility)
 - `watched_item_price_increased`
@@ -218,6 +259,24 @@ Bidding event types:
 - `bid_item_ended`
 - `bid_item_disappeared_unknown`
 
+Seller ops event types:
+
+- `order_received`
+- `order_paid`
+- `shipment_due_soon`
+- `shipment_overdue`
+- `order_marked_shipped`
+- `tracking_added`
+- `payment_dispute_opened`
+- `seller_level_changed`
+- `seller_standard_at_risk`
+- `service_metric_above_peer_benchmark`
+- `feedback_received`
+- `negative_feedback_received`
+- `feedback_rating_changed`
+- `new_buyer_question`
+- `new_message_received`
+
 ### Event semantics
 
 - The first successful poll after startup, reload, options reload, or reauthorization
@@ -229,7 +288,8 @@ Bidding event types:
   confirmed `seconds_left == 0`.
 - Active watched-item disappearance emits `watched_item_disappeared_unknown`. The
   current WatchList APIs do not provide affirmative evidence of a manual unwatch, so
-  `watched_item_removed` is not emitted.
+  deliberate unwatching cannot currently be distinguished from other active-item
+  disappearance.
 - For watched price changes, the integration emits the legacy
   `watched_item_price_changed` event first, then the canonical directional event. The
   EventEntity final state is the directional event. Recent-activity history records

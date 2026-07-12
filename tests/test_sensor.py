@@ -31,7 +31,9 @@ _FIXED_SENSORS = len(SUMMARY_SENSORS) + len(DIAGNOSTIC_SENSORS)
 class _SelectionCoordinator:
     """Minimal coordinator stub with cached selection."""
 
-    def __init__(self, *, options: dict[str, Any], data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, *, options: dict[str, Any], data: dict[str, Any] | None = None
+    ) -> None:
         self.options = options
         self.data = data
         self.last_update_success = True
@@ -162,7 +164,9 @@ def test_item_sensor_availability_follows_current_cap_selection() -> None:
     assert sensor.native_value is None
 
 
-def test_setup_removes_stale_registered_item_sensors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_setup_removes_stale_registered_item_sensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Per-item registry entries outside the current selection should be removed."""
 
     class RegistryEntries:
@@ -204,12 +208,14 @@ def test_setup_removes_stale_registered_item_sensors(monkeypatch: pytest.MonkeyP
     )
     added: list[list[Any]] = []
 
-    asyncio.run(async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities))))
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
 
     assert removed == ["sensor.ebay_watched_999_price"]
-    assert {sensor.item_id for sensor in added[0] if isinstance(sensor, EbayItemSensor)} == {
-        "001"
-    }
+    assert {
+        sensor.item_id for sensor in added[0] if isinstance(sensor, EbayItemSensor)
+    } == {"001"}
 
 
 def test_selection_priorities_and_modes() -> None:
@@ -217,7 +223,13 @@ def test_selection_priorities_and_modes() -> None:
     data = {
         "selling": {
             "s_action": {"item_id": "s_action", "bid_count": 1, "seconds_left": 99999},
-            "s_plain": {"item_id": "s_plain", "bid_count": 0, "offers": 0, "questions": 0, "seconds_left": 99999},
+            "s_plain": {
+                "item_id": "s_plain",
+                "bid_count": 0,
+                "offers": 0,
+                "questions": 0,
+                "seconds_left": 99999,
+            },
         },
         "watched": {
             "w_soon": {"item_id": "w_soon", "seconds_left": 30},
@@ -228,24 +240,18 @@ def test_selection_priorities_and_modes() -> None:
             "b1": {"item_id": "b1", "seconds_left": 99999},
         },
     }
-    balanced = _select_item_entities(
-        data, ENTITY_MODE_BALANCED, 10, {"pinned"}, 60
-    )
+    balanced = _select_item_entities(data, ENTITY_MODE_BALANCED, 10, {"pinned"}, 60)
     assert ("watched", "pinned") in balanced
     assert ("selling", "s_action") in balanced
     assert ("watched", "w_soon") in balanced
     assert ("selling", "s_plain") not in balanced
     assert ("watched", "w_plain") not in balanced
 
-    detailed = _select_item_entities(
-        data, ENTITY_MODE_DETAILED, 2, {"pinned"}, 60
-    )
+    detailed = _select_item_entities(data, ENTITY_MODE_DETAILED, 2, {"pinned"}, 60)
     assert detailed[0] == ("watched", "pinned")
     assert len(detailed) == 2
 
-    minimal = _select_item_entities(
-        data, "minimal", 10, {"pinned"}, 60
-    )
+    minimal = _select_item_entities(data, "minimal", 10, {"pinned"}, 60)
     # minimal still returns candidates from the helper; sensors skip via mode gate
     assert ("watched", "pinned") in minimal
 
@@ -255,7 +261,9 @@ def test_is_item_sensor_unique_id_excludes_summary_sensors() -> None:
 
     entry_id = "entry-1"
     assert _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_123_bids") is True
-    assert _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_total_bids") is False
+    assert (
+        _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_total_bids") is False
+    )
     assert (
         _is_item_sensor_unique_id(entry_id, f"{entry_id}_selling_total_views") is False
     )

@@ -21,11 +21,15 @@ from .const import (
     CONF_BUYING_ENABLED,
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_SELLING_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
     CONF_WATCHED_PRICE_DROP_CURRENCY,
     CONF_WATCHED_PRICE_DROP_THRESHOLD,
@@ -83,6 +87,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_refresh_result: str = REFRESH_RESULT_UNKNOWN
         self.selected_item_keys: set[SelectedItemKey] = set()
         self._event_callbacks: dict[str, EventCallback] = {}
+        self._timer_listeners: list[Callable[[], None]] = []
         self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
         self._fired_ending_soon: set[EndingSoonKey] = set()
         # Items currently at/below their effective drop threshold (no repeat events).
@@ -91,6 +96,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "watching": deque(maxlen=RECENT_EVENTS_MAX),
             "bidding": deque(maxlen=RECENT_EVENTS_MAX),
             "selling": deque(maxlen=RECENT_EVENTS_MAX),
+            "seller_ops": deque(maxlen=RECENT_EVENTS_MAX),
         }
         # Ending-soon keys already recorded to history without an entity callback.
         self._recent_history_ending_soon: set[EndingSoonKey] = set()
@@ -134,6 +140,27 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return unsubscribe
 
+    def async_add_timer_listener(
+        self, update_callback: Callable[[], None]
+    ) -> CALLBACK_TYPE:
+        """Register a listener for scheduled ending-soon timer collection changes."""
+        self._timer_listeners.append(update_callback)
+
+        @callback
+        def unsubscribe() -> None:
+            try:
+                self._timer_listeners.remove(update_callback)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    @callback
+    def _async_notify_timer_listeners(self) -> None:
+        """Notify timer-count consumers without refreshing every coordinator entity."""
+        for listener in list(self._timer_listeners):
+            listener()
+
     async def async_request_manual_refresh(self) -> bool:
         """Request a coordinator refresh subject to the manual cooldown.
 
@@ -157,9 +184,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
         self._manual_refresh_last_requested = now
-        _LOGGER.debug(
-            "Requesting eBay manual refresh entry_id=%s", self.entry.entry_id
-        )
+        _LOGGER.debug("Requesting eBay manual refresh entry_id=%s", self.entry.entry_id)
         await self.async_request_refresh()
         return True
 
@@ -182,18 +207,30 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         buying_enabled = bool(self.options[CONF_BUYING_ENABLED])
         selling_enabled = bool(self.options[CONF_SELLING_ENABLED])
         analytics_enabled = bool(self.options[CONF_ANALYTICS_ENABLED])
+        fulfillment_enabled = bool(self.options[CONF_FULFILLMENT_ENABLED])
+        seller_standards_enabled = bool(self.options[CONF_SELLER_STANDARDS_ENABLED])
+        feedback_enabled = bool(self.options[CONF_FEEDBACK_ENABLED])
+        messages_enabled = bool(self.options[CONF_MESSAGES_ENABLED])
         _LOGGER.debug(
-            "eBay coordinator refresh started entry_id=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s",
+            "eBay coordinator refresh started entry_id=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
             self.entry.entry_id,
             buying_enabled,
             selling_enabled,
             analytics_enabled,
+            fulfillment_enabled,
+            seller_standards_enabled,
+            feedback_enabled,
+            messages_enabled,
         )
         try:
             payload = await self.api.async_fetch_data(
                 buying_enabled=buying_enabled,
                 selling_enabled=selling_enabled,
                 analytics_enabled=analytics_enabled,
+                fulfillment_enabled=fulfillment_enabled,
+                seller_standards_enabled=seller_standards_enabled,
+                feedback_enabled=feedback_enabled,
+                messages_enabled=messages_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
             )
         except EbayAuthError as exc:
@@ -305,7 +342,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             record_history = event_type not in LEGACY_COMPATIBILITY_EVENT_TYPES
         event_data = self._event_data(event_type, item, kind, extra)
         if record_history:
-            if history_key is None or history_key not in self._recent_history_ending_soon:
+            if (
+                history_key is None
+                or history_key not in self._recent_history_ending_soon
+            ):
                 self._append_recent_event(kind, event_data)
                 if history_key is not None:
                     self._recent_history_ending_soon.add(history_key)
@@ -349,6 +389,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "threshold_source",
             "percent_change",
             "direction",
+            "order_id",
+            "listing_id",
+            "subject",
+            "conversation_id",
+            "dispute_id",
+            "fulfillment_status",
+            "payment_status",
         ):
             if key in event_data:
                 entry[key] = event_data[key]
@@ -364,8 +411,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         end_time = item.get("end_time")
         return {
             "event_type": event_type,
-            "item_id": item.get("item_id"),
-            "title": item.get("title"),
+            "item_id": item.get("item_id") or item.get("listing_id"),
+            "title": item.get("title") or item.get("subject"),
             "kind": kind,
             "price": item.get("current_price"),
             "currency": item.get("currency"),
@@ -376,6 +423,19 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "url": item.get("url"),
             "image": item.get("image"),
             "detected_at": datetime.now(timezone.utc).isoformat(),
+            **{
+                key: value
+                for key, value in {
+                    "order_id": item.get("order_id"),
+                    "listing_id": item.get("listing_id"),
+                    "subject": item.get("subject"),
+                    "conversation_id": item.get("conversation_id"),
+                    "dispute_id": item.get("dispute_id"),
+                    "fulfillment_status": item.get("fulfillment_status"),
+                    "payment_status": item.get("payment_status"),
+                }.items()
+                if value is not None
+            },
             **extra,
         }
 
@@ -398,6 +458,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             previous["bidding"],
             current["bidding"],
             suppress_incomplete=_collection_truncated(previous, current, "bidding"),
+        )
+        self._detect_seller_ops_events(
+            previous.get("seller_ops") or {},
+            current.get("seller_ops") or {},
+            suppress_incomplete=_collection_truncated(previous, current, "orders")
+            or _collection_truncated(previous, current, "messages")
+            or _collection_truncated(previous, current, "payment_disputes"),
         )
 
     def _detect_selling_events(
@@ -450,6 +517,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not old:
                 if not suppress_incomplete:
                     self._emit("watching", "watched_item_added", item)
+                self._normalize_price_drop_active_for_item(item)
                 continue
             self._detect_watched_price_events(
                 old, item, allow_dropped_below=not suppress_incomplete
@@ -463,6 +531,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if item_id not in current and _was_running(old):
                 # WatchList APIs do not affirm manual unwatch; never emit
                 # watched_item_removed with the current read-only buying APIs.
+                self._price_drop_below_active.discard(item_id)
                 self._emit("watching", "watched_item_disappeared_unknown", old)
 
     def _detect_bidding_events(
@@ -601,6 +670,28 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._price_drop_below_active.add(item_id)
 
+    def _normalize_price_drop_active_for_item(self, item: dict[str, Any]) -> None:
+        """Seed or clear threshold-active state when a watched item first appears."""
+        item_id = str(item.get("item_id") or "")
+        if not item_id:
+            return
+        threshold, currency, _source = self._effective_price_drop_target(item_id)
+        price = to_decimal(item.get("current_price"))
+        item_currency = _normalize_currency(item.get("currency"))
+        if (
+            threshold is None
+            or not currency
+            or price is None
+            or not item_currency
+            or item_currency != currency
+        ):
+            self._price_drop_below_active.discard(item_id)
+            return
+        if price <= threshold:
+            self._price_drop_below_active.add(item_id)
+        else:
+            self._price_drop_below_active.discard(item_id)
+
     def _effective_price_drop_target(
         self, item_id: str
     ) -> tuple[Decimal | None, str | None, str | None]:
@@ -616,7 +707,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return amount, currency, "pinned_item"
         raw_threshold = self.options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, "")
         raw_currency = self.options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, "")
-        threshold = to_decimal(raw_threshold) if str(raw_threshold or "").strip() else None
+        threshold = (
+            to_decimal(raw_threshold) if str(raw_threshold or "").strip() else None
+        )
         currency = _normalize_currency(raw_currency)
         if threshold is None or not currency:
             return None, None, None
@@ -657,8 +750,152 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if old_value is not None and new_value is not None and new_value > old_value:
             self._emit(kind, event_type, new, old_value=old_value, new_value=new_value)
 
+    def _detect_seller_ops_events(
+        self,
+        previous: dict[str, Any],
+        current: dict[str, Any],
+        *,
+        suppress_incomplete: bool = False,
+    ) -> None:
+        """Emit seller-ops transition events from order/standards/feedback/message diffs."""
+        prev_orders = (previous.get("orders") or {}).get("by_id") or {}
+        curr_orders = (current.get("orders") or {}).get("by_id") or {}
+        for order_id, order in curr_orders.items():
+            old = prev_orders.get(order_id)
+            if not old:
+                if not suppress_incomplete:
+                    self._emit("seller_ops", "order_received", order)
+                    if order.get("paid"):
+                        self._emit("seller_ops", "order_paid", order)
+                    if order.get("due_soon"):
+                        self._emit("seller_ops", "shipment_due_soon", order)
+                    if order.get("overdue"):
+                        self._emit("seller_ops", "shipment_overdue", order)
+                continue
+            if not old.get("paid") and order.get("paid"):
+                self._emit("seller_ops", "order_paid", order)
+            if not old.get("shipped") and order.get("shipped"):
+                self._emit("seller_ops", "order_marked_shipped", order)
+            if not old.get("has_tracking") and order.get("has_tracking"):
+                self._emit("seller_ops", "tracking_added", order)
+            if not old.get("due_soon") and order.get("due_soon"):
+                self._emit("seller_ops", "shipment_due_soon", order)
+            if not old.get("overdue") and order.get("overdue"):
+                self._emit("seller_ops", "shipment_overdue", order)
+
+        prev_disputes = (previous.get("disputes") or {}).get("by_id") or {}
+        curr_disputes = (current.get("disputes") or {}).get("by_id") or {}
+        for dispute_id, dispute in curr_disputes.items():
+            if dispute_id not in prev_disputes and not suppress_incomplete:
+                self._emit(
+                    "seller_ops",
+                    "payment_dispute_opened",
+                    {
+                        "dispute_id": dispute_id,
+                        "order_id": dispute.get("order_id"),
+                        "title": dispute.get("reason"),
+                    },
+                )
+
+        prev_standards = previous.get("standards") or {}
+        curr_standards = current.get("standards") or {}
+        prev_level = prev_standards.get("seller_level")
+        curr_level = curr_standards.get("seller_level")
+        if prev_level and curr_level and prev_level != curr_level:
+            self._emit(
+                "seller_ops",
+                "seller_level_changed",
+                {"title": curr_level},
+                old_value=prev_level,
+                new_value=curr_level,
+            )
+        if not prev_standards.get("at_risk") and curr_standards.get("at_risk"):
+            self._emit(
+                "seller_ops",
+                "seller_standard_at_risk",
+                {"title": curr_level},
+            )
+        for flag_key in (
+            "item_not_received_above_benchmark",
+            "item_not_as_described_above_benchmark",
+        ):
+            if not prev_standards.get(flag_key) and curr_standards.get(flag_key):
+                self._emit(
+                    "seller_ops",
+                    "service_metric_above_peer_benchmark",
+                    {"title": flag_key},
+                    new_value=flag_key,
+                )
+
+        prev_feedback = previous.get("feedback") or {}
+        curr_feedback = current.get("feedback") or {}
+        prev_total = (
+            int(prev_feedback.get("recent_positive") or 0)
+            + int(prev_feedback.get("recent_neutral") or 0)
+            + int(prev_feedback.get("recent_negative") or 0)
+        )
+        curr_total = (
+            int(curr_feedback.get("recent_positive") or 0)
+            + int(curr_feedback.get("recent_neutral") or 0)
+            + int(curr_feedback.get("recent_negative") or 0)
+        )
+        if curr_total > prev_total:
+            self._emit(
+                "seller_ops",
+                "feedback_received",
+                {},
+                old_value=prev_total,
+                new_value=curr_total,
+            )
+        prev_neg = int(prev_feedback.get("recent_negative") or 0)
+        curr_neg = int(curr_feedback.get("recent_negative") or 0)
+        if curr_neg > prev_neg:
+            self._emit(
+                "seller_ops",
+                "negative_feedback_received",
+                {},
+                old_value=prev_neg,
+                new_value=curr_neg,
+            )
+        prev_score = prev_feedback.get("score")
+        curr_score = curr_feedback.get("score")
+        if (
+            prev_score is not None
+            and curr_score is not None
+            and prev_score != curr_score
+        ):
+            self._emit(
+                "seller_ops",
+                "feedback_rating_changed",
+                {},
+                old_value=prev_score,
+                new_value=curr_score,
+            )
+
+        prev_messages = (previous.get("messages") or {}).get("by_id") or {}
+        curr_messages = (current.get("messages") or {}).get("by_id") or {}
+        for conversation_id, convo in curr_messages.items():
+            old = prev_messages.get(conversation_id)
+            if old:
+                continue
+            if suppress_incomplete:
+                continue
+            subject = convo.get("subject") or convo.get("title")
+            payload = {
+                "conversation_id": conversation_id,
+                "listing_id": convo.get("listing_id"),
+                "item_id": convo.get("listing_id"),
+                "subject": subject,
+                "title": subject,
+            }
+            if convo.get("is_buyer_question"):
+                self._emit("seller_ops", "new_buyer_question", payload)
+            else:
+                self._emit("seller_ops", "new_message_received", payload)
+
     def _rebuild_ending_soon_timers(self, payload: dict[str, Any]) -> None:
         wanted: set[EndingSoonKey] = set()
+        previous_keys = set(self._scheduled)
         threshold = self.ending_soon_threshold_seconds
         for kind, collection, event_type in (
             ("watching", payload["watched"], "watched_item_ending_soon"),
@@ -755,6 +992,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._scheduled.pop(key)()
         self._fired_ending_soon.intersection_update(wanted)
         self._recent_history_ending_soon.intersection_update(wanted)
+        if set(self._scheduled) != previous_keys:
+            self._async_notify_timer_listeners()
 
     @callback
     def _scheduled_callback(
@@ -768,6 +1007,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         @callback
         def fire(now: datetime) -> None:
             self._scheduled.pop(key, None)
+            self._async_notify_timer_listeners()
             _LOGGER.debug(
                 "Firing scheduled eBay ending-soon timer kind=%s item_id=%s end_time=%s",
                 kind,
@@ -820,6 +1060,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def cancel_scheduled_events(self) -> None:
         """Cancel scheduled ending-soon callbacks."""
+        if not self._scheduled:
+            return
         for key, cancel in list(self._scheduled.items()):
             _, kind, item_id, threshold, normalized_end_time = key
             _LOGGER.debug(
@@ -831,6 +1073,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             cancel()
         self._scheduled.clear()
+        self._async_notify_timer_listeners()
 
 
 def _baseline_payload(

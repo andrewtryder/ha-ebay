@@ -549,7 +549,17 @@ def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
     assert result["type"] == "form"
     schema = result["data_schema"]
     with pytest.raises(vol.Invalid):
-        schema({"poll_interval": 1, "ending_soon_threshold": 60, "entity_mode": "balanced", "per_item_cap": 25, "analytics_enabled": True, "buying_enabled": True, "selling_enabled": True})
+        schema(
+            {
+                "poll_interval": 1,
+                "ending_soon_threshold": 60,
+                "entity_mode": "balanced",
+                "per_item_cap": 25,
+                "analytics_enabled": True,
+                "buying_enabled": True,
+                "selling_enabled": True,
+            }
+        )
     created = asyncio.run(
         flow.async_step_init(
             {

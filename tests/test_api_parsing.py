@@ -440,6 +440,9 @@ def test_core_pagination_truncation_is_reported() -> None:
         "selling": True,
         "seller_list_views": True,
         "active_offers": False,
+        "orders": False,
+        "payment_disputes": False,
+        "messages": False,
     }
 
 

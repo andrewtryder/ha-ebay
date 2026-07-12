@@ -14,6 +14,7 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
+    DEFAULT_SCOPE,
     EbayApiClient,
     EbayAuthError,
     build_consent_url,
@@ -29,12 +30,17 @@ from .const import (
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
     CONF_ENVIRONMENT,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_OAUTH_SCOPES,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_RUNAME,
     CONF_SELLING_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
     CONF_SITE_ID,
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
     CONF_WATCHED_PRICE_DROP_CURRENCY,
@@ -64,7 +70,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     """Handle an eBay config flow."""
 
     DOMAIN = DOMAIN
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -157,6 +163,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             **self._data,
             "auth_implementation": data["auth_implementation"],
             "token": normalize_new_token(data["token"]),
+            CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
         }
         if self.source == config_entries.SOURCE_REAUTH:
             return self.async_update_reload_and_abort(
@@ -218,6 +225,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     **self._data,
                     "auth_implementation": self.flow_impl.domain,
                     "token": normalize_new_token(payload),
+                    CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
                 }
                 if self.source == config_entries.SOURCE_REAUTH:
                     return self.async_update_reload_and_abort(
@@ -357,11 +365,23 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_SELLING_ENABLED, default=options[CONF_SELLING_ENABLED]
                 ): bool,
+                vol.Required(
+                    CONF_FULFILLMENT_ENABLED,
+                    default=options[CONF_FULFILLMENT_ENABLED],
+                ): bool,
+                vol.Required(
+                    CONF_SELLER_STANDARDS_ENABLED,
+                    default=options[CONF_SELLER_STANDARDS_ENABLED],
+                ): bool,
+                vol.Required(
+                    CONF_FEEDBACK_ENABLED, default=options[CONF_FEEDBACK_ENABLED]
+                ): bool,
+                vol.Required(
+                    CONF_MESSAGES_ENABLED, default=options[CONF_MESSAGES_ENABLED]
+                ): bool,
             }
         )
-        return self.async_show_form(
-            step_id="init", data_schema=schema, errors=errors
-        )
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
 
 
 def _non_empty_string(value: Any) -> str:

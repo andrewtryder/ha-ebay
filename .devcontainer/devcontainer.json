@@ -26,7 +26,7 @@
       }
     }
   },
-  "postCreateCommand": "python -m pip install --upgrade pip && if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; else python -m pip install pytest ruff pre-commit pillow; fi && if [ -f requirements-ha.txt ]; then python -m pip install -r requirements-ha.txt; else python -m pip install pytest-homeassistant-custom-component; fi && pre-commit install",
+  "postCreateCommand": "python -m pip install --upgrade pip && if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; else python -m pip install pytest ruff pre-commit pillow; fi && if [ -f requirements-ha.txt ]; then python -m pip install -r requirements-ha.txt; else python -m pip install pytest-homeassistant-custom-component; fi && pre-commit install --hook-types pre-commit --hook-types pre-push",
   "remoteUser": "vscode",
   "forwardPorts": [8123],
   "portsAttributes": {

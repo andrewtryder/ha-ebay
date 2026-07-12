@@ -16,10 +16,15 @@ from custom_components.ebay.const import (
     CONF_SITE_ID,
     DEFAULT_OPTIONS,
 )
-from custom_components.ebay.diagnostics import TO_REDACT, async_get_config_entry_diagnostics
+from custom_components.ebay.diagnostics import (
+    TO_REDACT,
+    async_get_config_entry_diagnostics,
+)
 
 
-def _coordinator(*, data: dict[str, Any] | None = None, error: str | None = None) -> Mock:
+def _coordinator(
+    *, data: dict[str, Any] | None = None, error: str | None = None
+) -> Mock:
     coordinator = Mock()
     coordinator.data = data
     coordinator.options = {
@@ -43,12 +48,22 @@ def test_diagnostics_without_coordinator_data() -> None:
             CONF_CLIENT_SECRET: "secret-cert",
             CONF_REFRESH_TOKEN: "secret-refresh",
             CONF_RUNAME: "secret-runame",
-            "token": {"access_token": "secret-access", "refresh_token": "secret-refresh"},
+            "token": {
+                "access_token": "secret-access",
+                "refresh_token": "secret-refresh",
+            },
         },
         runtime_data=_coordinator(data=None),
     )
     result = asyncio.run(async_get_config_entry_diagnostics(Mock(), entry))
-    assert result["counts"] == {"watched": 0, "bidding": 0, "selling": 0}
+    assert result["counts"] == {
+        "watched": 0,
+        "bidding": 0,
+        "selling": 0,
+        "orders": 0,
+        "open_payment_disputes": 0,
+        "unread_conversations": 0,
+    }
     assert result["partial_failure_categories"] == []
     assert result["truncated_collections"] == {}
     assert result["api_warnings"] == []
@@ -81,9 +96,19 @@ def test_diagnostics_with_coordinator_data() -> None:
         ),
     )
     result = asyncio.run(async_get_config_entry_diagnostics(Mock(), entry))
-    assert result["counts"] == {"watched": 1, "bidding": 2, "selling": 1}
+    assert result["counts"] == {
+        "watched": 1,
+        "bidding": 2,
+        "selling": 1,
+        "orders": 0,
+        "open_payment_disputes": 0,
+        "unread_conversations": 0,
+    }
     assert result["partial_failure_categories"] == ["analytics_views"]
     assert result["truncated_collections"] == {"selling": True}
     assert result["api_warnings"] == [{"code": "1", "short_message": "warn"}]
     assert result["enabled_features"]["analytics"] is True
+    assert result["enabled_features"]["fulfillment"] is True
     assert result["pinned_item_ids_count"] == 2
+    assert result["seller_ops_summary"]["orders"]["order_count"] == 0
+    assert result["seller_ops_summary"]["messages"]["unread_count"] is None
