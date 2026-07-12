@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.components.calendar import CalendarEntity, CalendarEvent
+from homeassistant.components.calendar import (
+    CalendarEntity,
+    CalendarEntityDescription,
+    CalendarEvent,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -22,11 +26,9 @@ from .coordinator import EbayDataUpdateCoordinator
 
 
 @dataclass(frozen=True, kw_only=True)
-class EbayCalendarDescription:
+class EbayCalendarDescription(CalendarEntityDescription):
     """Describe a fixed eBay calendar entity."""
 
-    key: str
-    translation_key: str
     collection: str
     listing_kind: str
     requires_buying: bool = False
