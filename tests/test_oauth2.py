@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import _decode_jwt
 from voluptuous_serialize import convert
 
+from custom_components.ebay.api import DEFAULT_SCOPE, build_consent_url
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
     CONF_CLIENT_ID,
@@ -41,6 +42,19 @@ from custom_components.ebay.oauth_errors import (
 
 ROOT = Path(__file__).resolve().parents[1]
 
+FEEDBACK_SCOPE = "https://api.ebay.com/oauth/api_scope/commerce.feedback"
+FEEDBACK_READONLY_SCOPE = (
+    "https://api.ebay.com/oauth/api_scope/commerce.feedback.readonly"
+)
+EXPECTED_AUTH_CODE_SCOPES = {
+    "https://api.ebay.com/oauth/api_scope",
+    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.payment.dispute",
+    FEEDBACK_SCOPE,
+    "https://api.ebay.com/oauth/api_scope/commerce.message",
+}
+
 
 def _flow_data(**overrides: str) -> dict[str, str]:
     data = {
@@ -64,6 +78,23 @@ class _Hass:
         self.config = _Config()
 
 
+def _scopes_from_url(url: str) -> list[str]:
+    """Parse space-delimited OAuth scopes from an authorize URL."""
+    params = parse_qs(urlparse(url).query)
+    return params["scope"][0].split()
+
+
+def test_default_scope_uses_auth_code_feedback_scope() -> None:
+    """Authorization Code scopes use commerce.feedback, not the readonly variant."""
+    scopes = DEFAULT_SCOPE.split()
+
+    assert FEEDBACK_SCOPE in scopes
+    assert FEEDBACK_READONLY_SCOPE not in scopes
+    assert set(scopes) == EXPECTED_AUTH_CODE_SCOPES
+    assert len(DEFAULT_SCOPE.split()) == len(set(DEFAULT_SCOPE.split()))
+    assert len(scopes) == len(set(scopes))
+
+
 def test_authorize_url_uses_runame_and_ha_state() -> None:
     """Authorize URL sends eBay RuName while state tracks HA callback."""
     hass = _Hass()
@@ -82,6 +113,20 @@ def test_authorize_url_uses_runame_and_ha_state() -> None:
     state = _decode_jwt(hass, params["state"][0])
     assert state["flow_id"] == "flow-123"
     assert state["redirect_uri"] == "https://my.home-assistant.io/redirect/oauth"
+
+
+def test_oauth2_authorize_url_contains_feedback_scope() -> None:
+    """EbayOAuth2Implementation consent URL requests commerce.feedback."""
+    hass = _Hass()
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    url = asyncio.run(implementation.async_generate_authorize_url("flow-123"))
+    scopes = _scopes_from_url(url)
+
+    assert FEEDBACK_SCOPE in scopes
+    assert FEEDBACK_READONLY_SCOPE not in scopes
+    assert set(scopes) == EXPECTED_AUTH_CODE_SCOPES
+    assert len(scopes) == len(set(scopes))
 
 
 def test_authorize_url_uses_sandbox_endpoint() -> None:
@@ -425,6 +470,38 @@ def test_manual_consent_url_is_generated_correctly(
     assert params["client_id"] == ["client-id"]
     assert params["redirect_uri"] == ["Example-Runame"]
     assert params["state"] == [flow._state]
+
+
+def test_manual_consent_url_contains_feedback_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manual OAuth consent URL requests commerce.feedback."""
+    flow = _flow(monkeypatch)
+    flow._oauth_mode = OAUTH_MODE_MANUAL
+
+    result = asyncio.run(flow.async_step_credentials(_flow_data()))
+    scopes = _scopes_from_url(result["description_placeholders"]["consent_url"])
+
+    assert FEEDBACK_SCOPE in scopes
+    assert FEEDBACK_READONLY_SCOPE not in scopes
+    assert set(scopes) == EXPECTED_AUTH_CODE_SCOPES
+    assert len(scopes) == len(set(scopes))
+
+
+def test_build_consent_url_contains_feedback_scope() -> None:
+    """build_consent_url embeds the Authorization Code feedback scope."""
+    url = build_consent_url(
+        "production",
+        "client-id",
+        "Example-Runame",
+        "state-1",
+    )
+    scopes = _scopes_from_url(url)
+
+    assert FEEDBACK_SCOPE in scopes
+    assert FEEDBACK_READONLY_SCOPE not in scopes
+    assert set(scopes) == EXPECTED_AUTH_CODE_SCOPES
+    assert len(scopes) == len(set(scopes))
 
 
 def test_reauth_updates_existing_entry(monkeypatch: pytest.MonkeyPatch) -> None:

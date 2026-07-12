@@ -62,7 +62,7 @@ DEFAULT_SCOPE = (
     "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly "
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly "
     "https://api.ebay.com/oauth/api_scope/sell.payment.dispute "
-    "https://api.ebay.com/oauth/api_scope/commerce.feedback.readonly "
+    "https://api.ebay.com/oauth/api_scope/commerce.feedback "
     "https://api.ebay.com/oauth/api_scope/commerce.message"
 )
 TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
