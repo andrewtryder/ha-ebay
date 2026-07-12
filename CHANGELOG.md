@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/andrewtryder/ha-ebay/compare/v0.4.1...v0.5.0) (2026-07-12)
+
+
+### Features
+
+* add read-only seller-ops monitoring and telemetry hardening ([69e2b98](https://github.com/andrewtryder/ha-ebay/commit/69e2b98ce77fcdf3f9a4f03fdc14a9ac78739f6d))
+* add read-only seller-ops monitoring and telemetry hardening ([bd54d96](https://github.com/andrewtryder/ha-ebay/commit/bd54d96c632f4624289a5960d394ce0daaa2e84d))
+
 ## [0.4.1](https://github.com/andrewtryder/ha-ebay/compare/v0.4.0...v0.4.1) (2026-07-12)
 
 
