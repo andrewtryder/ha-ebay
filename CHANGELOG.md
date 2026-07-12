@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/andrewtryder/ha-ebay/compare/v0.5.0...v0.5.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* make reauth credentials schema frontend-serializable ([1c2b074](https://github.com/andrewtryder/ha-ebay/commit/1c2b074f9a2daefca009ad129ba618925d4f94d2))
+* make reauth credentials schema frontend-serializable ([05c6986](https://github.com/andrewtryder/ha-ebay/commit/05c69865ab85350da1b960b1bd1d70f7903610ed))
+
 ## [0.5.0](https://github.com/andrewtryder/ha-ebay/compare/v0.4.1...v0.5.0) (2026-07-12)
 
 
