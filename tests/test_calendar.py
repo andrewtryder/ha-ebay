@@ -7,12 +7,33 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
+from homeassistant.components.calendar import CalendarEntityDescription
+from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    MockEntityPlatform,
+)
+
+from custom_components.ebay import calendar as calendar_module
 from custom_components.ebay.calendar import (
     CALENDARS,
     EbayListingCalendar,
     async_setup_entry,
 )
-from custom_components.ebay.const import DEFAULT_OPTIONS
+from custom_components.ebay.const import (
+    CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
+    CONF_ENVIRONMENT,
+    CONF_RUNAME,
+    CONF_SITE_ID,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+)
+from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 
 
 def _coordinator(data: dict[str, Any] | None = None, **option_overrides: Any) -> Any:
@@ -21,6 +42,94 @@ def _coordinator(data: dict[str, Any] | None = None, **option_overrides: Any) ->
     coordinator.data = data
     coordinator.last_update_success = True
     return coordinator
+
+
+def _calendar_payload() -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "watched": {},
+        "bidding": {},
+        "selling": {},
+        "summary": {
+            "active_selling_items": 0,
+            "watched_items": 0,
+            "bidding_items": 0,
+            "last_update": now,
+            "last_successful_update": now,
+            "partial_failures": [],
+            "truncated_collections": {},
+            "api_warnings": [],
+        },
+        "last_update": now,
+        "last_successful_update": now,
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+    }
+
+
+async def _setup_calendar_platform(
+    hass: HomeAssistant,
+    *,
+    entry_id: str = "entry-calendar-1",
+) -> tuple[MockConfigEntry, EbayDataUpdateCoordinator, MockEntityPlatform]:
+    """Register the eBay calendar platform under a mock Home Assistant harness."""
+    assert await async_setup_component(hass, "calendar", {})
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_ENVIRONMENT: "production",
+            CONF_CLIENT_ID: "client",
+            CONF_CLIENT_SECRET: "secret",
+            CONF_RUNAME: "runame",
+            CONF_SITE_ID: "0",
+        },
+        options=dict(DEFAULT_OPTIONS),
+        version=3,
+        title="eBay",
+        entry_id=entry_id,
+    )
+    entry.add_to_hass(hass)
+
+    coordinator = EbayDataUpdateCoordinator(hass, entry, Mock(), dict(DEFAULT_OPTIONS))
+    coordinator.update_interval = None
+    coordinator.data = _calendar_payload()
+    entry.runtime_data = coordinator
+
+    platform = MockEntityPlatform(
+        hass,
+        domain="calendar",
+        platform_name=DOMAIN,
+        platform=calendar_module,
+    )
+    assert await platform.async_setup_entry(entry)
+    await hass.async_block_till_done()
+    return entry, coordinator, platform
+
+
+def test_calendar_descriptions_use_home_assistant_base() -> None:
+    assert all(
+        isinstance(description, CalendarEntityDescription) for description in CALENDARS
+    )
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_calendar_entity_names_can_be_resolved(hass: HomeAssistant) -> None:
+    """Name resolution requires HA translation context; exercise the failing path."""
+    _entry, coordinator, platform = await _setup_calendar_platform(
+        hass, entry_id="entry-calendar-names"
+    )
+    try:
+        assert len(platform.entities) == len(CALENDARS)
+        for entity in platform.entities.values():
+            assert entity.name is not None
+            # Exact AttributeError path during HA platform registration.
+            assert entity.device_class is None
+    finally:
+        await platform.async_reset()
+        await coordinator.async_shutdown()
+        await hass.async_block_till_done()
 
 
 def test_calendar_setup_creates_three_entities() -> None:
@@ -242,3 +351,38 @@ def test_event_property_returns_next_upcoming() -> None:
     )
     assert entity.event is not None
     assert entity.event.summary == "Next"
+
+
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_calendar_platform_registers_entities(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Calendar platform registration succeeds with HA entity descriptions."""
+    entry, coordinator, platform = await _setup_calendar_platform(hass)
+
+    expected = {
+        "watched_items": ("calendar.ebay_watched_items", "Watched items"),
+        "bidding_items": ("calendar.ebay_bidding_items", "Bidding items"),
+        "selling_items": ("calendar.ebay_selling_items", "Selling items"),
+    }
+    for key, (entity_id, translated_name) in expected.items():
+        unique_id = f"{entry.entry_id}_{key}"
+        registry_entity_id = entity_registry.async_get_entity_id(
+            "calendar", DOMAIN, unique_id
+        )
+        assert registry_entity_id == entity_id
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert state.attributes.get("friendly_name") == f"eBay {translated_name}"
+        entity = platform.entities[entity_id]
+        assert entity.name == translated_name
+        assert entity.unique_id == unique_id
+
+    await platform.async_reset()
+    await coordinator.async_shutdown()
+    await hass.async_block_till_done()
+    assert platform.entities == {}
+    for entity_id, _ in expected.values():
+        state = hass.states.get(entity_id)
+        assert state is None or state.state == STATE_UNAVAILABLE
