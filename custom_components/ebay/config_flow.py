@@ -265,16 +265,18 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     default=defaults.get(CONF_ENVIRONMENT, "production"),
                 ): vol.In(ENVIRONMENTS),
                 vol.Required(
-                    CONF_CLIENT_ID, default=defaults.get(CONF_CLIENT_ID, "")
-                ): _non_empty_string,
-                vol.Required(CONF_CLIENT_SECRET, default=""): _non_empty_string,
+                    CONF_CLIENT_ID,
+                    default=defaults.get(CONF_CLIENT_ID, ""),
+                ): str,
+                vol.Required(CONF_CLIENT_SECRET, default=""): str,
                 vol.Required(
-                    CONF_RUNAME, default=defaults.get(CONF_RUNAME, "")
-                ): _non_empty_string,
+                    CONF_RUNAME,
+                    default=defaults.get(CONF_RUNAME, ""),
+                ): str,
                 vol.Required(
                     CONF_SITE_ID,
                     default=defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID),
-                ): _non_empty_string,
+                ): str,
             }
         )
 
@@ -382,14 +384,6 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
-
-
-def _non_empty_string(value: Any) -> str:
-    """Return a stripped string, rejecting empty credential values."""
-    stripped = str(value).strip()
-    if not stripped:
-        raise vol.Invalid("required")
-    return stripped
 
 
 def _normalize_credentials(
