@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/andrewtryder/ha-ebay/compare/v0.4.0...v0.4.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* Add events, calendars, refresh button, and health diagnostics ([c08598e](https://github.com/andrewtryder/ha-ebay/commit/c08598e75bd4c28dd250886b5435d9bb5d1d8888))
+
 ## [0.4.0](https://github.com/andrewtryder/ha-ebay/compare/v0.3.5...v0.4.0) (2026-07-11)
 
 
