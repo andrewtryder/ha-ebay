@@ -1,0 +1,61 @@
+blueprint:
+  name: eBay - Notify when watched item is ending soon
+  description: >
+    Send a notification when a watched eBay item enters the ending-soon window.
+
+    The ending-soon threshold is configured in the eBay integration options.
+    Requires the eBay **Watching activity** event entity.
+  domain: automation
+  source_url: https://github.com/andrewtryder/ha-ebay/blob/main/blueprints/automation/ebay/notify_when_watched_item_ending_soon.yaml
+  author: ha-ebay
+  homeassistant:
+    min_version: 2026.3.0
+  input:
+    watching_event:
+      name: Watching activity event
+      description: Usually event.ebay_watching_activity
+      selector:
+        entity:
+          filter:
+            - domain: event
+              integration: ebay
+    notify_entity:
+      name: Notify entity
+      description: Notify entity that supports notify.send_message
+      selector:
+        entity:
+          domain: notify
+    notification_title:
+      name: Notification title
+      default: eBay ending soon
+      selector:
+        text:
+
+mode: queued
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: !input watching_event
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state.attributes.event_type == 'watched_item_ending_soon' }}
+
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: !input notify_entity
+    data:
+      title: !input notification_title
+      message: >-
+        {{ trigger.to_state.attributes.title | default('Watched item') }} is ending
+        soon{% if trigger.to_state.attributes.seconds_left is defined and trigger.to_state.attributes.seconds_left is not none
+        %} ({{ (trigger.to_state.attributes.seconds_left / 60) | round(0) }} min left){% endif
+        %}{% if trigger.to_state.attributes.price is defined and trigger.to_state.attributes.price is not none
+        %} — {{ trigger.to_state.attributes.price }}{%
+          if trigger.to_state.attributes.currency %} {{ trigger.to_state.attributes.currency }}{% endif
+        %}{% endif %}{%
+        if trigger.to_state.attributes.url %}
+        {{ trigger.to_state.attributes.url }}{% endif %}

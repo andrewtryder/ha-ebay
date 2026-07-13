@@ -76,6 +76,14 @@ attribute keeps a bounded, memory-only history that resets after a restart or in
 Diagnostic health sensors are created disabled by default. Enable them from the entity registry
 when troubleshooting refresh failures, API warnings, truncation, or ending-soon timers.
 
+## Automation blueprints
+
+Import-ready blueprints cover common notifications (outbid, price drop below target,
+watched item ending soon, overdue shipment, buyer question, and seller at risk).
+
+See **[docs/blueprints.md](docs/blueprints.md)** for import links and feature requirements.
+
+
 ## Configuration
 
 Options include:
