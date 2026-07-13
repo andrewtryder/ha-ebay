@@ -123,6 +123,10 @@ async def async_get_config_entry_diagnostics(
         "last_refresh_result": coordinator.last_refresh_result,
         "last_error_category": coordinator.last_error_category,
         "partial_failure_categories": data.get("partial_failures", []),
+        "missing_scope_features": data.get("missing_scope_features")
+        or summary.get("missing_scope_features", []),
+        "missing_scopes": data.get("missing_scopes")
+        or summary.get("missing_scopes", {}),
         "truncated_collections": data.get("truncated_collections", {}),
         "api_warnings": data.get("api_warnings", []),
         "scheduled_ending_soon_timer_count": coordinator.scheduled_ending_soon_count,

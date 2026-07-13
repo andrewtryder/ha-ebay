@@ -14,12 +14,15 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
-    DEFAULT_SCOPE,
+    CORE_SCOPE,
     EbayApiClient,
     EbayAuthError,
     build_consent_url,
     extract_authorization_code,
     extract_oauth_callback_params,
+    missing_scopes_for_options,
+    resolve_granted_scopes,
+    scopes_for_options,
 )
 from .const import (
     ALLOWED_PER_ITEM_CAPS,
@@ -79,6 +82,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         self._state = secrets.token_urlsafe(24)
         self._consent_url: str | None = None
         self._oauth_mode = OAUTH_MODE_CALLBACK
+        self._requested_scopes = CORE_SCOPE
 
     @property
     def logger(self) -> logging.Logger:
@@ -138,13 +142,17 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             if self.source != config_entries.SOURCE_REAUTH:
                 self._abort_if_unique_id_configured()
 
-            self.flow_impl = EbayOAuth2Implementation(self.hass, self._data)
+            self._requested_scopes = self._scopes_for_authorization()
+            self.flow_impl = EbayOAuth2Implementation(
+                self.hass, self._data, scope=self._requested_scopes
+            )
             if self._oauth_mode == OAUTH_MODE_MANUAL:
                 self._consent_url = build_consent_url(
                     self._data[CONF_ENVIRONMENT],
                     self._data[CONF_CLIENT_ID],
                     self._data[CONF_RUNAME],
                     self._state,
+                    scope=self._requested_scopes,
                 )
                 return await self.async_step_manual()
             return await self.async_step_auth()
@@ -159,11 +167,12 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         self, data: dict[str, Any]
     ) -> config_entries.ConfigFlowResult:
         """Create or update an eBay entry after native OAuth completes."""
+        token = normalize_new_token(data["token"])
         entry_data = {
             **self._data,
             "auth_implementation": data["auth_implementation"],
-            "token": normalize_new_token(data["token"]),
-            CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
+            "token": token,
+            CONF_OAUTH_SCOPES: resolve_granted_scopes(self._requested_scopes, token),
         }
         if self.source == config_entries.SOURCE_REAUTH:
             return self.async_update_reload_and_abort(
@@ -221,11 +230,14 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             except EbayAuthError:
                 errors["base"] = "cannot_connect"
             else:
+                token = normalize_new_token(payload)
                 entry_data = {
                     **self._data,
                     "auth_implementation": self.flow_impl.domain,
-                    "token": normalize_new_token(payload),
-                    CONF_OAUTH_SCOPES: DEFAULT_SCOPE,
+                    "token": token,
+                    CONF_OAUTH_SCOPES: resolve_granted_scopes(
+                        self._requested_scopes, token
+                    ),
                 }
                 if self.source == config_entries.SOURCE_REAUTH:
                     return self.async_update_reload_and_abort(
@@ -295,6 +307,14 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             return {}
         return dict(self._get_reauth_entry().data)
 
+    def _scopes_for_authorization(self) -> str:
+        """Return scopes for the current authorize/reauth attempt."""
+        if self.source != config_entries.SOURCE_REAUTH:
+            return CORE_SCOPE
+        entry = self._get_reauth_entry()
+        options = {**DEFAULT_OPTIONS, **dict(getattr(entry, "options", {}) or {})}
+        return scopes_for_options(options)
+
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -319,7 +339,20 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
             data = dict(user_input)
             errors = validate_price_options(data)
             if not errors:
-                return self.async_create_entry(title="", data=data)
+                result = self.async_create_entry(title="", data=data)
+                granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
+                if missing_scopes_for_options(granted, data):
+                    self.hass.async_create_task(
+                        self.hass.config_entries.flow.async_init(
+                            DOMAIN,
+                            context={
+                                "source": config_entries.SOURCE_REAUTH,
+                                "entry_id": self._config_entry.entry_id,
+                            },
+                            data=self._config_entry.data,
+                        )
+                    )
+                return result
 
         options = {**DEFAULT_OPTIONS, **self._config_entry.options}
         if user_input is not None:

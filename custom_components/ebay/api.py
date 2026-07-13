@@ -14,7 +14,17 @@ import xml.etree.ElementTree as ET
 
 import aiohttp
 
-from .const import COMPATIBILITY_LEVEL, EBAY_XML_NS, ENV_SANDBOX, NS
+from .const import (
+    COMPATIBILITY_LEVEL,
+    CONF_ANALYTICS_ENABLED,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
+    EBAY_XML_NS,
+    ENV_SANDBOX,
+    NS,
+)
 from .oauth_errors import (
     OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
@@ -57,14 +67,92 @@ BEST_OFFERS_CALL_NAME = "GetBestOffers"
 BEST_OFFERS_ENTRIES_PER_PAGE = 200
 BEST_OFFERS_MAX_PAGES = 25
 
-DEFAULT_SCOPE = (
-    "https://api.ebay.com/oauth/api_scope "
-    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.payment.dispute "
-    "https://api.ebay.com/oauth/api_scope/commerce.feedback "
-    "https://api.ebay.com/oauth/api_scope/commerce.message"
+CORE_SCOPE = "https://api.ebay.com/oauth/api_scope"
+SCOPE_ANALYTICS_READONLY = (
+    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
 )
+SCOPE_FULFILLMENT_READONLY = (
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+)
+SCOPE_PAYMENT_DISPUTE = "https://api.ebay.com/oauth/api_scope/sell.payment.dispute"
+SCOPE_FEEDBACK = "https://api.ebay.com/oauth/api_scope/commerce.feedback"
+SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
+
+MODULE_SCOPES: dict[str, tuple[str, ...]] = {
+    CONF_ANALYTICS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
+    CONF_SELLER_STANDARDS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
+    CONF_FULFILLMENT_ENABLED: (SCOPE_FULFILLMENT_READONLY, SCOPE_PAYMENT_DISPUTE),
+    CONF_FEEDBACK_ENABLED: (SCOPE_FEEDBACK,),
+    CONF_MESSAGES_ENABLED: (SCOPE_MESSAGE,),
+}
+
+ALL_OPTIONAL_SCOPES = (
+    SCOPE_ANALYTICS_READONLY,
+    SCOPE_FULFILLMENT_READONLY,
+    SCOPE_PAYMENT_DISPUTE,
+    SCOPE_FEEDBACK,
+    SCOPE_MESSAGE,
+)
+
+
+def parse_scope_set(scopes: str | None) -> set[str]:
+    """Parse a space-delimited OAuth scope string into a set."""
+    if not scopes:
+        return set()
+    return {scope for scope in scopes.split() if scope}
+
+
+def join_scopes(scopes: list[str] | tuple[str, ...] | set[str]) -> str:
+    """Join scopes into a stable space-delimited string."""
+    if isinstance(scopes, set):
+        ordered = sorted(scopes)
+    else:
+        ordered = list(dict.fromkeys(scopes))
+    return " ".join(ordered)
+
+
+def scopes_for_options(options: dict[str, Any]) -> str:
+    """Return the OAuth scope string required by enabled feature options."""
+    scopes: list[str] = [CORE_SCOPE]
+    for option_key, option_scopes in MODULE_SCOPES.items():
+        if options.get(option_key):
+            scopes.extend(option_scopes)
+    return join_scopes(scopes)
+
+
+def missing_scopes_for_options(
+    granted: str | set[str] | None, options: dict[str, Any]
+) -> dict[str, list[str]]:
+    """Return enabled modules whose required scopes are not all granted."""
+    granted_set = granted if isinstance(granted, set) else parse_scope_set(granted)
+    missing: dict[str, list[str]] = {}
+    for option_key, option_scopes in MODULE_SCOPES.items():
+        if not options.get(option_key):
+            continue
+        absent = [scope for scope in option_scopes if scope not in granted_set]
+        if absent:
+            missing[option_key] = absent
+    return missing
+
+
+def resolve_granted_scopes(requested: str, token: dict[str, Any] | None = None) -> str:
+    """Prefer scopes returned by eBay; otherwise store the requested set."""
+    if token:
+        returned = token.get("scope")
+        if isinstance(returned, str) and returned.strip():
+            return join_scopes(parse_scope_set(returned))
+    return join_scopes(parse_scope_set(requested))
+
+
+def has_core_scope(scopes: str | None) -> bool:
+    """Return True when the stored grant includes the core Trading API scope."""
+    return CORE_SCOPE in parse_scope_set(scopes)
+
+
+# Full union retained for docs/tests; routine authorize uses CORE_SCOPE or
+# scopes_for_options().
+DEFAULT_SCOPE = join_scopes((CORE_SCOPE, *ALL_OPTIONAL_SCOPES))
+
 TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 MAX_PAGES = 20
 ANALYTICS_BATCH_SIZE = 100
@@ -143,7 +231,7 @@ def build_consent_url(
     client_id: str,
     runame: str,
     state: str,
-    scope: str = DEFAULT_SCOPE,
+    scope: str = CORE_SCOPE,
 ) -> str:
     """Build an eBay OAuth consent URL."""
     endpoints = endpoints_for(environment)
@@ -1497,6 +1585,7 @@ class EbayApiClient:
         feedback_enabled: bool = False,
         messages_enabled: bool = False,
         ending_soon_threshold_seconds: int,
+        granted_scopes: str | None = None,
     ) -> dict[str, Any]:
         """Fetch and normalize all configured read-only telemetry."""
         refresh_start = time.monotonic()
@@ -1524,6 +1613,15 @@ class EbayApiClient:
         disputes_truncated = False
         messages_truncated = False
         seller_ops = empty_seller_ops()
+        feature_options = {
+            CONF_ANALYTICS_ENABLED: analytics_enabled,
+            CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
+            CONF_SELLER_STANDARDS_ENABLED: seller_standards_enabled,
+            CONF_FEEDBACK_ENABLED: feedback_enabled,
+            CONF_MESSAGES_ENABLED: messages_enabled,
+        }
+        missing_by_feature = missing_scopes_for_options(granted_scopes, feature_options)
+        missing_scope_features = sorted(missing_by_feature)
 
         if buying_enabled:
             (
@@ -1591,26 +1689,33 @@ class EbayApiClient:
                 partial_failures.append("active_offers")
 
             if analytics_enabled:
-                try:
-                    (
-                        views_by_id,
-                        analytics_partial,
-                    ) = await self.async_fetch_analytics_views(list(selling))
-                    for item_id, views in views_by_id.items():
-                        if item_id in selling:
-                            selling[item_id]["analytics_views_30d"] = views
-                    if analytics_partial:
+                if CONF_ANALYTICS_ENABLED in missing_by_feature:
+                    partial_failures.append("analytics_views_missing_scope")
+                else:
+                    try:
+                        (
+                            views_by_id,
+                            analytics_partial,
+                        ) = await self.async_fetch_analytics_views(list(selling))
+                        for item_id, views in views_by_id.items():
+                            if item_id in selling:
+                                selling[item_id]["analytics_views_30d"] = views
+                        if analytics_partial:
+                            partial_failures.append("analytics_views")
+                    except EbayAuthError:
+                        raise
+                    except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                        _LOGGER.debug(
+                            "Optional analytics views failed error=%s",
+                            _safe_exception_context(exc),
+                        )
                         partial_failures.append("analytics_views")
-                except EbayAuthError:
-                    raise
-                except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                    _LOGGER.debug(
-                        "Optional analytics views failed error=%s",
-                        _safe_exception_context(exc),
-                    )
-                    partial_failures.append("analytics_views")
 
-            if fulfillment_enabled:
+        if fulfillment_enabled:
+            if CONF_FULFILLMENT_ENABLED in missing_by_feature:
+                partial_failures.append("orders_missing_scope")
+                partial_failures.append("payment_disputes_missing_scope")
+            else:
                 try:
                     orders_summary, orders_truncated = await self.async_fetch_orders()
                     seller_ops["orders"] = orders_summary
@@ -1641,7 +1746,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("payment_disputes")
 
-            if seller_standards_enabled:
+        if seller_standards_enabled:
+            if CONF_SELLER_STANDARDS_ENABLED in missing_by_feature:
+                partial_failures.append("seller_standards_missing_scope")
+            else:
                 try:
                     seller_ops["standards"] = await self.async_fetch_seller_standards()
                 except EbayAuthError:
@@ -1653,7 +1761,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("seller_standards")
 
-            if feedback_enabled:
+        if feedback_enabled:
+            if CONF_FEEDBACK_ENABLED in missing_by_feature:
+                partial_failures.append("feedback_missing_scope")
+            else:
                 try:
                     seller_ops["feedback"] = await self.async_fetch_feedback()
                 except EbayAuthError:
@@ -1665,7 +1776,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("feedback")
 
-            if messages_enabled:
+        if messages_enabled:
+            if CONF_MESSAGES_ENABLED in missing_by_feature:
+                partial_failures.append("messages_missing_scope")
+            else:
                 try:
                     (
                         messages_summary,
@@ -1703,6 +1817,8 @@ class EbayApiClient:
             watched, bidding, selling, ending_soon_threshold_seconds
         )
         summary.update(_seller_ops_summary_keys(seller_ops))
+        summary["missing_scopes"] = missing_by_feature
+        summary["missing_scope_features"] = missing_scope_features
         _LOGGER.debug(
             "eBay API refresh completed watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
             len(watched),
@@ -1723,6 +1839,8 @@ class EbayApiClient:
             "partial_failures": partial_failures,
             "truncated_collections": truncated_collections,
             "api_warnings": api_warnings,
+            "missing_scopes": missing_by_feature,
+            "missing_scope_features": missing_scope_features,
         }
 
 

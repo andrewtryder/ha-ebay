@@ -11,7 +11,7 @@
       },
       "prepare_application": {
         "title": "Prepare your eBay application",
-        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}\n\nAuthorization always requests the base eBay API scope plus read-only Sell Analytics, Fulfillment, Feedback, and Message scopes used for seller-ops monitoring. Feature toggles in options stop API calls but do not revoke granted scopes."
+        "description": "Open the eBay Developer Program application keys page:\n\n{developer_console_url}\n\nUse this Home Assistant OAuth callback URL for both eBay redirect fields:\n\n`{callback_url}`\n\n1. Select the production or sandbox environment you plan to use.\n2. Scroll to \"Get a Token from eBay via Your Application.\"\n3. Under \"Your eBay Sign-in Settings,\" click \"Add eBay Redirect URL\" or expand an existing redirect.\n4. Set Display Title to a recognizable name, such as \"Home Assistant.\"\n5. If eBay asks for \"Your privacy policy URL,\" you may use the project policy or your own: {privacy_policy_url}\n6. Set both \"Your auth accepted URL\" and \"Your auth declined URL\" to the callback URL above.\n7. Save the redirect and copy the generated RuName.\n8. Return to Home Assistant and continue.\n\nDo not use the \"Sign in to Production\" button under \"Get a User Token Here.\" That creates a developer test token and is not the Home Assistant setup flow.\n\nWhen Home Assistant later opens eBay authorization, sign in with the regular eBay account whose buying and selling activity you want to monitor. This may be different from your eBay Developer Program account.\n\nDetailed setup guide: {oauth_setup_guide_url}\n\nInitial authorization requests only the core eBay API scope used for buying and selling telemetry. Enable optional seller-operation modules in options when needed; Home Assistant will request additional scopes and ask you to reauthorize only for those modules."
       },
       "credentials": {
         "title": "Enter eBay application credentials",
@@ -32,18 +32,18 @@
       },
       "reauth_confirm": {
         "title": "Reauthorize eBay",
-        "description": "eBay rejected the stored refresh token. Continue to re-enter the Cert ID / Client secret and authorize again with the regular eBay account you want Home Assistant to monitor."
+        "description": "Continue to re-enter the Cert ID / Client secret and authorize again with the regular eBay account you want Home Assistant to monitor. This is required when the refresh token was rejected or when newly enabled features need additional eBay OAuth scopes."
       },
       "oauth": {
         "title": "Authorize eBay",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the expanded read-only seller-ops OAuth scopes (Analytics, Fulfillment, Feedback, and Messages). You can disable individual features later in options without revoking granted scopes.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent requests the scopes required for currently enabled features (core buying/selling by default). Enabling optional seller-operation modules later may prompt reauthorization for additional scopes. Disabling a feature stops its API calls but does not revoke granted scopes.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
       },
       "manual": {
         "title": "Authorize eBay manually",
-        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent always requests the expanded read-only seller-ops OAuth scopes (Analytics, Fulfillment, Feedback, and Messages). You can disable individual features later in options without revoking granted scopes.\n\n{consent_url}",
+        "description": "Manual authorization is intended only when the automatic browser callback does not complete.\n\n1. Open the consent URL below.\n2. Sign into the regular eBay account you want Home Assistant to monitor.\n3. Approve read-only access.\n4. Paste the complete final callback URL below.\n5. Paste only the authorization code if the full URL is unavailable.\n\nPasting the full callback URL allows Home Assistant to validate OAuth state.\n\nThis consent requests the scopes required for currently enabled features (core buying/selling by default). Enabling optional seller-operation modules later may prompt reauthorization for additional scopes. Disabling a feature stops its API calls but does not revoke granted scopes.\n\n{consent_url}",
         "data": {
           "authorization_code": "Authorization code or callback URL"
         }
@@ -89,10 +89,11 @@
           "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change.",
           "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency.",
           "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD).",
-          "fulfillment_enabled": "Requires selling data. Fetches paid orders, shipment status, and open payment disputes.",
-          "seller_standards_enabled": "Requires selling data. Fetches seller level and customer-service metrics.",
-          "feedback_enabled": "Requires selling data. Fetches feedback score and recent rating counts.",
-          "messages_enabled": "Requires selling data. Fetches unread conversation counts without storing message bodies."
+          "analytics_enabled": "Needs selling data (active listings) and may require OAuth reauthorization for Sell Analytics.",
+          "fulfillment_enabled": "Fetches paid orders, shipment status, and open payment disputes. May require OAuth reauthorization for Fulfillment scopes.",
+          "seller_standards_enabled": "Fetches seller level and customer-service metrics. May require OAuth reauthorization for Sell Analytics.",
+          "feedback_enabled": "Fetches feedback score and recent rating counts. May require OAuth reauthorization for Feedback.",
+          "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages."
         }
       }
     },

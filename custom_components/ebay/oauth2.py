@@ -20,7 +20,7 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     async_get_redirect_uri,
 )
 
-from .api import DEFAULT_SCOPE, endpoints_for
+from .api import CORE_SCOPE, endpoints_for
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -59,7 +59,13 @@ def async_get_ebay_callback_url(hass: HomeAssistant) -> str:
 class EbayOAuth2Implementation(LocalOAuth2Implementation):
     """eBay OAuth implementation that uses RuName as provider redirect_uri."""
 
-    def __init__(self, hass: HomeAssistant, data: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        data: dict[str, Any],
+        *,
+        scope: str = CORE_SCOPE,
+    ) -> None:
         """Initialize the eBay OAuth implementation."""
         environment = data[CONF_ENVIRONMENT]
         endpoints = endpoints_for(environment)
@@ -73,6 +79,7 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
         )
         self.environment = environment
         self.runame = data[CONF_RUNAME]
+        self.scope = scope
 
     @property
     def name(self) -> str:
@@ -87,7 +94,7 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
     @property
     def extra_authorize_data(self) -> dict[str, str]:
         """Return eBay OAuth authorize parameters."""
-        return {"scope": DEFAULT_SCOPE}
+        return {"scope": self.scope}
 
     async def async_generate_authorize_url(self, flow_id: str) -> str:
         """Generate an eBay authorize URL with HA state and eBay RuName."""
@@ -99,7 +106,7 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
                     "client_id": self.client_id,
                     "redirect_uri": self.runame,
                     "response_type": "code",
-                    "scope": DEFAULT_SCOPE,
+                    "scope": self.scope,
                     "state": state,
                 }
             )

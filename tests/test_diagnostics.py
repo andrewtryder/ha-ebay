@@ -7,9 +7,11 @@ from typing import Any
 from unittest.mock import Mock
 
 from custom_components.ebay.const import (
+    CONF_ANALYTICS_ENABLED,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
+    CONF_FULFILLMENT_ENABLED,
     CONF_PINNED_ITEM_IDS,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
@@ -30,6 +32,8 @@ def _coordinator(
     coordinator.options = {
         **DEFAULT_OPTIONS,
         CONF_PINNED_ITEM_IDS: "1,2",
+        CONF_ANALYTICS_ENABLED: True,
+        CONF_FULFILLMENT_ENABLED: True,
     }
     coordinator.last_error_category = error
     coordinator.last_attempt_at = None

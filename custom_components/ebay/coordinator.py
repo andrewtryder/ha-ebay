@@ -24,6 +24,7 @@ from .const import (
     CONF_FEEDBACK_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
+    CONF_OAUTH_SCOPES,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
@@ -232,6 +233,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feedback_enabled=feedback_enabled,
                 messages_enabled=messages_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
+                granted_scopes=self.entry.data.get(CONF_OAUTH_SCOPES),
             )
         except EbayAuthError as exc:
             self._record_refresh_attempt(
@@ -266,6 +268,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload["summary"]["partial_failures"] = payload["partial_failures"]
         payload["summary"]["truncated_collections"] = payload.get(
             "truncated_collections", {}
+        )
+        payload["summary"]["missing_scopes"] = payload.get("missing_scopes", {})
+        payload["summary"]["missing_scope_features"] = payload.get(
+            "missing_scope_features", []
         )
         warnings = payload.get("api_warnings") or []
         payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]

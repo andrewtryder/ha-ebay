@@ -12,6 +12,7 @@ import pytest
 
 from custom_components.ebay.api import (
     BEST_OFFERS_CALL_NAME,
+    DEFAULT_SCOPE,
     EBAY_XML_NS,
     MAX_PAGES,
     READ_ONLY_CALL_NAME,
@@ -381,6 +382,25 @@ def test_core_pagination_truncation_is_reported() -> None:
                     """
                 )
             if call_name == SELLING_CALL_NAME:
+                if "<Sort>EndTime</Sort>" not in xml_body:
+                    if (
+                        "<Include>true</Include>"
+                        in xml_body.split("<SoldList>", 1)[1].split("</SoldList>", 1)[0]
+                    ):
+                        list_name = "SoldList"
+                    else:
+                        list_name = "UnsoldList"
+                    return _root(
+                        f"""
+                        <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                          <Ack>Success</Ack>
+                          <{list_name}>
+                            <PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>
+                            <ItemArray/>
+                          </{list_name}>
+                        </GetMyeBaySellingResponse>
+                        """
+                    )
                 return _root(
                     f"""
                     <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
@@ -425,7 +445,7 @@ def test_core_pagination_truncation_is_reported() -> None:
     payload = asyncio.run(run())
 
     assert call_counts[READ_ONLY_CALL_NAME] == MAX_PAGES
-    assert call_counts[SELLING_CALL_NAME] == MAX_PAGES
+    assert call_counts[SELLING_CALL_NAME] == MAX_PAGES + 2
     assert call_counts[SELLER_LIST_CALL_NAME] == MAX_PAGES
     assert len(payload["watched"]) == MAX_PAGES
     assert len(payload["selling"]) == MAX_PAGES
@@ -443,6 +463,7 @@ def test_core_pagination_truncation_is_reported() -> None:
         "orders": False,
         "payment_disputes": False,
         "messages": False,
+        "sold_unsold": False,
     }
 
 
@@ -497,6 +518,7 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     payload = asyncio.run(run())
@@ -555,6 +577,7 @@ def test_analytics_auth_error_propagates_from_fetch_data() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     with pytest.raises(EbayAuthError, match="analytics auth failed"):
@@ -687,6 +710,7 @@ def test_analytics_views_do_not_overwrite_seller_list_views() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     payload = asyncio.run(run())

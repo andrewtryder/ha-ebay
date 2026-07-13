@@ -16,7 +16,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import _decode_jwt
 from voluptuous_serialize import convert
 
-from custom_components.ebay.api import DEFAULT_SCOPE, build_consent_url
+from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
     CONF_CLIENT_ID,
@@ -84,8 +84,8 @@ def _scopes_from_url(url: str) -> list[str]:
     return params["scope"][0].split()
 
 
-def test_default_scope_uses_auth_code_feedback_scope() -> None:
-    """Authorization Code scopes use commerce.feedback, not the readonly variant."""
+def test_default_scope_union_uses_auth_code_feedback_scope() -> None:
+    """Full optional scope union uses commerce.feedback, not the readonly variant."""
     scopes = DEFAULT_SCOPE.split()
 
     assert FEEDBACK_SCOPE in scopes
@@ -109,16 +109,28 @@ def test_authorize_url_uses_runame_and_ha_state() -> None:
     assert params["client_id"] == ["client-id"]
     assert params["redirect_uri"] == ["Example-Runame"]
     assert params["response_type"] == ["code"]
-    assert "https://api.ebay.com/oauth/api_scope" in params["scope"][0]
+    assert params["scope"] == [CORE_SCOPE]
     state = _decode_jwt(hass, params["state"][0])
     assert state["flow_id"] == "flow-123"
     assert state["redirect_uri"] == "https://my.home-assistant.io/redirect/oauth"
 
 
-def test_oauth2_authorize_url_contains_feedback_scope() -> None:
-    """EbayOAuth2Implementation consent URL requests commerce.feedback."""
+def test_oauth2_authorize_url_defaults_to_core_scope() -> None:
+    """EbayOAuth2Implementation defaults to the core Trading API scope."""
     hass = _Hass()
     implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    url = asyncio.run(implementation.async_generate_authorize_url("flow-123"))
+    scopes = _scopes_from_url(url)
+
+    assert scopes == [CORE_SCOPE]
+    assert FEEDBACK_SCOPE not in scopes
+
+
+def test_oauth2_authorize_url_uses_requested_scope() -> None:
+    """EbayOAuth2Implementation can request an expanded scope set."""
+    hass = _Hass()
+    implementation = EbayOAuth2Implementation(hass, _flow_data(), scope=DEFAULT_SCOPE)
 
     url = asyncio.run(implementation.async_generate_authorize_url("flow-123"))
     scopes = _scopes_from_url(url)
@@ -472,29 +484,42 @@ def test_manual_consent_url_is_generated_correctly(
     assert params["state"] == [flow._state]
 
 
-def test_manual_consent_url_contains_feedback_scope(
+def test_manual_consent_url_requests_core_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Manual OAuth consent URL requests commerce.feedback."""
+    """Manual OAuth consent URL requests only the core scope for new installs."""
     flow = _flow(monkeypatch)
     flow._oauth_mode = OAUTH_MODE_MANUAL
 
     result = asyncio.run(flow.async_step_credentials(_flow_data()))
     scopes = _scopes_from_url(result["description_placeholders"]["consent_url"])
 
-    assert FEEDBACK_SCOPE in scopes
-    assert FEEDBACK_READONLY_SCOPE not in scopes
-    assert set(scopes) == EXPECTED_AUTH_CODE_SCOPES
-    assert len(scopes) == len(set(scopes))
+    assert scopes == [CORE_SCOPE]
+    assert FEEDBACK_SCOPE not in scopes
 
 
-def test_build_consent_url_contains_feedback_scope() -> None:
-    """build_consent_url embeds the Authorization Code feedback scope."""
+def test_build_consent_url_defaults_to_core_scope() -> None:
+    """build_consent_url defaults to the core Trading API scope."""
     url = build_consent_url(
         "production",
         "client-id",
         "Example-Runame",
         "state-1",
+    )
+    scopes = _scopes_from_url(url)
+
+    assert scopes == [CORE_SCOPE]
+    assert FEEDBACK_SCOPE not in scopes
+
+
+def test_build_consent_url_accepts_expanded_scopes() -> None:
+    """build_consent_url embeds an explicit expanded Authorization Code scope set."""
+    url = build_consent_url(
+        "production",
+        "client-id",
+        "Example-Runame",
+        "state-1",
+        scope=DEFAULT_SCOPE,
     )
     scopes = _scopes_from_url(url)
 
@@ -678,11 +703,22 @@ async def _async_noop(*args: Any, **kwargs: Any) -> None:
 
 def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
     from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
     import voluptuous as vol
 
-    entry = type("Entry", (), {"options": {}})()
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {},
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+        },
+    )()
     flow = EbayOptionsFlow(entry)
-    flow.hass = _Hass()
+    hass = _Hass()
+    hass.async_create_task = lambda coro: coro.close()  # type: ignore[method-assign]
+    flow.hass = hass
     result = asyncio.run(flow.async_step_init())
     assert result["type"] == "form"
     schema = result["data_schema"]
@@ -696,6 +732,10 @@ def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
                 "analytics_enabled": True,
                 "buying_enabled": True,
                 "selling_enabled": True,
+                "fulfillment_enabled": False,
+                "seller_standards_enabled": False,
+                "feedback_enabled": False,
+                "messages_enabled": False,
             }
         )
     created = asyncio.run(
@@ -709,9 +749,108 @@ def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
                 "analytics_enabled": False,
                 "buying_enabled": True,
                 "selling_enabled": True,
+                "fulfillment_enabled": False,
+                "seller_standards_enabled": False,
+                "feedback_enabled": False,
+                "messages_enabled": False,
             }
         )
     )
     assert created["type"] == "create_entry"
     assert created["data"]["entity_mode"] == "detailed"
     assert created["data"]["analytics_enabled"] is False
+
+
+def test_options_flow_starts_reauth_when_scopes_missing() -> None:
+    """Enabling a module without granted scopes starts reauthorization."""
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {},
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+        },
+    )()
+    flow = EbayOptionsFlow(entry)
+    hass = _Hass()
+    started: list[Any] = []
+
+    def _create_task(coro: Any) -> None:
+        started.append(coro)
+        coro.close()
+
+    hass.async_create_task = _create_task  # type: ignore[method-assign]
+    hass.config_entries = type(
+        "ConfigEntries",
+        (),
+        {
+            "flow": type(
+                "Flow",
+                (),
+                {"async_init": staticmethod(lambda *args, **kwargs: asyncio.sleep(0))},
+            )()
+        },
+    )()
+    flow.hass = hass
+
+    result = asyncio.run(
+        flow.async_step_init(
+            {
+                "poll_interval": 30,
+                "ending_soon_threshold": 60,
+                "entity_mode": "balanced",
+                "per_item_cap": 25,
+                "analytics_enabled": False,
+                "buying_enabled": True,
+                "selling_enabled": True,
+                "fulfillment_enabled": False,
+                "seller_standards_enabled": False,
+                "feedback_enabled": True,
+                "messages_enabled": False,
+            }
+        )
+    )
+
+    assert result["type"] == "create_entry"
+    assert result["data"]["feedback_enabled"] is True
+    assert len(started) == 1
+
+
+def test_oauth_create_entry_stores_core_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New installs store the core scope grant."""
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    flow = _flow(monkeypatch)
+    flow._data = _flow_data()
+    flow._requested_scopes = CORE_SCOPE
+    created: dict[str, Any] = {}
+
+    def _create_entry(**kwargs: Any) -> dict[str, Any]:
+        created.update(kwargs)
+        return {"type": "create_entry", **kwargs}
+
+    monkeypatch.setattr(flow, "async_create_entry", _create_entry)
+
+    result = asyncio.run(
+        flow.async_oauth_create_entry(
+            {
+                "auth_implementation": "ebay:production:client-id",
+                "token": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                },
+            }
+        )
+    )
+
+    assert result["type"] == "create_entry"
+    assert created["data"][CONF_OAUTH_SCOPES] == CORE_SCOPE
+    assert created["options"]["feedback_enabled"] is False
+    assert created["options"]["fulfillment_enabled"] is False

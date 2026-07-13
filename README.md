@@ -52,8 +52,10 @@ See the illustrated **[eBay OAuth setup guide](docs/ebay-oauth-setup.md)** for t
 Production credentials must be used with Production, and Sandbox credentials with Sandbox.
 The integration currently supports one eBay account per developer-app credential set.
 
-Existing installations may need to reauthorize after an update that adds new optional eBay
-API scopes. Disabling a feature stops its API calls but does not revoke previously granted scopes.
+Existing installations keep previously granted OAuth scopes. New installs
+authorize with the core buying/selling scope only; enable optional seller-operation
+modules in options when needed (Home Assistant will reauthorize for extra scopes).
+Disabling a feature stops its API calls but does not revoke previously granted scopes.
 
 ## Home Assistant Entities
 

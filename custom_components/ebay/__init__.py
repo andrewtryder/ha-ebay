@@ -38,12 +38,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.helpers import config_entry_oauth2_flow
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-    from .api import DEFAULT_SCOPE, EbayApiClient
+    from .api import EbayApiClient, has_core_scope
     from .coordinator import EbayDataUpdateCoordinator
 
-    if entry.data.get(CONF_OAUTH_SCOPES) != DEFAULT_SCOPE:
+    if not has_core_scope(entry.data.get(CONF_OAUTH_SCOPES)):
         raise ConfigEntryAuthFailed(
-            "eBay OAuth scopes were expanded; reauthorize to continue"
+            "eBay OAuth is missing the core API scope; reauthorize to continue"
         )
 
     options = {**DEFAULT_OPTIONS, **entry.options}
