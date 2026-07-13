@@ -360,34 +360,40 @@
     "reauthorization_required": {
       "title": "eBay reauthorization required",
       "fix_flow": {
-        "confirm": {
-          "title": "Reauthorize eBay",
-          "description": "Your eBay authorization is no longer valid. Confirm to start reauthorization with the account Home Assistant monitors."
+        "step": {
+          "confirm": {
+            "title": "Reauthorize eBay",
+            "description": "Your eBay authorization is no longer valid. Confirm to start reauthorization with the account Home Assistant monitors."
+          }
         }
       }
     },
     "missing_scope": {
       "title": "eBay feature is missing OAuth scope",
       "fix_flow": {
-        "confirm": {
-          "title": "Reauthorize for {feature}",
-          "description": "The {feature} module is enabled but this account is missing required OAuth scope(s): {scopes}. Confirm to reauthorize and grant the missing scopes."
+        "step": {
+          "confirm": {
+            "title": "Reauthorize for {feature}",
+            "description": "The {feature} module is enabled but this account is missing required OAuth scope(s): {scopes}. Confirm to reauthorize and grant the missing scopes."
+          }
         }
       }
     },
     "invalid_site_id": {
       "title": "Invalid eBay Site ID",
       "fix_flow": {
-        "site_id": {
-          "title": "Choose a valid Site ID",
-          "description": "Site ID `{site_id}` does not map to a known eBay marketplace. Analytics and seller-standards marketplace metrics cannot run correctly until you pick a supported Site ID.",
-          "data": {
-            "site_id": "eBay Site ID"
+        "step": {
+          "site_id": {
+            "title": "Choose a valid Site ID",
+            "description": "Site ID `{site_id}` does not map to a known eBay marketplace. Analytics and seller-standards marketplace metrics cannot run correctly until you pick a supported Site ID.",
+            "data": {
+              "site_id": "eBay Site ID"
+            }
           }
+        },
+        "error": {
+          "invalid_site_id": "Choose a Site ID from the supported list."
         }
-      },
-      "error": {
-        "invalid_site_id": "Choose a Site ID from the supported list."
       }
     },
     "truncated_collection": {
