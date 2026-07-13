@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0](https://github.com/andrewtryder/ha-ebay/compare/v0.5.3...v0.6.0) (2026-07-13)
+
+
+### Features
+
+* add importable notification automation blueprints ([7c44113](https://github.com/andrewtryder/ha-ebay/commit/7c441130c5dd9516179d6ff01d2ae3b17eb1540e))
+* add problem binary sensors for seller-ops health ([5cb6861](https://github.com/andrewtryder/ha-ebay/commit/5cb6861e09c4b8b2e5db38f16f72d2cb6fd25bd7))
+* add repairs issues and per-section refresh schedules ([3e0c265](https://github.com/andrewtryder/ha-ebay/commit/3e0c265527e55d8e92d476da30dbaebe52d551d4))
+* blueprints, repairs, refresh schedules, and options sections ([d2cd4bc](https://github.com/andrewtryder/ha-ebay/commit/d2cd4bc49fbfa63e18582479185b94cf37c5c1bd))
+* emit confirmed sold and unsold selling events ([7fe351c](https://github.com/andrewtryder/ha-ebay/commit/7fe351c8c659d67f0561657bc841c04f5297dd8c))
+* make OAuth scopes modular and decouple seller-ops fetches ([f9d2580](https://github.com/andrewtryder/ha-ebay/commit/f9d2580267dc01eb7725e3eb3d6fb9d53b8fb89b))
+* modular OAuth scopes, seller-ops semantics, and confirmed sold/unsold events ([863d611](https://github.com/andrewtryder/ha-ebay/commit/863d6111a01fbe75800a521b66b4a2d0538da25c))
+* organize options flow into menu sections ([af4f633](https://github.com/andrewtryder/ha-ebay/commit/af4f633f1dc3494a04467754eec13d93bf1a3ed2))
+* reduce entity clutter and improve seller-ops sensor semantics ([a0ac176](https://github.com/andrewtryder/ha-ebay/commit/a0ac176ce8a931159b8c662aefe30c6f2e51d31d))
+
+
+### Bug Fixes
+
+* nest repair issue fix-flow strings under step ([ec93aac](https://github.com/andrewtryder/ha-ebay/commit/ec93aac9e31e17f473730be29bee589aa23ed012))
+
 ## [0.5.3](https://github.com/andrewtryder/ha-ebay/compare/v0.5.2...v0.5.3) (2026-07-12)
 
 
