@@ -95,6 +95,10 @@ Options include:
 - Optional per-item price targets
 - Buying, selling, analytics, and seller-operations feature toggles
 
+Buying, selling, and active orders refresh on the configured poll interval. Messages refresh at
+twice that interval; feedback and analytics refresh hourly; seller standards (including evaluation
+dates) refresh daily. A manual refresh fetches every enabled section immediately.
+
 The integration suppresses transition events during the initial startup/reload baseline and when
 API collections are incomplete or truncated.
 
@@ -113,9 +117,12 @@ See **[PRIVACY.md](PRIVACY.md)** for the project privacy statement.
 
 - **Setup or callback problem:** follow the OAuth guide or use the manual authorization fallback.
 - **Production/Sandbox failure:** confirm the selected environment matches the credential keyset.
-- **Authentication failure:** reauthorize the integration.
+- **Authentication failure:** reauthorize the integration (also shown under Settings → Repairs).
 - **New entities or behavior missing after an update:** restart Home Assistant completely.
-- **Partial data:** enable the diagnostic entities and download integration diagnostics.
+- **Persistent problems:** check Settings → Repairs for actionable issues such as missing OAuth
+  scopes, an invalid Site ID, repeated partial failures, or consistently truncated collections.
+- **Partial data:** enable the diagnostic entities and download integration diagnostics for
+  technical detail beyond Repairs.
 
 Report reproducible problems through **[GitHub Issues](https://github.com/andrewtryder/ha-ebay/issues)**.
 Do not include client secrets, OAuth codes, access tokens, or refresh tokens.

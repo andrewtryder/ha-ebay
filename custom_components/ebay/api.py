@@ -24,6 +24,13 @@ from .const import (
     EBAY_XML_NS,
     ENV_SANDBOX,
     NS,
+    SECTION_ANALYTICS,
+    SECTION_BUYING,
+    SECTION_FEEDBACK,
+    SECTION_FULFILLMENT,
+    SECTION_MESSAGES,
+    SECTION_SELLER_STANDARDS,
+    SECTION_SELLING,
 )
 from .oauth_errors import (
     OAuth2TokenRequestError,
@@ -44,6 +51,7 @@ from .seller_ops import (
     empty_seller_ops,
     encode_creation_date_filter,
     encode_fulfillment_status_filter,
+    is_known_site_id,
     marketplace_id_for_site,
     normalize_conversation,
     normalize_dispute,
@@ -1567,6 +1575,12 @@ class EbayApiClient:
         standards.update(parsed)
 
         marketplace = marketplace_id_for_site(self.site_id)
+        if marketplace is None:
+            _LOGGER.debug(
+                "Skipping seller standards marketplace metrics for unknown site_id=%s",
+                self.site_id,
+            )
+            return standards
         for metric_type, rating_key, flag_key in (
             (
                 "ITEM_NOT_RECEIVED",
@@ -1697,11 +1711,59 @@ class EbayApiClient:
         messages_enabled: bool = False,
         ending_soon_threshold_seconds: int,
         granted_scopes: str | None = None,
+        sections: set[str] | None = None,
+        previous: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Fetch and normalize all configured read-only telemetry."""
+        """Fetch and normalize configured read-only telemetry.
+
+        When ``sections`` is None, all enabled sections are fetched (full refresh).
+        Otherwise only the requested sections are refreshed and merged into
+        ``previous`` (or an empty shell).
+        """
+        enabled_sections = enabled_sections_for_options(
+            buying_enabled=buying_enabled,
+            selling_enabled=selling_enabled,
+            analytics_enabled=analytics_enabled,
+            fulfillment_enabled=fulfillment_enabled,
+            seller_standards_enabled=seller_standards_enabled,
+            feedback_enabled=feedback_enabled,
+            messages_enabled=messages_enabled,
+        )
+        due = enabled_sections if sections is None else (sections & enabled_sections)
+        return await self.async_fetch_sections(
+            due,
+            previous=previous,
+            buying_enabled=buying_enabled,
+            selling_enabled=selling_enabled,
+            analytics_enabled=analytics_enabled,
+            fulfillment_enabled=fulfillment_enabled,
+            seller_standards_enabled=seller_standards_enabled,
+            feedback_enabled=feedback_enabled,
+            messages_enabled=messages_enabled,
+            ending_soon_threshold_seconds=ending_soon_threshold_seconds,
+            granted_scopes=granted_scopes,
+        )
+
+    async def async_fetch_sections(
+        self,
+        sections: set[str],
+        *,
+        previous: dict[str, Any] | None = None,
+        buying_enabled: bool,
+        selling_enabled: bool,
+        analytics_enabled: bool,
+        fulfillment_enabled: bool = False,
+        seller_standards_enabled: bool = False,
+        feedback_enabled: bool = False,
+        messages_enabled: bool = False,
+        ending_soon_threshold_seconds: int,
+        granted_scopes: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch due sections and merge into a central coordinator payload."""
         refresh_start = time.monotonic()
         _LOGGER.debug(
-            "eBay API refresh started buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
+            "eBay API section refresh started sections=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
+            sorted(sections),
             buying_enabled,
             selling_enabled,
             analytics_enabled,
@@ -1710,24 +1772,34 @@ class EbayApiClient:
             feedback_enabled,
             messages_enabled,
         )
-        self._api_warnings = []
-        partial_failures: list[str] = []
-        watched: dict[str, dict[str, Any]] = {}
-        bidding: dict[str, dict[str, Any]] = {}
-        selling: dict[str, dict[str, Any]] = {}
-        watched_truncated = False
-        bidding_truncated = False
-        selling_truncated = False
-        seller_list_views_truncated = False
-        active_offers_truncated = False
-        orders_truncated = False
-        disputes_truncated = False
-        messages_truncated = False
-        sold_unsold_truncated = False
-        selling_classification: dict[str, str] = {}
-        sold_items_count: int | None = None
-        unsold_items_count: int | None = None
-        seller_ops = empty_seller_ops()
+        base = _payload_shell(previous)
+        watched: dict[str, dict[str, Any]] = dict(base["watched"])
+        bidding: dict[str, dict[str, Any]] = dict(base["bidding"])
+        selling: dict[str, dict[str, Any]] = {
+            item_id: dict(item) for item_id, item in base["selling"].items()
+        }
+        selling_classification: dict[str, str] = dict(base["selling_classification"])
+        seller_ops = _copy_seller_ops(base["seller_ops"])
+        section_last_fetched: dict[str, datetime] = dict(
+            base.get("section_last_fetched") or {}
+        )
+        partial_failures = [
+            category
+            for category in base.get("partial_failures") or []
+            if not any(
+                category in PARTIAL_FAILURE_CATEGORIES_BY_SECTION.get(section, ())
+                for section in sections
+            )
+            and not (
+                category == "trading_warning"
+                and (SECTION_BUYING in sections or SECTION_SELLING in sections)
+            )
+        ]
+        truncated_collections = dict(base.get("truncated_collections") or {})
+        for section in sections:
+            for key in TRUNCATED_KEYS_BY_SECTION.get(section, ()):
+                truncated_collections[key] = False
+
         feature_options = {
             CONF_ANALYTICS_ENABLED: analytics_enabled,
             CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
@@ -1738,18 +1810,29 @@ class EbayApiClient:
         missing_by_feature = missing_scopes_for_options(granted_scopes, feature_options)
         missing_scope_features = sorted(missing_by_feature)
 
-        if buying_enabled:
+        trading_sections = SECTION_BUYING in sections or SECTION_SELLING in sections
+        if trading_sections:
+            self._api_warnings = []
+
+        sold_items_count = base["summary"].get("sold_items_count")
+        unsold_items_count = base["summary"].get("unsold_items_count")
+
+        if SECTION_BUYING in sections and buying_enabled:
             (
                 watched,
                 bidding,
                 watched_truncated,
                 bidding_truncated,
             ) = await self._fetch_buying_pages()
+            truncated_collections["watched"] = watched_truncated
+            truncated_collections["bidding"] = bidding_truncated
             if watched_truncated or bidding_truncated:
                 partial_failures.append("buying_truncated")
+            section_last_fetched[SECTION_BUYING] = datetime.now(timezone.utc)
 
-        if selling_enabled:
+        if SECTION_SELLING in sections and selling_enabled:
             selling, selling_truncated = await self._fetch_selling_pages()
+            truncated_collections["selling"] = selling_truncated
             if selling_truncated:
                 partial_failures.append("selling_truncated")
             try:
@@ -1759,6 +1842,7 @@ class EbayApiClient:
                     unsold_items_count,
                     sold_unsold_truncated,
                 ) = await self.async_fetch_sold_unsold_classification()
+                truncated_collections["sold_unsold"] = sold_unsold_truncated
                 if sold_unsold_truncated:
                     partial_failures.append("sold_unsold_truncated")
             except EbayAuthError:
@@ -1772,7 +1856,7 @@ class EbayApiClient:
                 selling_classification = {}
                 sold_items_count = None
                 unsold_items_count = None
-                sold_unsold_truncated = True
+                truncated_collections["sold_unsold"] = True
             try:
                 (
                     seller_list_views,
@@ -1781,6 +1865,7 @@ class EbayApiClient:
                 for item_id, views in seller_list_views.items():
                     if item_id in selling:
                         selling[item_id]["views"] = views
+                truncated_collections["seller_list_views"] = seller_list_views_truncated
                 if seller_list_views_truncated:
                     partial_failures.append("seller_list_views_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
@@ -1814,8 +1899,9 @@ class EbayApiClient:
                     page += 1
                 for item_id, count in active_offer_counts.items():
                     selling[item_id]["offers"] = count
-                if total_pages > BEST_OFFERS_MAX_PAGES:
-                    active_offers_truncated = True
+                active_offers_truncated = total_pages > BEST_OFFERS_MAX_PAGES
+                truncated_collections["active_offers"] = active_offers_truncated
+                if active_offers_truncated:
                     partial_failures.append("active_offers_truncated")
             except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                 _LOGGER.debug(
@@ -1823,31 +1909,39 @@ class EbayApiClient:
                     _safe_exception_context(exc),
                 )
                 partial_failures.append("active_offers")
+            section_last_fetched[SECTION_SELLING] = datetime.now(timezone.utc)
 
-            if analytics_enabled:
-                if CONF_ANALYTICS_ENABLED in missing_by_feature:
-                    partial_failures.append("analytics_views_missing_scope")
-                else:
-                    try:
-                        (
-                            views_by_id,
-                            analytics_partial,
-                        ) = await self.async_fetch_analytics_views(list(selling))
-                        for item_id, views in views_by_id.items():
-                            if item_id in selling:
-                                selling[item_id]["analytics_views_30d"] = views
-                        if analytics_partial:
-                            partial_failures.append("analytics_views")
-                    except EbayAuthError:
-                        raise
-                    except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                        _LOGGER.debug(
-                            "Optional analytics views failed error=%s",
-                            _safe_exception_context(exc),
-                        )
+        if SECTION_ANALYTICS in sections and analytics_enabled and selling_enabled:
+            if CONF_ANALYTICS_ENABLED in missing_by_feature:
+                partial_failures.append("analytics_views_missing_scope")
+            elif not is_known_site_id(self.site_id):
+                _LOGGER.debug(
+                    "Skipping analytics views for unknown site_id=%s",
+                    self.site_id,
+                )
+                partial_failures.append("analytics_views")
+            else:
+                try:
+                    (
+                        views_by_id,
+                        analytics_partial,
+                    ) = await self.async_fetch_analytics_views(list(selling))
+                    for item_id, views in views_by_id.items():
+                        if item_id in selling:
+                            selling[item_id]["analytics_views_30d"] = views
+                    if analytics_partial:
                         partial_failures.append("analytics_views")
+                except EbayAuthError:
+                    raise
+                except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                    _LOGGER.debug(
+                        "Optional analytics views failed error=%s",
+                        _safe_exception_context(exc),
+                    )
+                    partial_failures.append("analytics_views")
+            section_last_fetched[SECTION_ANALYTICS] = datetime.now(timezone.utc)
 
-        if fulfillment_enabled:
+        if SECTION_FULFILLMENT in sections and fulfillment_enabled:
             if CONF_FULFILLMENT_ENABLED in missing_by_feature:
                 partial_failures.append("orders_missing_scope")
                 partial_failures.append("payment_disputes_missing_scope")
@@ -1855,6 +1949,7 @@ class EbayApiClient:
                 try:
                     orders_summary, orders_truncated = await self.async_fetch_orders()
                     seller_ops["orders"] = orders_summary
+                    truncated_collections["orders"] = orders_truncated
                     if orders_truncated:
                         partial_failures.append("orders_truncated")
                 except EbayAuthError:
@@ -1871,6 +1966,7 @@ class EbayApiClient:
                         disputes_truncated,
                     ) = await self.async_fetch_payment_disputes()
                     seller_ops["disputes"] = disputes_summary
+                    truncated_collections["payment_disputes"] = disputes_truncated
                     if disputes_truncated:
                         partial_failures.append("payment_disputes_truncated")
                 except EbayAuthError:
@@ -1881,8 +1977,9 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("payment_disputes")
+            section_last_fetched[SECTION_FULFILLMENT] = datetime.now(timezone.utc)
 
-        if seller_standards_enabled:
+        if SECTION_SELLER_STANDARDS in sections and seller_standards_enabled:
             if CONF_SELLER_STANDARDS_ENABLED in missing_by_feature:
                 partial_failures.append("seller_standards_missing_scope")
             else:
@@ -1896,8 +1993,9 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("seller_standards")
+            section_last_fetched[SECTION_SELLER_STANDARDS] = datetime.now(timezone.utc)
 
-        if feedback_enabled:
+        if SECTION_FEEDBACK in sections and feedback_enabled:
             if CONF_FEEDBACK_ENABLED in missing_by_feature:
                 partial_failures.append("feedback_missing_scope")
             else:
@@ -1911,8 +2009,9 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("feedback")
+            section_last_fetched[SECTION_FEEDBACK] = datetime.now(timezone.utc)
 
-        if messages_enabled:
+        if SECTION_MESSAGES in sections and messages_enabled:
             if CONF_MESSAGES_ENABLED in missing_by_feature:
                 partial_failures.append("messages_missing_scope")
             else:
@@ -1922,6 +2021,7 @@ class EbayApiClient:
                         messages_truncated,
                     ) = await self.async_fetch_messages()
                     seller_ops["messages"] = messages_summary
+                    truncated_collections["messages"] = messages_truncated
                     if messages_truncated:
                         partial_failures.append("messages_truncated")
                 except EbayAuthError:
@@ -1932,22 +2032,29 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("messages")
+            section_last_fetched[SECTION_MESSAGES] = datetime.now(timezone.utc)
 
-        api_warnings = dedupe_trading_warnings(self._api_warnings)
+        if trading_sections:
+            api_warnings = dedupe_trading_warnings(self._api_warnings)
+        else:
+            api_warnings = list(base.get("api_warnings") or [])
         if api_warnings and "trading_warning" not in partial_failures:
             partial_failures.append("trading_warning")
 
-        truncated_collections = {
-            "watched": watched_truncated,
-            "bidding": bidding_truncated,
-            "selling": selling_truncated,
-            "seller_list_views": seller_list_views_truncated,
-            "active_offers": active_offers_truncated,
-            "orders": orders_truncated,
-            "payment_disputes": disputes_truncated,
-            "messages": messages_truncated,
-            "sold_unsold": sold_unsold_truncated,
-        }
+        # Keep missing-scope markers accurate even when a section was skipped.
+        for feature_key, category in (
+            (CONF_ANALYTICS_ENABLED, "analytics_views_missing_scope"),
+            (CONF_FULFILLMENT_ENABLED, "orders_missing_scope"),
+            (CONF_FULFILLMENT_ENABLED, "payment_disputes_missing_scope"),
+            (CONF_SELLER_STANDARDS_ENABLED, "seller_standards_missing_scope"),
+            (CONF_FEEDBACK_ENABLED, "feedback_missing_scope"),
+            (CONF_MESSAGES_ENABLED, "messages_missing_scope"),
+        ):
+            if feature_key in missing_by_feature:
+                if category not in partial_failures:
+                    partial_failures.append(category)
+            elif category in partial_failures:
+                partial_failures = [c for c in partial_failures if c != category]
 
         now = datetime.now(timezone.utc)
         summary = summarize_payload(
@@ -1958,6 +2065,10 @@ class EbayApiClient:
         summary["unsold_items_count"] = unsold_items_count
         summary["missing_scopes"] = missing_by_feature
         summary["missing_scope_features"] = missing_scope_features
+        summary["section_last_fetched"] = {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in section_last_fetched.items()
+        }
         sold_item_ids = sorted(
             item_id
             for item_id, status in selling_classification.items()
@@ -1969,7 +2080,8 @@ class EbayApiClient:
             if status == "unsold"
         )
         _LOGGER.debug(
-            "eBay API refresh completed watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
+            "eBay API section refresh completed sections=%s watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
+            sorted(sections),
             len(watched),
             len(bidding),
             len(selling),
@@ -1993,7 +2105,155 @@ class EbayApiClient:
             "api_warnings": api_warnings,
             "missing_scopes": missing_by_feature,
             "missing_scope_features": missing_scope_features,
+            "section_last_fetched": section_last_fetched,
+            "refreshed_sections": sorted(sections),
         }
+
+
+PARTIAL_FAILURE_CATEGORIES_BY_SECTION: dict[str, frozenset[str]] = {
+    SECTION_BUYING: frozenset({"buying_truncated"}),
+    SECTION_SELLING: frozenset(
+        {
+            "selling_truncated",
+            "sold_unsold_truncated",
+            "sold_unsold_classification",
+            "seller_list_views_truncated",
+            "seller_list_views",
+            "active_offers_truncated",
+            "active_offers",
+        }
+    ),
+    SECTION_ANALYTICS: frozenset({"analytics_views_missing_scope", "analytics_views"}),
+    SECTION_FULFILLMENT: frozenset(
+        {
+            "orders_missing_scope",
+            "payment_disputes_missing_scope",
+            "orders_truncated",
+            "orders",
+            "payment_disputes_truncated",
+            "payment_disputes",
+        }
+    ),
+    SECTION_SELLER_STANDARDS: frozenset(
+        {"seller_standards_missing_scope", "seller_standards"}
+    ),
+    SECTION_FEEDBACK: frozenset({"feedback_missing_scope", "feedback"}),
+    SECTION_MESSAGES: frozenset(
+        {"messages_missing_scope", "messages_truncated", "messages"}
+    ),
+}
+
+TRUNCATED_KEYS_BY_SECTION: dict[str, tuple[str, ...]] = {
+    SECTION_BUYING: ("watched", "bidding"),
+    SECTION_SELLING: ("selling", "seller_list_views", "active_offers", "sold_unsold"),
+    SECTION_FULFILLMENT: ("orders", "payment_disputes"),
+    SECTION_MESSAGES: ("messages",),
+}
+
+_EMPTY_TRUNCATED_COLLECTIONS = {
+    "watched": False,
+    "bidding": False,
+    "selling": False,
+    "seller_list_views": False,
+    "active_offers": False,
+    "orders": False,
+    "payment_disputes": False,
+    "messages": False,
+    "sold_unsold": False,
+}
+
+
+def enabled_sections_for_options(
+    *,
+    buying_enabled: bool,
+    selling_enabled: bool,
+    analytics_enabled: bool,
+    fulfillment_enabled: bool,
+    seller_standards_enabled: bool,
+    feedback_enabled: bool,
+    messages_enabled: bool,
+) -> set[str]:
+    """Return payload sections that should be fetched for the given options."""
+    sections: set[str] = set()
+    if buying_enabled:
+        sections.add(SECTION_BUYING)
+    if selling_enabled:
+        sections.add(SECTION_SELLING)
+    if analytics_enabled and selling_enabled:
+        sections.add(SECTION_ANALYTICS)
+    if fulfillment_enabled:
+        sections.add(SECTION_FULFILLMENT)
+    if seller_standards_enabled:
+        sections.add(SECTION_SELLER_STANDARDS)
+    if feedback_enabled:
+        sections.add(SECTION_FEEDBACK)
+    if messages_enabled:
+        sections.add(SECTION_MESSAGES)
+    return sections
+
+
+def _copy_seller_ops(seller_ops: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-copy seller-ops sections so merges do not mutate the previous payload."""
+    empty = empty_seller_ops()
+    copied: dict[str, Any] = {}
+    for key, default in empty.items():
+        value = seller_ops.get(key)
+        if not isinstance(value, dict):
+            copied[key] = dict(default)
+            continue
+        section = dict(value)
+        if "by_id" in default:
+            section["by_id"] = dict(value.get("by_id") or {})
+        copied[key] = section
+    return copied
+
+
+def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a mutable payload shell seeded from a previous coordinator payload."""
+    if not previous:
+        return {
+            "watched": {},
+            "bidding": {},
+            "selling": {},
+            "seller_ops": empty_seller_ops(),
+            "selling_classification": {},
+            "sold_item_ids": [],
+            "unsold_item_ids": [],
+            "summary": {},
+            "partial_failures": [],
+            "truncated_collections": dict(_EMPTY_TRUNCATED_COLLECTIONS),
+            "api_warnings": [],
+            "missing_scopes": {},
+            "missing_scope_features": [],
+            "section_last_fetched": {},
+        }
+    section_last_fetched: dict[str, datetime] = {}
+    for key, value in (previous.get("section_last_fetched") or {}).items():
+        if isinstance(value, datetime):
+            section_last_fetched[key] = value
+        elif isinstance(value, str):
+            try:
+                section_last_fetched[key] = datetime.fromisoformat(value)
+            except ValueError:
+                continue
+    truncated = dict(_EMPTY_TRUNCATED_COLLECTIONS)
+    truncated.update(previous.get("truncated_collections") or {})
+    return {
+        "watched": previous.get("watched") or {},
+        "bidding": previous.get("bidding") or {},
+        "selling": previous.get("selling") or {},
+        "seller_ops": previous.get("seller_ops") or empty_seller_ops(),
+        "selling_classification": previous.get("selling_classification") or {},
+        "sold_item_ids": previous.get("sold_item_ids") or [],
+        "unsold_item_ids": previous.get("unsold_item_ids") or [],
+        "summary": previous.get("summary") or {},
+        "partial_failures": list(previous.get("partial_failures") or []),
+        "truncated_collections": truncated,
+        "api_warnings": list(previous.get("api_warnings") or []),
+        "missing_scopes": previous.get("missing_scopes") or {},
+        "missing_scope_features": list(previous.get("missing_scope_features") or []),
+        "section_last_fetched": section_last_fetched,
+    }
 
 
 def _seller_ops_summary_keys(seller_ops: dict[str, Any]) -> dict[str, Any]:

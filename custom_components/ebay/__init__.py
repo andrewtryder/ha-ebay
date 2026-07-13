@@ -80,8 +80,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an eBay config entry."""
     from homeassistant.const import Platform
 
+    from .repairs import async_delete_entry_issues
+
     coordinator = entry.runtime_data
     coordinator.cancel_scheduled_events()
+    async_delete_entry_issues(hass, entry)
     return await hass.config_entries.async_unload_platforms(
         entry, [Platform(platform) for platform in PLATFORMS]
     )

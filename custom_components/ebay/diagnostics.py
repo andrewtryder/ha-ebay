@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,7 @@ async def async_get_config_entry_diagnostics(
             "messages": options.get(CONF_MESSAGES_ENABLED),
         },
         "poll_interval": options.get(CONF_POLL_INTERVAL),
+        "section_last_fetched_ages_minutes": _section_ages_minutes(data),
         "ending_soon_threshold": options.get(CONF_ENDING_SOON_THRESHOLD),
         "entity_mode": options.get(CONF_ENTITY_MODE),
         "per_item_cap": options.get(CONF_PER_ITEM_CAP),
@@ -132,6 +134,26 @@ async def async_get_config_entry_diagnostics(
         "scheduled_ending_soon_timer_count": coordinator.scheduled_ending_soon_count,
         "redacted": sorted(TO_REDACT),
     }
+
+
+def _section_ages_minutes(data: dict[str, Any]) -> dict[str, float | None]:
+    """Return minutes since each section was last fetched."""
+    now = datetime.now(timezone.utc)
+    ages: dict[str, float | None] = {}
+    for section, value in (data.get("section_last_fetched") or {}).items():
+        if isinstance(value, datetime):
+            fetched = value
+        elif isinstance(value, str):
+            try:
+                fetched = datetime.fromisoformat(value)
+            except ValueError:
+                ages[section] = None
+                continue
+        else:
+            ages[section] = None
+            continue
+        ages[section] = round(max(0.0, (now - fetched).total_seconds() / 60.0), 1)
+    return ages
 
 
 def _safe_seller_ops_summary(seller_ops: dict[str, Any]) -> dict[str, Any]:

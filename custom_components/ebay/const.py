@@ -151,3 +151,43 @@ REFRESH_RESULT_SUCCESS = "success"
 REFRESH_RESULT_PARTIAL = "partial"
 REFRESH_RESULT_ERROR = "error"
 REFRESH_RESULT_AUTH_ERROR = "auth_error"
+
+# Coordinator payload sections with independent refresh cadences.
+SECTION_BUYING = "buying"
+SECTION_SELLING = "selling"
+SECTION_FULFILLMENT = "fulfillment"
+SECTION_MESSAGES = "messages"
+SECTION_FEEDBACK = "feedback"
+SECTION_ANALYTICS = "analytics"
+SECTION_SELLER_STANDARDS = "seller_standards"
+
+ALL_SECTIONS = (
+    SECTION_BUYING,
+    SECTION_SELLING,
+    SECTION_FULFILLMENT,
+    SECTION_MESSAGES,
+    SECTION_FEEDBACK,
+    SECTION_ANALYTICS,
+    SECTION_SELLER_STANDARDS,
+)
+
+SECTION_FEEDBACK_INTERVAL_MINUTES = 60
+SECTION_ANALYTICS_INTERVAL_MINUTES = 60
+SECTION_SELLER_STANDARDS_INTERVAL_MINUTES = 1440
+
+# Soft-fail / truncation conditions must be seen this many consecutive refreshes
+# before a Repairs issue is created.
+REPAIR_STREAK_THRESHOLD = 3
+
+
+def section_interval_minutes(section: str, poll_interval: int) -> int:
+    """Return the refresh interval in minutes for a payload section."""
+    if section == SECTION_MESSAGES:
+        return max(poll_interval, 1) * 2
+    if section == SECTION_FEEDBACK:
+        return SECTION_FEEDBACK_INTERVAL_MINUTES
+    if section == SECTION_ANALYTICS:
+        return SECTION_ANALYTICS_INTERVAL_MINUTES
+    if section == SECTION_SELLER_STANDARDS:
+        return SECTION_SELLER_STANDARDS_INTERVAL_MINUTES
+    return max(poll_interval, 1)
