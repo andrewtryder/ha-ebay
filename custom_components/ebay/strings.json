@@ -248,6 +248,27 @@
     "binary_sensor": {
       "seller_standard_at_risk": {
         "name": "Seller standard at risk"
+      },
+      "orders_overdue": {
+        "name": "Orders overdue for shipment"
+      },
+      "orders_due_today": {
+        "name": "Orders due today"
+      },
+      "open_payment_dispute": {
+        "name": "Open payment dispute"
+      },
+      "unread_buyer_messages": {
+        "name": "Unread buyer messages"
+      },
+      "negative_feedback_received_recently": {
+        "name": "Negative feedback received recently"
+      },
+      "account_data_partially_unavailable": {
+        "name": "Account data partially unavailable"
+      },
+      "api_data_truncated": {
+        "name": "API data truncated"
       }
     },
     "calendar": {
