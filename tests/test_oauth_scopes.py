@@ -10,6 +10,7 @@ from custom_components.ebay.api import (
     CORE_SCOPE,
     DEFAULT_SCOPE,
     EbayApiClient,
+    SCOPE_ANALYTICS_READONLY,
     SCOPE_FEEDBACK,
     SCOPE_FULFILLMENT_READONLY,
     SCOPE_PAYMENT_DISPUTE,
@@ -180,3 +181,50 @@ def test_seller_ops_missing_scope_skips_fetch() -> None:
     assert "feedback_missing_scope" in payload["partial_failures"]
     assert CONF_FEEDBACK_ENABLED in payload["missing_scopes"]
     assert CONF_FULFILLMENT_ENABLED in payload["missing_scope_features"]
+
+
+def test_analytics_unknown_site_becomes_partial_failure() -> None:
+    """Analytics is skipped for unknown site IDs without calling traffic report."""
+    from custom_components.ebay.api import SECTION_ANALYTICS
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="999",
+            )
+            self.async_fetch_analytics_views = AsyncMock()
+
+    client = Client()
+    previous = {
+        "selling": {"s1": {"item_id": "s1", "title": "Item"}},
+        "watched": {},
+        "bidding": {},
+        "summary": {"sold_items_count": None, "unsold_items_count": None},
+        "seller_ops": {},
+        "partial_failures": [],
+        "truncated_collections": {},
+        "section_last_fetched": {},
+        "selling_classification": {},
+        "api_warnings": [],
+    }
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=join_scopes((CORE_SCOPE, SCOPE_ANALYTICS_READONLY)),
+            previous=previous,
+            sections={SECTION_ANALYTICS},
+        )
+
+    payload = asyncio.run(run())
+    assert client.async_fetch_analytics_views.await_count == 0
+    assert "analytics_views" in payload["partial_failures"]
