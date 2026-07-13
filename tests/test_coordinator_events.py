@@ -1243,3 +1243,162 @@ def test_seller_ops_order_and_message_events() -> None:
     assert "negative_feedback_received" in events
     assert "feedback_rating_changed" in events
     assert "new_buyer_question" in events
+
+
+def test_seller_ops_suppress_incomplete_blocks_new_events() -> None:
+    """Truncated seller-ops collections must not emit new-entity events."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {},
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "paid": True,
+                    "shipped": False,
+                    "has_tracking": False,
+                    "due_soon": True,
+                    "overdue": False,
+                }
+            }
+        },
+        "disputes": {"by_id": {"d1": {"dispute_id": "d1", "order_id": "o1"}}},
+        "standards": {},
+        "feedback": {},
+        "messages": {
+            "by_id": {
+                "c1": {
+                    "conversation_id": "c1",
+                    "is_buyer_question": False,
+                    "subject": "Hello",
+                }
+            }
+        },
+    }
+    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=True)
+    assert events == []
+
+
+def test_seller_ops_existing_order_and_message_variants() -> None:
+    """Existing-order transitions and non-question messages emit distinct events."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "paid": False,
+                    "shipped": False,
+                    "has_tracking": False,
+                    "due_soon": False,
+                    "overdue": False,
+                }
+            }
+        },
+        "disputes": {"by_id": {}},
+        "standards": {"item_not_received_above_benchmark": False},
+        "feedback": {},
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "paid": True,
+                    "shipped": True,
+                    "has_tracking": True,
+                    "due_soon": False,
+                    "overdue": True,
+                }
+            }
+        },
+        "disputes": {"by_id": {}},
+        "standards": {"item_not_received_above_benchmark": True},
+        "feedback": {},
+        "messages": {
+            "by_id": {
+                "c1": {
+                    "conversation_id": "c1",
+                    "listing_id": "111",
+                    "subject": "Thanks",
+                    "is_buyer_question": False,
+                }
+            }
+        },
+    }
+    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=False)
+    assert "order_paid" in events
+    assert "order_marked_shipped" in events
+    assert "tracking_added" in events
+    assert "shipment_overdue" in events
+    assert "service_metric_above_peer_benchmark" in events
+    assert "new_message_received" in events
+    assert "new_buyer_question" not in events
+
+
+def test_watched_truncation_suppresses_price_dropped_below() -> None:
+    """Incomplete watched snapshots must not emit drop-below threshold events."""
+    coordinator = _coordinator()
+    coordinator.options["watched_price_drop_threshold"] = "100"
+    coordinator.options["watched_price_drop_currency"] = "USD"
+    events: list[str] = []
+    coordinator._event_callbacks["watching"] = lambda et, _ed: events.append(et)
+
+    coordinator._detect_watching_events(
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 120,
+                "currency": "USD",
+                "seconds_left": 10,
+            }
+        },
+        {
+            "w1": {
+                "item_id": "w1",
+                "current_price": 90,
+                "currency": "USD",
+                "seconds_left": 9,
+            }
+        },
+        suppress_incomplete=True,
+    )
+    assert "watched_item_price_dropped_below" not in events
+
+
+def test_sold_unsold_classification_partial_keeps_unknown() -> None:
+    """partial_failures sold_unsold_classification marks classification incomplete."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, _ed: events.append(et)
+    previous = {
+        "selling": {"s1": {"item_id": "s1", "title": "Gone"}},
+        "watched": {},
+        "bidding": {},
+        "sold_item_ids": [],
+        "truncated_collections": {},
+        "partial_failures": [],
+    }
+    current = {
+        "selling": {},
+        "watched": {},
+        "bidding": {},
+        "selling_classification": {"s1": "sold"},
+        "sold_item_ids": ["s1"],
+        "truncated_collections": {},
+        "partial_failures": ["sold_unsold_classification"],
+    }
+    coordinator._detect_transition_events(previous, current)
+    assert events == ["item_disappeared_unknown"]
+    assert "item_sold" not in events

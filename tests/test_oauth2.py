@@ -13,7 +13,10 @@ import pytest
 
 from homeassistant import config_entries
 from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.config_entry_oauth2_flow import _decode_jwt
+from homeassistant.helpers.config_entry_oauth2_flow import (
+    MY_AUTH_CALLBACK_PATH,
+    _decode_jwt,
+)
 from voluptuous_serialize import convert
 
 from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
@@ -33,11 +36,14 @@ from custom_components.ebay.oauth2 import (
     OAUTH_SETUP_GUIDE_URL,
     PRIVACY_POLICY_URL,
     EbayOAuth2Implementation,
+    async_get_ebay_callback_url,
     legacy_token_from_refresh_token,
 )
 from custom_components.ebay.oauth_errors import (
+    OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
     OAuth2TokenRequestTransientError,
+    oauth_token_error,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -293,6 +299,112 @@ def test_token_request_invalid_grant_requires_reauth(
         asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
 
 
+def test_token_request_network_error_is_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transport failures on the token endpoint are retryable."""
+    from aiohttp import ClientError
+
+    hass = _Hass()
+
+    class Session:
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            raise ClientError("connection reset")
+
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_clientsession",
+        lambda hass: Session(),
+    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    with pytest.raises(OAuth2TokenRequestTransientError):
+        asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
+
+
+def test_token_request_non_json_success_raises_generic_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 response that is not JSON becomes a generic token request error."""
+    hass = _Hass()
+
+    class Response:
+        status = 200
+
+        async def json(self, *, content_type: str | None = None) -> Any:
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    class Session:
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            return Response()
+
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_clientsession",
+        lambda hass: Session(),
+    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    with pytest.raises(OAuth2TokenRequestError):
+        asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
+
+
+def test_token_request_non_json_error_body_still_classifies_by_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreadable error bodies still map HTTP 400 to reauthorization."""
+    hass = _Hass()
+
+    class Response:
+        status = 400
+        request_info = None
+        history: tuple = ()
+        headers: dict[str, str] = {}
+
+        async def text(self) -> str:
+            return "<!html>gateway error"
+
+    class Session:
+        async def post(self, url: str, **kwargs: Any) -> Response:
+            return Response()
+
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_clientsession",
+        lambda hass: Session(),
+    )
+    implementation = EbayOAuth2Implementation(hass, _flow_data())
+
+    with pytest.raises(OAuth2TokenRequestReauthError):
+        asyncio.run(implementation._token_request({"grant_type": "refresh_token"}))
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code", "expected"),
+    [
+        (400, "invalid_client", OAuth2TokenRequestReauthError),
+        (403, "access_denied", OAuth2TokenRequestReauthError),
+        (418, "teapot", OAuth2TokenRequestError),
+        (402, None, OAuth2TokenRequestError),
+    ],
+)
+def test_oauth_token_error_classifier_matrix(
+    status: int, error_code: str | None, expected: type[Exception]
+) -> None:
+    """oauth_token_error maps statuses and error codes to the right HA exception."""
+    exc = oauth_token_error(status, error_code=error_code)
+    assert isinstance(exc, expected)
+    assert type(exc) is expected
+
+
+def test_callback_url_falls_back_when_redirect_uri_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup instructions fall back to My callback path without a redirect URI."""
+    monkeypatch.setattr(
+        "custom_components.ebay.oauth2.async_get_redirect_uri",
+        lambda hass: (_ for _ in ()).throw(RuntimeError("no my component")),
+    )
+    assert async_get_ebay_callback_url(_Hass()) == MY_AUTH_CALLBACK_PATH
+
+
 def test_config_flow_starts_external_step(monkeypatch: pytest.MonkeyPatch) -> None:
     """Automatic mode starts HA's external OAuth step."""
     flow = _flow(monkeypatch)
@@ -496,6 +608,126 @@ def test_manual_consent_url_requests_core_scope(
 
     assert scopes == [CORE_SCOPE]
     assert FEEDBACK_SCOPE not in scopes
+
+
+def test_manual_submit_rejects_mismatched_callback_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pasted callback URLs with the wrong OAuth state are rejected."""
+    flow = _flow(monkeypatch)
+    flow._oauth_mode = OAUTH_MODE_MANUAL
+    flow._data = _flow_data()
+    flow._state = "expected-state"
+    flow._consent_url = "https://auth.ebay.com/oauth2/authorize"
+
+    result = asyncio.run(
+        flow.async_step_manual(
+            {
+                "authorization_code": (
+                    "https://my.home-assistant.io/redirect/oauth"
+                    "?code=auth-code&state=wrong-state"
+                )
+            }
+        )
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "manual"
+    assert result["errors"] == {"base": "invalid_state"}
+
+
+def test_manual_submit_auth_error_becomes_cannot_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token exchange failures on the manual path surface cannot_connect."""
+    from custom_components.ebay.api import EbayAuthError
+
+    flow = _flow(monkeypatch)
+    flow._oauth_mode = OAUTH_MODE_MANUAL
+    flow._data = _flow_data()
+    flow._state = "state-1"
+    flow._consent_url = "https://auth.ebay.com/oauth2/authorize"
+    flow._requested_scopes = CORE_SCOPE
+
+    class Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
+            raise EbayAuthError("exchange failed")
+
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.EbayApiClient",
+        Client,
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: object(),
+    )
+
+    result = asyncio.run(
+        flow.async_step_manual({"authorization_code": "raw-auth-code"})
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "manual"
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+def test_manual_reauth_updates_existing_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful manual reauth updates the existing entry instead of creating."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    flow._oauth_mode = OAUTH_MODE_MANUAL
+    flow._data = _flow_data(client_secret="new-secret")
+    flow._state = "state-1"
+    flow._consent_url = "https://auth.ebay.com/oauth2/authorize"
+    flow._requested_scopes = CORE_SCOPE
+    entry = type("Entry", (), {"data": _flow_data(), "title": "eBay"})()
+    updated: dict[str, Any] = {}
+
+    class Client:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
+            return {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 7200,
+                "token_type": "Bearer",
+            }
+
+    def _update(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        updated["entry"] = entry_arg
+        updated["data"] = kwargs["data"]
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.EbayApiClient",
+        Client,
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: object(),
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_reload_and_abort", _update)
+    flow.flow_impl = EbayOAuth2Implementation(flow.hass, flow._data)
+
+    result = asyncio.run(
+        flow.async_step_manual({"authorization_code": "raw-auth-code"})
+    )
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert updated["entry"] is entry
+    assert updated["data"][CONF_CLIENT_SECRET] == "new-secret"
+    assert updated["data"]["token"]["refresh_token"] == "refresh"
 
 
 def test_build_consent_url_defaults_to_core_scope() -> None:
