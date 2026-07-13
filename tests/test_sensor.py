@@ -23,9 +23,12 @@ from custom_components.ebay.sensor import (
     SUMMARY_SENSORS,
     EbayItemSensor,
     async_setup_entry,
+    summary_sensors_for_options,
 )
 
-_FIXED_SENSORS = len(SUMMARY_SENSORS) + len(DIAGNOSTIC_SENSORS)
+_FIXED_SENSORS = len(summary_sensors_for_options(DEFAULT_OPTIONS)) + len(
+    DIAGNOSTIC_SENSORS
+)
 
 
 class _SelectionCoordinator:
@@ -273,7 +276,7 @@ def test_is_item_sensor_unique_id_excludes_summary_sensors() -> None:
 
 
 def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
-    from custom_components.ebay.sensor import EbaySummarySensor, SUMMARY_SENSORS
+    from custom_components.ebay.sensor import EbaySummarySensor
 
     coordinator = _SelectionCoordinator(
         options={**DEFAULT_OPTIONS, "entity_mode": ENTITY_MODE_BALANCED},
@@ -301,3 +304,94 @@ def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
     assert attrs["partial_failures"] == ["selling_truncated"]
     assert attrs["truncated_collections"] == {"selling": True}
     assert attrs["api_warnings"] == [{"code": "1"}]
+
+
+def test_summary_sensors_are_gated_by_feature_options() -> None:
+    from custom_components.ebay.const import (
+        CONF_FEEDBACK_ENABLED,
+        CONF_FULFILLMENT_ENABLED,
+        CONF_MESSAGES_ENABLED,
+        CONF_SELLER_STANDARDS_ENABLED,
+    )
+    from homeassistant.components.sensor import SensorDeviceClass
+    from homeassistant.const import PERCENTAGE
+
+    default_keys = {item.key for item in summary_sensors_for_options(DEFAULT_OPTIONS)}
+    assert "orders_overdue" not in default_keys
+    assert "unread_conversations" not in default_keys
+    assert "seller_level" not in default_keys
+    assert "watched_items" in default_keys
+    assert "active_selling_items" in default_keys
+
+    enabled = summary_sensors_for_options(
+        {
+            **DEFAULT_OPTIONS,
+            CONF_FULFILLMENT_ENABLED: True,
+            CONF_SELLER_STANDARDS_ENABLED: True,
+            CONF_FEEDBACK_ENABLED: True,
+            CONF_MESSAGES_ENABLED: True,
+        }
+    )
+    by_key = {item.key: item for item in enabled}
+    assert by_key["orders_overdue"].entity_registry_enabled_default is not False
+    assert by_key["open_payment_disputes"].entity_registry_enabled_default is not False
+    assert by_key["unread_conversations"].entity_registry_enabled_default is not False
+    assert by_key["orders_awaiting_shipment"].entity_registry_enabled_default is False
+    assert by_key["transaction_defect_rate"].entity_registry_enabled_default is False
+    assert by_key["transaction_defect_rate"].native_unit_of_measurement == PERCENTAGE
+    assert by_key["late_shipment_rate"].native_unit_of_measurement == PERCENTAGE
+    assert by_key["positive_feedback_percent"].native_unit_of_measurement == PERCENTAGE
+    assert by_key["seller_level"].device_class == SensorDeviceClass.ENUM
+    assert by_key["item_not_received_metric"].device_class == SensorDeviceClass.ENUM
+    assert (
+        by_key["seller_next_evaluation_date"].device_class
+        == SensorDeviceClass.TIMESTAMP
+    )
+
+
+def test_summary_timestamp_and_enum_native_values() -> None:
+    from custom_components.ebay.sensor import EbaySummarySensor
+
+    coordinator = _SelectionCoordinator(
+        options=dict(DEFAULT_OPTIONS),
+        data={
+            "summary": {
+                "seller_next_evaluation_date": "2026-08-01T00:00:00+00:00",
+                "seller_level": "TOP_RATED",
+                "positive_feedback_percent": 99.5,
+            },
+            "selling": {},
+            "watched": {},
+            "bidding": {},
+        },
+    )
+    next_eval = next(
+        item for item in SUMMARY_SENSORS if item.key == "seller_next_evaluation_date"
+    )
+    level = next(item for item in SUMMARY_SENSORS if item.key == "seller_level")
+    percent = next(
+        item for item in SUMMARY_SENSORS if item.key == "positive_feedback_percent"
+    )
+    assert isinstance(
+        EbaySummarySensor(coordinator, Mock(entry_id="e"), next_eval).native_value,
+        datetime,
+    )
+    assert (
+        EbaySummarySensor(coordinator, Mock(entry_id="e"), level).native_value
+        == "TOP_RATED"
+    )
+    assert (
+        EbaySummarySensor(coordinator, Mock(entry_id="e"), percent).native_value == 99.5
+    )
+
+
+def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:
+    from custom_components.ebay.api import _seller_ops_summary_keys
+    from custom_components.ebay.seller_ops import empty_seller_ops
+
+    summary = _seller_ops_summary_keys(empty_seller_ops())
+    assert summary["orders_overdue"] is None
+    assert summary["open_payment_disputes"] is None
+    assert summary["unread_conversations"] is None
+    assert summary["seller_standard_at_risk"] is None
+    assert summary["recent_positive_feedback"] is None

@@ -9,10 +9,12 @@ from custom_components.ebay.binary_sensor import (
     EbaySellerAtRiskBinarySensor,
     async_setup_entry,
 )
+from custom_components.ebay.const import CONF_SELLER_STANDARDS_ENABLED, DEFAULT_OPTIONS
 
 
 def test_binary_sensor_setup_and_state() -> None:
     coordinator = Mock()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_SELLER_STANDARDS_ENABLED: True}
     coordinator.data = {
         "summary": {"seller_standard_at_risk": True},
         "seller_ops": {"standards": {"at_risk": False}},
@@ -35,3 +37,14 @@ def test_binary_sensor_setup_and_state() -> None:
 
     coordinator.data = {"summary": {}, "seller_ops": {"standards": {}}}
     assert entity.is_on is None
+
+
+def test_binary_sensor_skipped_when_standards_disabled() -> None:
+    coordinator = Mock()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_SELLER_STANDARDS_ENABLED: False}
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    added: list = []
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
+    assert added == []
