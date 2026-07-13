@@ -19,6 +19,7 @@ from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 
 def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     entry = Mock(entry_id="entry-1")
+    entry.data = {}
     coordinator = object.__new__(EbayDataUpdateCoordinator)
     coordinator.hass = Mock()
     coordinator.entry = entry
@@ -48,7 +49,21 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     }
     coordinator._recent_history_ending_soon = set()
     coordinator._manual_refresh_last_requested = None
+    coordinator._force_full_refresh = False
+    coordinator._repair_streaks = {}
     return coordinator
+
+
+@pytest.fixture(autouse=True)
+def _stub_repairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "custom_components.ebay.repairs.async_sync_repair_issues",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.repairs.async_sync_reauth_issue",
+        AsyncMock(),
+    )
 
 
 def test_auth_failure_becomes_config_entry_auth_failed() -> None:
@@ -227,3 +242,156 @@ def test_timers_reschedule_when_end_time_changes(
         "Rescheduling eBay ending-soon timer kind=watching item_id=123" in caplog.text
     )
     assert "Cancelling eBay ending-soon timer kind=watching item_id=123" in caplog.text
+
+
+def test_due_sections_skips_fresh_enrichments() -> None:
+    coordinator = _coordinator()
+    now = datetime.now(timezone.utc)
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "feedback_enabled": True,
+        "seller_standards_enabled": True,
+        "analytics_enabled": True,
+        "poll_interval": 30,
+    }
+    coordinator.data = {
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+            "feedback": now,
+            "seller_standards": now,
+            "analytics": now,
+        }
+    }
+    due = coordinator._due_sections(force=False)
+    assert "buying" not in due
+    assert "selling" not in due
+    assert "feedback" not in due
+    assert "seller_standards" not in due
+    assert "analytics" not in due
+
+
+def test_due_sections_includes_stale_standards() -> None:
+    coordinator = _coordinator()
+    now = datetime.now(timezone.utc)
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "seller_standards_enabled": True,
+        "poll_interval": 30,
+    }
+    coordinator.data = {
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+            "seller_standards": now - timedelta(hours=25),
+        }
+    }
+    due = coordinator._due_sections(force=False)
+    assert due == {"seller_standards"}
+
+
+def test_manual_refresh_forces_all_enabled_sections() -> None:
+    coordinator = _coordinator()
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "feedback_enabled": True,
+        "messages_enabled": True,
+    }
+    now = datetime.now(timezone.utc)
+    coordinator.data = {
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+            "feedback": now,
+            "messages": now,
+        }
+    }
+    assert coordinator._due_sections(force=False) == set()
+    assert coordinator._due_sections(force=True) == {
+        "buying",
+        "selling",
+        "feedback",
+        "messages",
+    }
+
+
+def test_empty_due_sections_returns_cached_payload() -> None:
+    now = datetime.now(timezone.utc)
+    cached = {
+        "selling": {"s1": {"item_id": "s1"}},
+        "watched": {},
+        "bidding": {},
+        "summary": {},
+        "last_update": now,
+        "last_successful_update": now,
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+        },
+    }
+    api = Mock()
+    api.async_fetch_data = AsyncMock()
+    coordinator = _coordinator(api)
+    coordinator.data = cached
+    coordinator.last_refresh_result = "success"
+
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result is cached
+    api.async_fetch_data.assert_not_awaited()
+
+
+def test_section_refresh_passes_due_sections_and_previous() -> None:
+    now = datetime.now(timezone.utc)
+    previous = {
+        "selling": {"s1": {"item_id": "s1"}},
+        "watched": {},
+        "bidding": {},
+        "summary": {},
+        "last_update": now - timedelta(minutes=40),
+        "last_successful_update": now - timedelta(minutes=40),
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+        "section_last_fetched": {
+            "buying": now - timedelta(minutes=40),
+            "selling": now - timedelta(minutes=40),
+            "feedback": now,
+        },
+    }
+    payload = {
+        "selling": {"s1": {"item_id": "s1", "bid_count": 2}},
+        "watched": {},
+        "bidding": {},
+        "summary": {},
+        "last_update": now,
+        "last_successful_update": now,
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+            "feedback": now,
+        },
+        "refreshed_sections": ["buying", "selling"],
+    }
+    api = Mock()
+    api.async_fetch_data = AsyncMock(return_value=payload)
+    coordinator = _coordinator(api)
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "feedback_enabled": True,
+        "poll_interval": 30,
+    }
+    coordinator.data = previous
+
+    result = asyncio.run(coordinator._async_update_data())
+
+    assert result["selling"]["s1"]["bid_count"] == 2
+    kwargs = api.async_fetch_data.await_args.kwargs
+    assert set(kwargs["sections"]) == {"buying", "selling"}
+    assert kwargs["previous"] is previous

@@ -41,9 +41,18 @@ CONVERSATIONS_MAX_PAGES = 5
 FEEDBACK_RECENT_LOOKBACK_DAYS = 30
 
 
-def marketplace_id_for_site(site_id: str) -> str:
-    """Map Trading Site ID to Sell Analytics marketplace ID."""
-    return SITE_ID_TO_MARKETPLACE.get(str(site_id), "EBAY_US")
+def is_known_site_id(site_id: str) -> bool:
+    """Return True when Site ID maps to a known Sell Analytics marketplace."""
+    return str(site_id) in SITE_ID_TO_MARKETPLACE
+
+
+def marketplace_id_for_site(site_id: str) -> str | None:
+    """Map Trading Site ID to Sell Analytics marketplace ID.
+
+    Returns None when the Site ID is unknown so callers can soft-fail instead of
+    silently querying the wrong marketplace.
+    """
+    return SITE_ID_TO_MARKETPLACE.get(str(site_id))
 
 
 def empty_seller_ops() -> dict[str, Any]:

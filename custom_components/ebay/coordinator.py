@@ -15,7 +15,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import EbayApiClient, EbayAuthError, EbayError, API_WARNINGS_STATE_ATTR_MAX
+from .api import (
+    API_WARNINGS_STATE_ATTR_MAX,
+    EbayApiClient,
+    EbayAuthError,
+    EbayError,
+    enabled_sections_for_options,
+)
 from .const import (
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
@@ -46,6 +52,7 @@ from .const import (
     REFRESH_RESULT_SUCCESS,
     REFRESH_RESULT_UNKNOWN,
     TITLE_HISTORY_MAX_LEN,
+    section_interval_minutes,
 )
 from .options_parse import parse_price_targets, pinned_ids, to_decimal
 
@@ -103,6 +110,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Ending-soon keys already recorded to history without an entity callback.
         self._recent_history_ending_soon: set[EndingSoonKey] = set()
         self._manual_refresh_last_requested: float | None = None
+        self._force_full_refresh = False
+        self._repair_streaks: dict[str, int] = {}
         super().__init__(
             hass,
             _LOGGER,
@@ -186,9 +195,49 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
         self._manual_refresh_last_requested = now
+        self._force_full_refresh = True
         _LOGGER.debug("Requesting eBay manual refresh entry_id=%s", self.entry.entry_id)
         await self.async_request_refresh()
         return True
+
+    def _enabled_sections(self) -> set[str]:
+        """Return sections enabled by the current options."""
+        return enabled_sections_for_options(
+            buying_enabled=bool(self.options[CONF_BUYING_ENABLED]),
+            selling_enabled=bool(self.options[CONF_SELLING_ENABLED]),
+            analytics_enabled=bool(self.options[CONF_ANALYTICS_ENABLED]),
+            fulfillment_enabled=bool(self.options[CONF_FULFILLMENT_ENABLED]),
+            seller_standards_enabled=bool(self.options[CONF_SELLER_STANDARDS_ENABLED]),
+            feedback_enabled=bool(self.options[CONF_FEEDBACK_ENABLED]),
+            messages_enabled=bool(self.options[CONF_MESSAGES_ENABLED]),
+        )
+
+    def _due_sections(self, *, force: bool) -> set[str]:
+        """Return enabled sections that are due for refresh."""
+        enabled = self._enabled_sections()
+        if force or not self.data:
+            return enabled
+        now = datetime.now(timezone.utc)
+        poll_interval = int(self.options[CONF_POLL_INTERVAL])
+        last_fetched = (self.data or {}).get("section_last_fetched") or {}
+        due: set[str] = set()
+        for section in enabled:
+            last = last_fetched.get(section)
+            if last is None:
+                due.add(section)
+                continue
+            if isinstance(last, str):
+                try:
+                    last = datetime.fromisoformat(last)
+                except ValueError:
+                    due.add(section)
+                    continue
+            interval = timedelta(
+                minutes=section_interval_minutes(section, poll_interval)
+            )
+            if now - last >= interval:
+                due.add(section)
+        return due
 
     def _record_refresh_attempt(
         self,
@@ -213,9 +262,14 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         seller_standards_enabled = bool(self.options[CONF_SELLER_STANDARDS_ENABLED])
         feedback_enabled = bool(self.options[CONF_FEEDBACK_ENABLED])
         messages_enabled = bool(self.options[CONF_MESSAGES_ENABLED])
+        force = self._force_full_refresh
+        self._force_full_refresh = False
+        due_sections = self._due_sections(force=force)
         _LOGGER.debug(
-            "eBay coordinator refresh started entry_id=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
+            "eBay coordinator refresh started entry_id=%s force=%s due_sections=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
             self.entry.entry_id,
+            force,
+            sorted(due_sections),
             buying_enabled,
             selling_enabled,
             analytics_enabled,
@@ -224,6 +278,18 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             feedback_enabled,
             messages_enabled,
         )
+        if not due_sections and self.data is not None:
+            self._record_refresh_attempt(
+                start=start,
+                result=self.last_refresh_result
+                if self.last_refresh_result != REFRESH_RESULT_UNKNOWN
+                else REFRESH_RESULT_SUCCESS,
+                error_category=None,
+            )
+            from .repairs import async_sync_repair_issues
+
+            await async_sync_repair_issues(self.hass, self.entry, self, self.data)
+            return self.data
         try:
             payload = await self.api.async_fetch_data(
                 buying_enabled=buying_enabled,
@@ -235,6 +301,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 messages_enabled=messages_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
                 granted_scopes=self.entry.data.get(CONF_OAUTH_SCOPES),
+                sections=due_sections,
+                previous=self.data,
             )
         except EbayAuthError as exc:
             self._record_refresh_attempt(
@@ -247,6 +315,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.entry.entry_id,
                 _duration_ms(start),
             )
+            from .repairs import async_sync_reauth_issue
+
+            await async_sync_reauth_issue(self.hass, self.entry, active=True)
             raise ConfigEntryAuthFailed("eBay authentication failed") from exc
         except EbayError as exc:
             self._record_refresh_attempt(
@@ -274,6 +345,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload["summary"]["missing_scope_features"] = payload.get(
             "missing_scope_features", []
         )
+        payload["summary"]["section_last_fetched"] = {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in (payload.get("section_last_fetched") or {}).items()
+        }
         warnings = payload.get("api_warnings") or []
         payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]
         result = (
@@ -287,9 +362,14 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rebuild_ending_soon_timers(payload)
         self.previous_payload = _baseline_payload(self.previous_payload, payload)
         self.refresh_selected_item_keys(payload)
+
+        from .repairs import async_sync_repair_issues
+
+        await async_sync_repair_issues(self.hass, self.entry, self, payload)
         _LOGGER.debug(
-            "eBay coordinator refresh completed entry_id=%s watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
+            "eBay coordinator refresh completed entry_id=%s refreshed_sections=%s watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
             self.entry.entry_id,
+            payload.get("refreshed_sections", []),
             len(payload["watched"]),
             len(payload["bidding"]),
             len(payload["selling"]),

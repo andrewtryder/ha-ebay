@@ -1,0 +1,55 @@
+blueprint:
+  name: eBay - Notify when seller status becomes at risk
+  description: >
+    Send a notification when seller standards transition into an at-risk state.
+
+    Requires Seller standards to be enabled in eBay options and the
+    **Seller ops activity** event entity.
+  domain: automation
+  source_url: https://github.com/andrewtryder/ha-ebay/blob/main/blueprints/automation/ebay/notify_when_seller_at_risk.yaml
+  author: ha-ebay
+  homeassistant:
+    min_version: 2026.3.0
+  input:
+    seller_ops_event:
+      name: Seller ops activity event
+      description: Usually event.ebay_seller_ops_activity
+      selector:
+        entity:
+          filter:
+            - domain: event
+              integration: ebay
+    notify_entity:
+      name: Notify entity
+      description: Notify entity that supports notify.send_message
+      selector:
+        entity:
+          domain: notify
+    notification_title:
+      name: Notification title
+      default: eBay seller at risk
+      selector:
+        text:
+
+mode: queued
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: !input seller_ops_event
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state.attributes.event_type == 'seller_standard_at_risk' }}
+
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: !input notify_entity
+    data:
+      title: !input notification_title
+      message: >-
+        Seller standards are now at risk{%
+          if trigger.to_state.attributes.title
+        %} (level {{ trigger.to_state.attributes.title }}){% endif %}.

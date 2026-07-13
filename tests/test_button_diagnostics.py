@@ -30,6 +30,7 @@ from custom_components.ebay.sensor import DIAGNOSTIC_SENSORS, EbayDiagnosticSens
 
 def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     entry = Mock(entry_id="entry-1")
+    entry.data = {}
     coordinator = object.__new__(EbayDataUpdateCoordinator)
     coordinator.hass = Mock()
     coordinator.hass.async_create_task = lambda coro: coro
@@ -56,9 +57,23 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     }
     coordinator._recent_history_ending_soon = set()
     coordinator._manual_refresh_last_requested = None
+    coordinator._force_full_refresh = False
+    coordinator._repair_streaks = {}
     coordinator._refresh_task = None
     coordinator.async_request_refresh = AsyncMock()
     return coordinator
+
+
+@pytest.fixture(autouse=True)
+def _stub_repairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "custom_components.ebay.repairs.async_sync_repair_issues",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.repairs.async_sync_reauth_issue",
+        AsyncMock(),
+    )
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:

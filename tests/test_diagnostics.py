@@ -71,6 +71,7 @@ def test_diagnostics_without_coordinator_data() -> None:
     assert result["partial_failure_categories"] == []
     assert result["truncated_collections"] == {}
     assert result["api_warnings"] == []
+    assert result["section_last_fetched_ages_minutes"] == {}
     assert result["last_error_category"] is None
     blob = str(result)
     assert "secret-client" not in blob
@@ -95,6 +96,9 @@ def test_diagnostics_with_coordinator_data() -> None:
                 "partial_failures": ["analytics_views"],
                 "truncated_collections": {"selling": True},
                 "api_warnings": [{"code": "1", "short_message": "warn"}],
+                "section_last_fetched": {
+                    "buying": "2026-01-01T00:00:00+00:00",
+                },
             },
             error=None,
         ),
@@ -111,6 +115,8 @@ def test_diagnostics_with_coordinator_data() -> None:
     assert result["partial_failure_categories"] == ["analytics_views"]
     assert result["truncated_collections"] == {"selling": True}
     assert result["api_warnings"] == [{"code": "1", "short_message": "warn"}]
+    assert "buying" in result["section_last_fetched_ages_minutes"]
+    assert result["section_last_fetched_ages_minutes"]["buying"] is not None
     assert result["enabled_features"]["analytics"] is True
     assert result["enabled_features"]["fulfillment"] is True
     assert result["pinned_item_ids_count"] == 2

@@ -1,0 +1,57 @@
+blueprint:
+  name: eBay - Notify when outbid
+  description: >
+    Send a notification when you are outbid on an eBay item.
+
+    Requires the eBay **Bidding activity** event entity.
+  domain: automation
+  source_url: https://github.com/andrewtryder/ha-ebay/blob/main/blueprints/automation/ebay/notify_when_outbid.yaml
+  author: ha-ebay
+  homeassistant:
+    min_version: 2026.3.0
+  input:
+    bidding_event:
+      name: Bidding activity event
+      description: Usually event.ebay_bidding_activity
+      selector:
+        entity:
+          filter:
+            - domain: event
+              integration: ebay
+    notify_entity:
+      name: Notify entity
+      description: Notify entity that supports notify.send_message
+      selector:
+        entity:
+          domain: notify
+    notification_title:
+      name: Notification title
+      default: eBay outbid
+      selector:
+        text:
+
+mode: queued
+max: 10
+
+triggers:
+  - trigger: state
+    entity_id: !input bidding_event
+
+conditions:
+  - condition: template
+    value_template: "{{ trigger.to_state.attributes.event_type == 'outbid' }}"
+
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: !input notify_entity
+    data:
+      title: !input notification_title
+      message: >-
+        Outbid on {{ trigger.to_state.attributes.title | default('an item') }}{%
+        if trigger.to_state.attributes.price is defined and trigger.to_state.attributes.price is not none
+        %} ({{ trigger.to_state.attributes.price }}{%
+          if trigger.to_state.attributes.currency %} {{ trigger.to_state.attributes.currency }}{% endif
+        %}){% endif %}{%
+        if trigger.to_state.attributes.url %}
+        {{ trigger.to_state.attributes.url }}{% endif %}
