@@ -1,3 +1,5 @@
-# Current pytest harness for Home Assistant 2026.7.2 (requires Python >=3.14).
-# Declared HACS minimum is homeassistant>=2026.3.0, which also requires Python 3.14.2+.
+# Local/devcontainer alias of the current CI harness.
+# CI matrix also installs requirements-ha-min.txt (HA 2026.3.1) and
+# requirements-ha-current.txt (HA 2026.7.2). Declared HACS minimum remains
+# homeassistant>=2026.3.0 (requires Python >=3.14.2).
 pytest-homeassistant-custom-component==0.13.346

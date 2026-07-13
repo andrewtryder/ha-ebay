@@ -60,10 +60,12 @@ toward **95%** on the ladder **84 → 85 → 90 → 95**, preferring new tests t
 exercise config-flow, OAuth, pagination, partial-failure, and transition-event
 branches. The pre-push hook fails the push if coverage drops below the floor.
 
-CI runs `pre-commit run --all-files` plus the authoritative `ruff` / `compileall` /
-`pytest` suite on Python 3.14 with `requirements-ha.txt`
-(`pytest-homeassistant-custom-component==0.13.346` → Home Assistant `2026.7.2`).
-The HACS minimum remains `2026.3.0` for runtime/docker.
+CI runs `pre-commit run --all-files` (current leg only) plus `ruff` /
+`compileall` / `pytest` on Python 3.14 against two Home Assistant harnesses:
+minimum (`requirements-ha-min.txt` → `pytest-homeassistant-custom-component==0.13.317`
+→ Home Assistant `2026.3.1`) and current (`requirements-ha-current.txt` →
+`0.13.346` → `2026.7.2`). Local installs can keep using `requirements-ha.txt`
+(alias of current). The HACS minimum remains `2026.3.0` for runtime/docker.
 
 ### Conventional commits and Release Please
 
