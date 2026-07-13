@@ -115,6 +115,20 @@ SUMMARY_SENSORS = [
         state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
+        key="sold_items_count",
+        translation_key="sold_items_count",
+        value_key="sold_items_count",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    EbaySummarySensorDescription(
+        key="unsold_items_count",
+        translation_key="unsold_items_count",
+        value_key="unsold_items_count",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    EbaySummarySensorDescription(
         key="selling_total_watchers",
         translation_key="selling_total_watchers",
         value_key="selling_total_watchers",

@@ -322,6 +322,8 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
     assert "seller_level" not in default_keys
     assert "watched_items" in default_keys
     assert "active_selling_items" in default_keys
+    assert "sold_items_count" in default_keys
+    assert "unsold_items_count" in default_keys
 
     enabled = summary_sensors_for_options(
         {

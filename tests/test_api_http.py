@@ -220,6 +220,11 @@ def test_optional_failure_debug_log_includes_safe_exception_context(
         async def _fetch_selling_pages(self) -> tuple[dict[str, dict[str, Any]], bool]:
             return {}, False
 
+        async def async_fetch_sold_unsold_classification(
+            self,
+        ) -> tuple[dict[str, str], int, int, bool]:
+            return {}, 0, 0, False
+
         async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
             return {}, False
 

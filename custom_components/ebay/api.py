@@ -678,10 +678,55 @@ def build_get_my_ebay_selling_xml(entries_per_page: int = 100, page: int = 1) ->
 """
 
 
-def build_get_my_ebay_selling_classification_xml(
-    entries_per_page: int = 100, page: int = 1
+SOLD_UNSOLD_DURATION_DAYS = 60
+
+
+def build_get_my_ebay_selling_list_xml(
+    list_name: str,
+    *,
+    entries_per_page: int = 100,
+    page: int = 1,
+    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
 ) -> str:
-    """Build a read-only sold/unsold lookup request for future classification."""
+    """Build GetMyeBaySelling XML for one SoldList or UnsoldList page."""
+    if list_name not in {"SoldList", "UnsoldList"}:
+        raise ValueError(f"Unsupported selling list: {list_name}")
+    sold_block = (
+        f"""  <SoldList>
+    <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
+    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
+  </SoldList>"""
+        if list_name == "SoldList"
+        else "  <SoldList><Include>false</Include></SoldList>"
+    )
+    unsold_block = (
+        f"""  <UnsoldList>
+    <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
+    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
+  </UnsoldList>"""
+        if list_name == "UnsoldList"
+        else "  <UnsoldList><Include>false</Include></UnsoldList>"
+    )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <ActiveList><Include>false</Include></ActiveList>
+  <ScheduledList><Include>false</Include></ScheduledList>
+{sold_block}
+{unsold_block}
+</GetMyeBaySellingRequest>
+"""
+
+
+def build_get_my_ebay_selling_classification_xml(
+    entries_per_page: int = 100,
+    page: int = 1,
+    *,
+    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
+) -> str:
+    """Build a combined sold/unsold lookup request (single page of each list)."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
   <DetailLevel>ReturnAll</DetailLevel>
@@ -689,10 +734,12 @@ def build_get_my_ebay_selling_classification_xml(
   <ScheduledList><Include>false</Include></ScheduledList>
   <SoldList>
     <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
     <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
   </SoldList>
   <UnsoldList>
     <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
     <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
   </UnsoldList>
 </GetMyeBaySellingRequest>
@@ -700,9 +747,12 @@ def build_get_my_ebay_selling_classification_xml(
 
 
 def parse_sold_unsold_classification(root: ET.Element) -> dict[str, str]:
-    """Parse explicit sold/unsold item classification when that lookup is enabled."""
+    """Parse sold/unsold ItemIDs from a GetMyeBaySelling response.
+
+    Unsold is applied first, then sold, so SoldList wins if an ItemID appears in both.
+    """
     classified: dict[str, str] = {}
-    for container_name, status in (("SoldList", "sold"), ("UnsoldList", "unsold")):
+    for container_name, status in (("UnsoldList", "unsold"), ("SoldList", "sold")):
         container = root.find(f"e:{container_name}", namespaces=NS)
         if container is None:
             continue
@@ -711,6 +761,19 @@ def parse_sold_unsold_classification(root: ET.Element) -> dict[str, str]:
             if item_id:
                 classified[item_id] = status
     return classified
+
+
+def parse_selling_list_item_ids(root: ET.Element, list_name: str) -> list[str]:
+    """Return ItemIDs from one SoldList or UnsoldList container."""
+    container = root.find(f"e:{list_name}", namespaces=NS)
+    if container is None:
+        return []
+    item_ids: list[str] = []
+    for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
+        item_id = _text(item, "e:ItemID")
+        if item_id:
+            item_ids.append(item_id)
+    return item_ids
 
 
 def build_get_seller_list_xml(entries_per_page: int = 200, page: int = 1) -> str:
@@ -1259,6 +1322,54 @@ class EbayApiClient:
             page += 1
         return _dict_by_item_id(selling_items), truncated
 
+    async def _fetch_selling_list_pages(self, list_name: str) -> tuple[list[str], bool]:
+        """Fetch one SoldList or UnsoldList across pages up to MAX_PAGES."""
+        item_ids: list[str] = []
+        page = 1
+        total_pages = 1
+        truncated = False
+        while page <= total_pages:
+            root = await self.async_call_trading_api(
+                SELLING_CALL_NAME,
+                build_get_my_ebay_selling_list_xml(list_name, page=page),
+            )
+            page_ids = parse_selling_list_item_ids(root, list_name)
+            item_ids.extend(page_ids)
+            reported_pages = _reported_total_pages(root, list_name)
+            truncated = truncated or reported_pages > MAX_PAGES
+            total_pages = max(total_pages, min(reported_pages, MAX_PAGES))
+            _LOGGER.debug(
+                "Fetched %s page page=%s item_count=%s total_pages=%s truncated=%s",
+                list_name,
+                page,
+                len(page_ids),
+                total_pages,
+                truncated,
+            )
+            page += 1
+        return item_ids, truncated
+
+    async def async_fetch_sold_unsold_classification(
+        self,
+    ) -> tuple[dict[str, str], int, int, bool]:
+        """Fetch SoldList/UnsoldList classification and counts.
+
+        Returns (classification, sold_count, unsold_count, truncated).
+        """
+        unsold_ids, unsold_truncated = await self._fetch_selling_list_pages(
+            "UnsoldList"
+        )
+        sold_ids, sold_truncated = await self._fetch_selling_list_pages("SoldList")
+        classified: dict[str, str] = {item_id: "unsold" for item_id in unsold_ids}
+        for item_id in sold_ids:
+            classified[item_id] = "sold"
+        return (
+            classified,
+            len(set(sold_ids)),
+            len(set(unsold_ids)),
+            sold_truncated or unsold_truncated,
+        )
+
     async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
         """Fetch GetSellerList view counts across pages up to MAX_PAGES."""
         views: dict[str, int] = {}
@@ -1612,6 +1723,10 @@ class EbayApiClient:
         orders_truncated = False
         disputes_truncated = False
         messages_truncated = False
+        sold_unsold_truncated = False
+        selling_classification: dict[str, str] = {}
+        sold_items_count: int | None = None
+        unsold_items_count: int | None = None
         seller_ops = empty_seller_ops()
         feature_options = {
             CONF_ANALYTICS_ENABLED: analytics_enabled,
@@ -1637,6 +1752,27 @@ class EbayApiClient:
             selling, selling_truncated = await self._fetch_selling_pages()
             if selling_truncated:
                 partial_failures.append("selling_truncated")
+            try:
+                (
+                    selling_classification,
+                    sold_items_count,
+                    unsold_items_count,
+                    sold_unsold_truncated,
+                ) = await self.async_fetch_sold_unsold_classification()
+                if sold_unsold_truncated:
+                    partial_failures.append("sold_unsold_truncated")
+            except EbayAuthError:
+                raise
+            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                _LOGGER.debug(
+                    "Optional sold/unsold classification failed error=%s",
+                    _safe_exception_context(exc),
+                )
+                partial_failures.append("sold_unsold_classification")
+                selling_classification = {}
+                sold_items_count = None
+                unsold_items_count = None
+                sold_unsold_truncated = True
             try:
                 (
                     seller_list_views,
@@ -1810,6 +1946,7 @@ class EbayApiClient:
             "orders": orders_truncated,
             "payment_disputes": disputes_truncated,
             "messages": messages_truncated,
+            "sold_unsold": sold_unsold_truncated,
         }
 
         now = datetime.now(timezone.utc)
@@ -1817,8 +1954,20 @@ class EbayApiClient:
             watched, bidding, selling, ending_soon_threshold_seconds
         )
         summary.update(_seller_ops_summary_keys(seller_ops))
+        summary["sold_items_count"] = sold_items_count
+        summary["unsold_items_count"] = unsold_items_count
         summary["missing_scopes"] = missing_by_feature
         summary["missing_scope_features"] = missing_scope_features
+        sold_item_ids = sorted(
+            item_id
+            for item_id, status in selling_classification.items()
+            if status == "sold"
+        )
+        unsold_item_ids = sorted(
+            item_id
+            for item_id, status in selling_classification.items()
+            if status == "unsold"
+        )
         _LOGGER.debug(
             "eBay API refresh completed watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
             len(watched),
@@ -1833,6 +1982,9 @@ class EbayApiClient:
             "bidding": bidding,
             "selling": selling,
             "seller_ops": seller_ops,
+            "selling_classification": selling_classification,
+            "sold_item_ids": sold_item_ids,
+            "unsold_item_ids": unsold_item_ids,
             "summary": summary,
             "last_update": now,
             "last_successful_update": now,

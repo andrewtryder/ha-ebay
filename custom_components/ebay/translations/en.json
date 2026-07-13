@@ -125,6 +125,12 @@
       "active_listings_quantity_sold": {
         "name": "Quantity sold across active listings"
       },
+      "sold_items_count": {
+        "name": "Sold items"
+      },
+      "unsold_items_count": {
+        "name": "Unsold items"
+      },
       "selling_total_watchers": {
         "name": "Selling total watchers"
       },
