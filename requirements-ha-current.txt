@@ -1,0 +1,2 @@
+# Current pytest harness for Home Assistant 2026.7.2 (requires Python >=3.14).
+pytest-homeassistant-custom-component==0.13.346
