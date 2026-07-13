@@ -701,7 +701,7 @@ async def _async_noop(*args: Any, **kwargs: Any) -> None:
     """Async no-op for patched config-flow helpers."""
 
 
-def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
+def test_options_flow_menu_sections_and_save() -> None:
     from custom_components.ebay.config_flow import EbayOptionsFlow
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
     import voluptuous as vol
@@ -719,44 +719,42 @@ def test_options_flow_creates_entry_and_rejects_invalid_poll_interval() -> None:
     hass = _Hass()
     hass.async_create_task = lambda coro: coro.close()  # type: ignore[method-assign]
     flow.hass = hass
-    result = asyncio.run(flow.async_step_init())
-    assert result["type"] == "form"
-    schema = result["data_schema"]
+
+    menu = asyncio.run(flow.async_step_init())
+    assert menu["type"] == "menu"
+    assert "general" in menu["menu_options"]
+    assert "save" in menu["menu_options"]
+
+    general = asyncio.run(flow.async_step_general())
+    assert general["type"] == "form"
+    schema = general["data_schema"]
     with pytest.raises(vol.Invalid):
-        schema(
+        schema({"poll_interval": 1})
+
+    returned = asyncio.run(flow.async_step_general({"poll_interval": 45}))
+    assert returned["type"] == "menu"
+    assert flow._draft["poll_interval"] == 45
+
+    entities = asyncio.run(
+        flow.async_step_entities(
             {
-                "poll_interval": 1,
-                "ending_soon_threshold": 60,
-                "entity_mode": "balanced",
-                "per_item_cap": 25,
-                "analytics_enabled": True,
-                "buying_enabled": True,
-                "selling_enabled": True,
-                "fulfillment_enabled": False,
-                "seller_standards_enabled": False,
-                "feedback_enabled": False,
-                "messages_enabled": False,
-            }
-        )
-    created = asyncio.run(
-        flow.async_step_init(
-            {
-                "poll_interval": 30,
-                "ending_soon_threshold": 60,
                 "entity_mode": "detailed",
                 "per_item_cap": 50,
                 "pinned_item_ids": "1",
-                "analytics_enabled": False,
-                "buying_enabled": True,
-                "selling_enabled": True,
-                "fulfillment_enabled": False,
-                "seller_standards_enabled": False,
-                "feedback_enabled": False,
-                "messages_enabled": False,
             }
         )
     )
+    assert entities["type"] == "menu"
+    assert flow._draft["entity_mode"] == "detailed"
+
+    selling = asyncio.run(
+        flow.async_step_selling({"selling_enabled": True, "analytics_enabled": False})
+    )
+    assert selling["type"] == "menu"
+
+    created = asyncio.run(flow.async_step_save())
     assert created["type"] == "create_entry"
+    assert created["data"]["poll_interval"] == 45
     assert created["data"]["entity_mode"] == "detailed"
     assert created["data"]["analytics_enabled"] is False
 
@@ -797,16 +795,10 @@ def test_options_flow_starts_reauth_when_scopes_missing() -> None:
     )()
     flow.hass = hass
 
-    result = asyncio.run(
-        flow.async_step_init(
+    asyncio.run(flow.async_step_init())
+    asyncio.run(
+        flow.async_step_seller_operations(
             {
-                "poll_interval": 30,
-                "ending_soon_threshold": 60,
-                "entity_mode": "balanced",
-                "per_item_cap": 25,
-                "analytics_enabled": False,
-                "buying_enabled": True,
-                "selling_enabled": True,
                 "fulfillment_enabled": False,
                 "seller_standards_enabled": False,
                 "feedback_enabled": True,
@@ -814,10 +806,69 @@ def test_options_flow_starts_reauth_when_scopes_missing() -> None:
             }
         )
     )
+    result = asyncio.run(flow.async_step_save())
 
     assert result["type"] == "create_entry"
     assert result["data"]["feedback_enabled"] is True
     assert len(started) == 1
+
+
+def test_options_flow_buying_alerts_rejects_unpinned_price_target() -> None:
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {},
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+        },
+    )()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    asyncio.run(flow.async_step_init())
+
+    result = asyncio.run(
+        flow.async_step_buying_alerts(
+            {
+                "buying_enabled": True,
+                "ending_soon_threshold": 60,
+                "watched_price_change_min_percent": 0,
+                "watched_price_drop_threshold": "",
+                "watched_price_drop_currency": "",
+                "pinned_item_price_targets": "999=10 USD",
+            }
+        )
+    )
+    assert result["type"] == "form"
+    assert result["errors"]["pinned_item_price_targets"] == "target_not_pinned"
+
+
+def test_options_flow_save_rejects_inconsistent_price_targets() -> None:
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {
+                "pinned_item_price_targets": "999=10 USD",
+                "pinned_item_ids": "",
+            },
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+        },
+    )()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    asyncio.run(flow.async_step_init())
+    result = asyncio.run(flow.async_step_save())
+    assert result["type"] == "form"
+    assert result["step_id"] == "save"
+    assert "pinned_item_price_targets" in result["errors"]
 
 
 def test_oauth_create_entry_stores_core_scopes(

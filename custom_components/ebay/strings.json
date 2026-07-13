@@ -65,36 +65,104 @@
     "step": {
       "init": {
         "title": "eBay options",
+        "menu_options": {
+          "general": "General",
+          "buying_alerts": "Buying and alerts",
+          "selling": "Selling",
+          "seller_operations": "Seller operations",
+          "entities": "Entities",
+          "diagnostics": "Diagnostics",
+          "save": "Save"
+        },
+        "menu_option_descriptions": {
+          "general": "Poll interval used as the base refresh cadence.",
+          "buying_alerts": "Watchlist, bidding, ending-soon timing, and price-drop alerts.",
+          "selling": "Active listings and optional Sell Analytics views.",
+          "seller_operations": "Orders, seller standards, feedback, and buyer messages.",
+          "entities": "How many per-item entities Home Assistant creates.",
+          "diagnostics": "Where to find diagnostic entities, Repairs, and refresh behavior.",
+          "save": "Apply all section changes. May start reauthorization if new scopes are needed."
+        }
+      },
+      "general": {
+        "title": "General",
+        "description": "Buying, selling, and active orders refresh on this poll interval. Messages refresh less often; feedback and analytics hourly; seller standards daily.",
         "data": {
-          "poll_interval": "Poll interval in minutes",
+          "poll_interval": "Poll interval in minutes"
+        },
+        "data_description": {
+          "poll_interval": "Base refresh cadence (5\u20131440 minutes). Slower sections such as feedback, analytics, and seller standards refresh on longer fixed schedules."
+        }
+      },
+      "buying_alerts": {
+        "title": "Buying and alerts",
+        "description": "These settings apply mainly when Buying is enabled. Price-drop targets also need matching pinned item IDs under Entities.",
+        "data": {
+          "buying_enabled": "Enable buying and watch data",
           "ending_soon_threshold": "Ending-soon threshold in minutes",
-          "entity_mode": "Per-item entity mode",
-          "per_item_cap": "Tracked item cap",
-          "pinned_item_ids": "Pinned item IDs",
-          "pinned_item_price_targets": "Pinned item price-drop targets",
           "watched_price_change_min_percent": "Minimum watched price change percent",
           "watched_price_drop_threshold": "Global watched price-drop threshold",
           "watched_price_drop_currency": "Global watched price-drop currency",
-          "analytics_enabled": "Enable Sell Analytics 30-day views",
-          "buying_enabled": "Enable buying and watch data",
+          "pinned_item_price_targets": "Pinned item price-drop targets"
+        },
+        "data_description": {
+          "buying_enabled": "Fetches watchlist and bidding items from eBay. Disable to stop buying API calls and related entities.",
+          "ending_soon_threshold": "How soon before an item ends it counts as ending soon for sensors, calendars, and events. Most useful when Buying is enabled.",
+          "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change. Requires Buying.",
+          "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency. Requires Buying.",
+          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD). Requires Buying.",
+          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY. Item IDs must also appear in pinned item IDs under Entities. Per-item targets override the global threshold. Requires Buying."
+        }
+      },
+      "selling": {
+        "title": "Selling",
+        "description": "Active listing telemetry from the Trading API. {missing_scope_note}",
+        "data": {
           "selling_enabled": "Enable selling data",
+          "analytics_enabled": "Enable Sell Analytics 30-day views"
+        },
+        "data_description": {
+          "selling_enabled": "Fetches active listings, sold/unsold classification, Trading views, and best offers. Disable to stop selling API calls and related entities.",
+          "analytics_enabled": "Requires Selling (active listing IDs). Adds 30-day Sell Analytics views and may require OAuth reauthorization for the Sell Analytics scope."
+        }
+      },
+      "seller_operations": {
+        "title": "Seller operations",
+        "description": "Optional seller modules use additional OAuth scopes. Enabling a module without those scopes soft-fails until you reauthorize. {missing_scope_note}",
+        "data": {
           "fulfillment_enabled": "Enable orders and fulfillment data",
           "seller_standards_enabled": "Enable seller standards and service metrics",
           "feedback_enabled": "Enable feedback monitoring",
           "messages_enabled": "Enable buyer messages monitoring"
         },
         "data_description": {
-          "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
-          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY. Item IDs must also appear in pinned item IDs. Per-item targets override the global threshold.",
-          "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change.",
-          "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency.",
-          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD).",
-          "analytics_enabled": "Needs selling data (active listings) and may require OAuth reauthorization for Sell Analytics.",
-          "fulfillment_enabled": "Fetches paid orders, shipment status, and open payment disputes. May require OAuth reauthorization for Fulfillment scopes.",
-          "seller_standards_enabled": "Fetches seller level and customer-service metrics. May require OAuth reauthorization for Sell Analytics.",
+          "fulfillment_enabled": "Fetches paid orders, shipment status, and open payment disputes. May require OAuth reauthorization for Fulfillment and payment-dispute scopes.",
+          "seller_standards_enabled": "Fetches seller level, evaluation dates, and customer-service metrics. May require OAuth reauthorization for Sell Analytics.",
           "feedback_enabled": "Fetches feedback score and recent rating counts. May require OAuth reauthorization for Feedback.",
           "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages."
         }
+      },
+      "entities": {
+        "title": "Entities",
+        "description": "Controls how many per-item entities are created. Summary sensors for enabled features are always available.",
+        "data": {
+          "entity_mode": "Per-item entity mode",
+          "per_item_cap": "Tracked item cap",
+          "pinned_item_ids": "Pinned item IDs"
+        },
+        "data_description": {
+          "entity_mode": "minimal creates no per-item entities; balanced selects a capped set; detailed allows more listings within the cap. Summary sensors are unaffected.",
+          "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
+          "pinned_item_ids": "Comma-separated eBay item IDs that should always be included in the per-item selection when entity mode is not minimal. Also required for per-item price-drop targets."
+        }
+      },
+      "diagnostics": {
+        "title": "Diagnostics",
+        "description": "Persistent problems appear under Settings \u2192 Repairs (missing scopes, invalid Site ID, repeated partial failures, truncation).\n\nFor technical detail, enable the disabled-by-default diagnostic sensors on the eBay device and download integration diagnostics.\n\nRefresh cadence: buying/selling/orders use the poll interval; messages are slower; feedback and analytics are hourly; seller standards are daily. Manual refresh fetches every enabled section."
+      },
+      "save": {
+        "title": "Cannot save options",
+        "description": "Fix the price-alert or pinned-target errors below, then return to Buying and alerts or Entities before saving again. {missing_scope_note}"
       }
     },
     "error": {

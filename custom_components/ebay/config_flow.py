@@ -324,99 +324,275 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         return EbayOptionsFlow(config_entry)
 
 
+OPTIONS_MENU = [
+    "general",
+    "buying_alerts",
+    "selling",
+    "seller_operations",
+    "entities",
+    "diagnostics",
+    "save",
+]
+
+_MISSING_SCOPE_NOTE = "Reauthorization will be required when you save."
+
+
 class EbayOptionsFlow(config_entries.OptionsFlow):
-    """Handle eBay options."""
+    """Handle eBay options across menu sections."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
+        self._draft: dict[str, Any] | None = None
+
+    def _ensure_draft(self) -> dict[str, Any]:
+        """Return the in-memory options draft, seeding it on first use."""
+        if self._draft is None:
+            self._draft = {**DEFAULT_OPTIONS, **self._config_entry.options}
+        return self._draft
+
+    def _missing_scope_note(self, *feature_keys: str) -> str:
+        """Return a reauth hint when draft-enabled features lack granted scopes."""
+        draft = self._ensure_draft()
+        granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
+        missing = missing_scopes_for_options(granted, draft)
+        if any(draft.get(key) and key in missing for key in feature_keys):
+            return _MISSING_SCOPE_NOTE
+        return ""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Manage options."""
+        """Show the options section menu."""
+        self._ensure_draft()
+        return self.async_show_menu(step_id="init", menu_options=OPTIONS_MENU)
+
+    async def async_step_general(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit general polling options."""
+        draft = self._ensure_draft()
+        if user_input is not None:
+            draft.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="general",
+            data_schema=_schema_general(draft),
+        )
+
+    async def async_step_buying_alerts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit buying and price-alert options."""
+        draft = self._ensure_draft()
         errors: dict[str, str] = {}
         if user_input is not None:
-            data = dict(user_input)
-            errors = validate_price_options(data)
+            candidate = {**draft, **user_input}
+            errors = validate_price_options(candidate)
             if not errors:
-                result = self.async_create_entry(title="", data=data)
-                granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
-                if missing_scopes_for_options(granted, data):
-                    self.hass.async_create_task(
-                        self.hass.config_entries.flow.async_init(
-                            DOMAIN,
-                            context={
-                                "source": config_entries.SOURCE_REAUTH,
-                                "entry_id": self._config_entry.entry_id,
-                            },
-                            data=self._config_entry.data,
-                        )
-                    )
-                return result
-
-        options = {**DEFAULT_OPTIONS, **self._config_entry.options}
-        if user_input is not None:
-            options = {**options, **user_input}
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_POLL_INTERVAL, default=options[CONF_POLL_INTERVAL]
-                ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
-                vol.Required(
-                    CONF_ENDING_SOON_THRESHOLD,
-                    default=options[CONF_ENDING_SOON_THRESHOLD],
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
-                vol.Required(
-                    CONF_ENTITY_MODE, default=options[CONF_ENTITY_MODE]
-                ): vol.In(ENTITY_MODES),
-                vol.Required(
-                    CONF_PER_ITEM_CAP, default=options[CONF_PER_ITEM_CAP]
-                ): vol.In(ALLOWED_PER_ITEM_CAPS),
-                vol.Optional(
-                    CONF_PINNED_ITEM_IDS, default=options[CONF_PINNED_ITEM_IDS]
-                ): str,
-                vol.Optional(
-                    CONF_PINNED_ITEM_PRICE_TARGETS,
-                    default=options.get(CONF_PINNED_ITEM_PRICE_TARGETS, ""),
-                ): str,
-                vol.Optional(
-                    CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
-                    default=options.get(CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT, 0),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
-                vol.Optional(
-                    CONF_WATCHED_PRICE_DROP_THRESHOLD,
-                    default=options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, ""),
-                ): str,
-                vol.Optional(
-                    CONF_WATCHED_PRICE_DROP_CURRENCY,
-                    default=options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, ""),
-                ): str,
-                vol.Required(
-                    CONF_ANALYTICS_ENABLED, default=options[CONF_ANALYTICS_ENABLED]
-                ): bool,
-                vol.Required(
-                    CONF_BUYING_ENABLED, default=options[CONF_BUYING_ENABLED]
-                ): bool,
-                vol.Required(
-                    CONF_SELLING_ENABLED, default=options[CONF_SELLING_ENABLED]
-                ): bool,
-                vol.Required(
-                    CONF_FULFILLMENT_ENABLED,
-                    default=options[CONF_FULFILLMENT_ENABLED],
-                ): bool,
-                vol.Required(
-                    CONF_SELLER_STANDARDS_ENABLED,
-                    default=options[CONF_SELLER_STANDARDS_ENABLED],
-                ): bool,
-                vol.Required(
-                    CONF_FEEDBACK_ENABLED, default=options[CONF_FEEDBACK_ENABLED]
-                ): bool,
-                vol.Required(
-                    CONF_MESSAGES_ENABLED, default=options[CONF_MESSAGES_ENABLED]
-                ): bool,
-            }
+                draft.update(user_input)
+                return await self.async_step_init()
+            draft_for_form = candidate
+        else:
+            draft_for_form = draft
+        return self.async_show_form(
+            step_id="buying_alerts",
+            data_schema=_schema_buying_alerts(draft_for_form),
+            errors=errors,
         )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+
+    async def async_step_selling(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit selling and analytics options."""
+        draft = self._ensure_draft()
+        if user_input is not None:
+            draft.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="selling",
+            data_schema=_schema_selling(draft),
+            description_placeholders={
+                "missing_scope_note": self._missing_scope_note(CONF_ANALYTICS_ENABLED),
+            },
+        )
+
+    async def async_step_seller_operations(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit seller-operations module toggles."""
+        draft = self._ensure_draft()
+        if user_input is not None:
+            draft.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="seller_operations",
+            data_schema=_schema_seller_operations(draft),
+            description_placeholders={
+                "missing_scope_note": self._missing_scope_note(
+                    CONF_FULFILLMENT_ENABLED,
+                    CONF_SELLER_STANDARDS_ENABLED,
+                    CONF_FEEDBACK_ENABLED,
+                    CONF_MESSAGES_ENABLED,
+                ),
+            },
+        )
+
+    async def async_step_entities(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit per-item entity selection options."""
+        draft = self._ensure_draft()
+        if user_input is not None:
+            draft.update(user_input)
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="entities",
+            data_schema=_schema_entities(draft),
+        )
+
+    async def async_step_diagnostics(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show diagnostics guidance (no editable options)."""
+        self._ensure_draft()
+        if user_input is not None:
+            return await self.async_step_init()
+        return self.async_show_form(
+            step_id="diagnostics",
+            data_schema=vol.Schema({}),
+        )
+
+    async def async_step_save(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Validate the draft and persist options."""
+        draft = self._ensure_draft()
+        errors = validate_price_options(draft)
+        if errors:
+            return self.async_show_form(
+                step_id="save",
+                data_schema=vol.Schema({}),
+                errors=errors,
+                description_placeholders={
+                    "missing_scope_note": self._missing_scope_note(
+                        CONF_ANALYTICS_ENABLED,
+                        CONF_FULFILLMENT_ENABLED,
+                        CONF_SELLER_STANDARDS_ENABLED,
+                        CONF_FEEDBACK_ENABLED,
+                        CONF_MESSAGES_ENABLED,
+                    ),
+                },
+            )
+
+        result = self.async_create_entry(title="", data=dict(draft))
+        granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
+        if missing_scopes_for_options(granted, draft):
+            self.hass.async_create_task(
+                self.hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={
+                        "source": config_entries.SOURCE_REAUTH,
+                        "entry_id": self._config_entry.entry_id,
+                    },
+                    data=self._config_entry.data,
+                )
+            )
+        return result
+
+
+def _schema_general(options: dict[str, Any]) -> vol.Schema:
+    """Build the General options schema."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_POLL_INTERVAL, default=options[CONF_POLL_INTERVAL]
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
+        }
+    )
+
+
+def _schema_buying_alerts(options: dict[str, Any]) -> vol.Schema:
+    """Build the Buying and alerts options schema."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_BUYING_ENABLED, default=options[CONF_BUYING_ENABLED]
+            ): bool,
+            vol.Required(
+                CONF_ENDING_SOON_THRESHOLD,
+                default=options[CONF_ENDING_SOON_THRESHOLD],
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=1440)),
+            vol.Optional(
+                CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
+                default=options.get(CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT, 0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+            vol.Optional(
+                CONF_WATCHED_PRICE_DROP_THRESHOLD,
+                default=options.get(CONF_WATCHED_PRICE_DROP_THRESHOLD, ""),
+            ): str,
+            vol.Optional(
+                CONF_WATCHED_PRICE_DROP_CURRENCY,
+                default=options.get(CONF_WATCHED_PRICE_DROP_CURRENCY, ""),
+            ): str,
+            vol.Optional(
+                CONF_PINNED_ITEM_PRICE_TARGETS,
+                default=options.get(CONF_PINNED_ITEM_PRICE_TARGETS, ""),
+            ): str,
+        }
+    )
+
+
+def _schema_selling(options: dict[str, Any]) -> vol.Schema:
+    """Build the Selling options schema."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_SELLING_ENABLED, default=options[CONF_SELLING_ENABLED]
+            ): bool,
+            vol.Required(
+                CONF_ANALYTICS_ENABLED, default=options[CONF_ANALYTICS_ENABLED]
+            ): bool,
+        }
+    )
+
+
+def _schema_seller_operations(options: dict[str, Any]) -> vol.Schema:
+    """Build the Seller operations options schema."""
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_FULFILLMENT_ENABLED,
+                default=options[CONF_FULFILLMENT_ENABLED],
+            ): bool,
+            vol.Required(
+                CONF_SELLER_STANDARDS_ENABLED,
+                default=options[CONF_SELLER_STANDARDS_ENABLED],
+            ): bool,
+            vol.Required(
+                CONF_FEEDBACK_ENABLED, default=options[CONF_FEEDBACK_ENABLED]
+            ): bool,
+            vol.Required(
+                CONF_MESSAGES_ENABLED, default=options[CONF_MESSAGES_ENABLED]
+            ): bool,
+        }
+    )
+
+
+def _schema_entities(options: dict[str, Any]) -> vol.Schema:
+    """Build the Entities options schema."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_ENTITY_MODE, default=options[CONF_ENTITY_MODE]): vol.In(
+                ENTITY_MODES
+            ),
+            vol.Required(CONF_PER_ITEM_CAP, default=options[CONF_PER_ITEM_CAP]): vol.In(
+                ALLOWED_PER_ITEM_CAPS
+            ),
+            vol.Optional(
+                CONF_PINNED_ITEM_IDS, default=options[CONF_PINNED_ITEM_IDS]
+            ): str,
+        }
+    )
 
 
 def _normalize_credentials(

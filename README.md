@@ -83,10 +83,10 @@ watched item ending soon, overdue shipment, buyer question, and seller at risk).
 
 See **[docs/blueprints.md](docs/blueprints.md)** for import links and feature requirements.
 
-
 ## Configuration
 
-Options include:
+Options are grouped into sections (General, Buying and alerts, Selling, Seller
+operations, Entities, Diagnostics). They include:
 
 - Poll interval and ending-soon threshold
 - Minimal, balanced, or detailed per-item entity mode
