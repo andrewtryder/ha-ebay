@@ -15,7 +15,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_platform, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -23,10 +23,36 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import API_WARNINGS_STATE_ATTR_MAX
-from .const import DOMAIN, REFRESH_RESULT_UNKNOWN
+from .const import (
+    CONF_BUYING_ENABLED,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_SELLING_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
+    DEFAULT_OPTIONS,
+    DOMAIN,
+    REFRESH_RESULT_UNKNOWN,
+)
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
 _LOGGER = logging.getLogger(__name__)
+
+SELLER_LEVEL_OPTIONS = [
+    "TOP_RATED",
+    "ABOVE_STANDARD",
+    "BELOW_STANDARD",
+]
+
+CUSTOMER_SERVICE_RATING_OPTIONS = [
+    "VERY_HIGH",
+    "HIGH",
+    "AVERAGE",
+    "LOW",
+    "VERY_LOW",
+    "ABOVE_STANDARD",
+    "BELOW_STANDARD",
+]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -34,6 +60,7 @@ class EbaySummarySensorDescription(SensorEntityDescription):
     """Describe a summary sensor."""
 
     value_key: str
+    feature: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,166 +76,282 @@ SUMMARY_SENSORS = [
         key="active_selling_items",
         translation_key="active_selling_items",
         value_key="active_selling_items",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
-        key="watched_items", translation_key="watched_items", value_key="watched_items"
+        key="watched_items",
+        translation_key="watched_items",
+        value_key="watched_items",
+        feature=CONF_BUYING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
-        key="bidding_items", translation_key="bidding_items", value_key="bidding_items"
+        key="bidding_items",
+        translation_key="bidding_items",
+        value_key="bidding_items",
+        feature=CONF_BUYING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="selling_total_bids",
         translation_key="selling_total_bids",
         value_key="selling_total_bids",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="selling_total_offers",
         translation_key="selling_total_offers",
         value_key="selling_total_offers",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="active_listings_quantity_sold",
         translation_key="active_listings_quantity_sold",
         value_key="active_listings_quantity_sold",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    EbaySummarySensorDescription(
+        key="sold_items_count",
+        translation_key="sold_items_count",
+        value_key="sold_items_count",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    EbaySummarySensorDescription(
+        key="unsold_items_count",
+        translation_key="unsold_items_count",
+        value_key="unsold_items_count",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="selling_total_watchers",
         translation_key="selling_total_watchers",
         value_key="selling_total_watchers",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="selling_total_views",
         translation_key="selling_total_views",
         value_key="selling_total_views",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="watched_ending_soon",
         translation_key="watched_ending_soon",
         value_key="watched_ending_soon",
+        feature=CONF_BUYING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="selling_ending_soon",
         translation_key="selling_ending_soon",
         value_key="selling_ending_soon",
+        feature=CONF_SELLING_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="orders_awaiting_shipment",
         translation_key="orders_awaiting_shipment",
         value_key="orders_awaiting_shipment",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="orders_shipping_today",
         translation_key="orders_shipping_today",
         value_key="orders_shipping_today",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="orders_overdue",
         translation_key="orders_overdue",
         value_key="orders_overdue",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="orders_shipped",
         translation_key="orders_shipped",
         value_key="orders_shipped",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="orders_partially_fulfilled",
         translation_key="orders_partially_fulfilled",
         value_key="orders_partially_fulfilled",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="open_payment_disputes",
         translation_key="open_payment_disputes",
         value_key="open_payment_disputes",
+        feature=CONF_FULFILLMENT_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="seller_level",
         translation_key="seller_level",
         value_key="seller_level",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
+        device_class=SensorDeviceClass.ENUM,
+        options=SELLER_LEVEL_OPTIONS,
     ),
     EbaySummarySensorDescription(
         key="transaction_defect_rate",
         translation_key="transaction_defect_rate",
         value_key="transaction_defect_rate",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="late_shipment_rate",
         translation_key="late_shipment_rate",
         value_key="late_shipment_rate",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="cases_closed_without_seller_resolution",
         translation_key="cases_closed_without_seller_resolution",
         value_key="cases_closed_without_seller_resolution",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="item_not_received_metric",
         translation_key="item_not_received_metric",
         value_key="item_not_received_metric",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        device_class=SensorDeviceClass.ENUM,
+        options=CUSTOMER_SERVICE_RATING_OPTIONS,
     ),
     EbaySummarySensorDescription(
         key="item_not_as_described_metric",
         translation_key="item_not_as_described_metric",
         value_key="item_not_as_described_metric",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        device_class=SensorDeviceClass.ENUM,
+        options=CUSTOMER_SERVICE_RATING_OPTIONS,
     ),
     EbaySummarySensorDescription(
         key="seller_next_evaluation_date",
         translation_key="seller_next_evaluation_date",
         value_key="seller_next_evaluation_date",
+        feature=CONF_SELLER_STANDARDS_ENABLED,
         entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        device_class=SensorDeviceClass.TIMESTAMP,
     ),
     EbaySummarySensorDescription(
         key="feedback_score",
         translation_key="feedback_score",
         value_key="feedback_score",
+        feature=CONF_FEEDBACK_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="positive_feedback_percent",
         translation_key="positive_feedback_percent",
         value_key="positive_feedback_percent",
+        feature=CONF_FEEDBACK_ENABLED,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="recent_positive_feedback",
         translation_key="recent_positive_feedback",
         value_key="recent_positive_feedback",
+        feature=CONF_FEEDBACK_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="recent_neutral_feedback",
         translation_key="recent_neutral_feedback",
         value_key="recent_neutral_feedback",
+        feature=CONF_FEEDBACK_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="recent_negative_feedback",
         translation_key="recent_negative_feedback",
         value_key="recent_negative_feedback",
+        feature=CONF_FEEDBACK_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="items_awaiting_feedback",
         translation_key="items_awaiting_feedback",
         value_key="items_awaiting_feedback",
+        feature=CONF_FEEDBACK_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="unread_conversations",
         translation_key="unread_conversations",
         value_key="unread_conversations",
+        feature=CONF_MESSAGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
     ),
     EbaySummarySensorDescription(
         key="buyer_question_conversations",
         translation_key="buyer_question_conversations",
         value_key="buyer_question_conversations",
+        feature=CONF_MESSAGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
         key="oldest_unanswered_message_hours",
         translation_key="oldest_unanswered_message_hours",
         value_key="oldest_unanswered_message_hours",
+        feature=CONF_MESSAGES_ENABLED,
         native_unit_of_measurement=UnitOfTime.HOURS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
     ),
 ]
+
+
+def summary_sensors_for_options(
+    options: dict[str, Any],
+) -> list[EbaySummarySensorDescription]:
+    """Return summary sensors whose feature group is enabled."""
+    merged = {**DEFAULT_OPTIONS, **options}
+    return [
+        description
+        for description in SUMMARY_SENSORS
+        if description.feature is None or bool(merged.get(description.feature))
+    ]
 
 
 def _truncated_collection_names(coordinator: EbayDataUpdateCoordinator) -> list[str]:
@@ -418,7 +561,7 @@ async def async_setup_entry(
     )
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
-        for description in SUMMARY_SENSORS
+        for description in summary_sensors_for_options(coordinator.options)
     ]
     entities.extend(
         EbayDiagnosticSensor(coordinator, entry, description)
@@ -543,9 +686,28 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
         }
 
     @property
-    def native_value(self) -> int | None:
+    def native_value(self) -> StateType | datetime:
         """Return the summary value."""
-        return self.coordinator.data["summary"].get(self.entity_description.value_key)
+        value = self.coordinator.data["summary"].get(self.entity_description.value_key)
+        if (
+            self.entity_description.device_class == SensorDeviceClass.TIMESTAMP
+            and isinstance(value, str)
+        ):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        if (
+            self.entity_description.device_class == SensorDeviceClass.ENUM
+            and value is not None
+        ):
+            text = str(value)
+            options = self.entity_description.options or []
+            if options and text not in options:
+                # Keep unknown eBay enums visible rather than dropping the state.
+                return text
+            return text
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_SELLER_STANDARDS_ENABLED, DEFAULT_OPTIONS, DOMAIN
 from .coordinator import EbayDataUpdateCoordinator
 
 SELLER_AT_RISK = BinarySensorEntityDescription(
@@ -29,6 +29,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up eBay binary sensors."""
     coordinator: EbayDataUpdateCoordinator = entry.runtime_data
+    options = {**DEFAULT_OPTIONS, **coordinator.options}
+    if not options.get(CONF_SELLER_STANDARDS_ENABLED):
+        return
     async_add_entities([EbaySellerAtRiskBinarySensor(coordinator, entry)])
 
 

@@ -434,6 +434,86 @@ def test_selling_disappearance_emits_unknown() -> None:
     assert events == ["item_disappeared_unknown"]
 
 
+def test_selling_disappearance_classifies_sold_and_unsold() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {
+            "sold1": {"item_id": "sold1", "title": "Sold"},
+            "unsold1": {"item_id": "unsold1", "title": "Unsold"},
+            "gone": {"item_id": "gone", "title": "Unknown"},
+        },
+        {},
+        classification={"sold1": "sold", "unsold1": "unsold"},
+        previous_sold_ids=set(),
+        current_sold_ids={"sold1"},
+        suppress_disappearance=False,
+    )
+    assert events == ["item_sold", "item_ended_unsold", "item_disappeared_unknown"]
+
+
+def test_selling_sold_disappearance_does_not_double_fire_sale_completed() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {"sold1": {"item_id": "sold1", "title": "Sold"}},
+        {},
+        classification={"sold1": "sold"},
+        previous_sold_ids=set(),
+        current_sold_ids={"sold1"},
+        suppress_disappearance=False,
+    )
+    assert events == ["item_sold"]
+
+
+def test_selling_sale_completed_for_new_sold_list_member() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {"active": {"item_id": "active", "title": "Still active"}},
+        {"active": {"item_id": "active", "title": "Still active"}},
+        classification={"new_sold": "sold"},
+        previous_sold_ids=set(),
+        current_sold_ids={"new_sold"},
+        suppress_disappearance=False,
+    )
+    assert events == ["item_sale_completed"]
+
+
+def test_selling_sale_completed_skipped_without_previous_baseline() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {},
+        {},
+        classification={"new_sold": "sold"},
+        previous_sold_ids=None,
+        current_sold_ids={"new_sold"},
+        suppress_disappearance=False,
+    )
+    assert events == []
+
+
+def test_selling_incomplete_classification_keeps_unknown() -> None:
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["selling"] = lambda et, ed: events.append(et)
+    coordinator._detect_selling_events(
+        {"s1": {"item_id": "s1", "title": "Gone"}},
+        {},
+        classification={"s1": "sold"},
+        classification_incomplete=True,
+        previous_sold_ids=set(),
+        current_sold_ids={"s1"},
+        suppress_disappearance=False,
+    )
+    assert events == ["item_disappeared_unknown"]
+
+
 def test_truncated_snapshot_suppresses_disappearance_events() -> None:
     coordinator = _coordinator()
     events: list[tuple[str, str]] = []

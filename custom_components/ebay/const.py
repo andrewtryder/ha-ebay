@@ -67,13 +67,13 @@ DEFAULT_OPTIONS = {
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: DEFAULT_WATCHED_PRICE_CHANGE_MIN_PERCENT,
     CONF_WATCHED_PRICE_DROP_THRESHOLD: "",
     CONF_WATCHED_PRICE_DROP_CURRENCY: "",
-    CONF_ANALYTICS_ENABLED: True,
+    CONF_ANALYTICS_ENABLED: False,
     CONF_BUYING_ENABLED: True,
     CONF_SELLING_ENABLED: True,
-    CONF_FULFILLMENT_ENABLED: True,
-    CONF_SELLER_STANDARDS_ENABLED: True,
-    CONF_FEEDBACK_ENABLED: True,
-    CONF_MESSAGES_ENABLED: True,
+    CONF_FULFILLMENT_ENABLED: False,
+    CONF_SELLER_STANDARDS_ENABLED: False,
+    CONF_FEEDBACK_ENABLED: False,
+    CONF_MESSAGES_ENABLED: False,
 }
 
 PLATFORMS = ["sensor", "binary_sensor", "event", "calendar", "button"]
@@ -91,6 +91,9 @@ SELLING_EVENT_TYPES = [
     "question_received",
     "watcher_count_increased",
     "quantity_sold_increased",
+    "item_sold",
+    "item_ended_unsold",
+    "item_sale_completed",
     "item_disappeared_unknown",
 ]
 

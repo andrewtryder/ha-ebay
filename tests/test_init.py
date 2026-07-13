@@ -160,11 +160,24 @@ def test_migrate_v3_to_v4_clears_oauth_scopes() -> None:
     assert CONF_OAUTH_SCOPES not in entry.data
 
 
-def test_async_setup_entry_requires_current_oauth_scopes() -> None:
+def test_async_setup_entry_requires_core_oauth_scope() -> None:
     hass = Mock()
     entry = _mock_entry(data=_entry_data(oauth_scopes="stale"))
     with pytest.raises(ConfigEntryAuthFailed):
         asyncio.run(ebay_integration.async_setup_entry(hass, entry))
+
+
+def test_async_setup_entry_accepts_core_only_oauth_scopes() -> None:
+    from custom_components.ebay.api import CORE_SCOPE
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock()
+    entry = _mock_entry(data=_entry_data(**{CONF_OAUTH_SCOPES: CORE_SCOPE}))
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
 
 
 def test_migrate_v2_renames_legacy_sensor_unique_ids(

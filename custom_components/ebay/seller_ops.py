@@ -47,17 +47,21 @@ def marketplace_id_for_site(site_id: str) -> str:
 
 
 def empty_seller_ops() -> dict[str, Any]:
-    """Return an empty seller-ops payload section."""
+    """Return an empty seller-ops payload section.
+
+    Count fields use None until a successful fetch so disabled/unfetched
+    features are not confused with genuine zeros.
+    """
     return {
         "orders": {
-            "awaiting_shipment": 0,
-            "shipping_today": 0,
-            "overdue": 0,
-            "shipped": 0,
-            "partially_fulfilled": 0,
+            "awaiting_shipment": None,
+            "shipping_today": None,
+            "overdue": None,
+            "shipped": None,
+            "partially_fulfilled": None,
             "by_id": {},
         },
-        "disputes": {"open_count": 0, "by_id": {}},
+        "disputes": {"open_count": None, "by_id": {}},
         "standards": {
             "seller_level": None,
             "program": None,
@@ -66,22 +70,22 @@ def empty_seller_ops() -> dict[str, Any]:
             "cases_closed_without_seller_resolution": None,
             "item_not_received_rating": None,
             "item_not_as_described_rating": None,
-            "item_not_received_above_benchmark": False,
-            "item_not_as_described_above_benchmark": False,
+            "item_not_received_above_benchmark": None,
+            "item_not_as_described_above_benchmark": None,
             "next_evaluation_date": None,
-            "at_risk": False,
+            "at_risk": None,
         },
         "feedback": {
             "score": None,
             "positive_percent": None,
-            "recent_positive": 0,
-            "recent_neutral": 0,
-            "recent_negative": 0,
-            "awaiting_count": 0,
+            "recent_positive": None,
+            "recent_neutral": None,
+            "recent_negative": None,
+            "awaiting_count": None,
         },
         "messages": {
-            "unread_count": 0,
-            "buyer_question_count": 0,
+            "unread_count": None,
+            "buyer_question_count": None,
             "oldest_unanswered_hours": None,
             "by_id": {},
         },

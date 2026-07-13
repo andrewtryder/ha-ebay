@@ -12,6 +12,7 @@ import pytest
 
 from custom_components.ebay.api import (
     BEST_OFFERS_CALL_NAME,
+    DEFAULT_SCOPE,
     EBAY_XML_NS,
     MAX_PAGES,
     READ_ONLY_CALL_NAME,
@@ -381,6 +382,25 @@ def test_core_pagination_truncation_is_reported() -> None:
                     """
                 )
             if call_name == SELLING_CALL_NAME:
+                if "<Sort>EndTime</Sort>" not in xml_body:
+                    if (
+                        "<Include>true</Include>"
+                        in xml_body.split("<SoldList>", 1)[1].split("</SoldList>", 1)[0]
+                    ):
+                        list_name = "SoldList"
+                    else:
+                        list_name = "UnsoldList"
+                    return _root(
+                        f"""
+                        <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                          <Ack>Success</Ack>
+                          <{list_name}>
+                            <PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>
+                            <ItemArray/>
+                          </{list_name}>
+                        </GetMyeBaySellingResponse>
+                        """
+                    )
                 return _root(
                     f"""
                     <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
@@ -425,7 +445,7 @@ def test_core_pagination_truncation_is_reported() -> None:
     payload = asyncio.run(run())
 
     assert call_counts[READ_ONLY_CALL_NAME] == MAX_PAGES
-    assert call_counts[SELLING_CALL_NAME] == MAX_PAGES
+    assert call_counts[SELLING_CALL_NAME] == MAX_PAGES + 2
     assert call_counts[SELLER_LIST_CALL_NAME] == MAX_PAGES
     assert len(payload["watched"]) == MAX_PAGES
     assert len(payload["selling"]) == MAX_PAGES
@@ -443,6 +463,7 @@ def test_core_pagination_truncation_is_reported() -> None:
         "orders": False,
         "payment_disputes": False,
         "messages": False,
+        "sold_unsold": False,
     }
 
 
@@ -497,6 +518,7 @@ def test_optional_analytics_errors_become_partial_failure() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     payload = asyncio.run(run())
@@ -555,6 +577,7 @@ def test_analytics_auth_error_propagates_from_fetch_data() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     with pytest.raises(EbayAuthError, match="analytics auth failed"):
@@ -687,6 +710,7 @@ def test_analytics_views_do_not_overwrite_seller_list_views() -> None:
             selling_enabled=True,
             analytics_enabled=True,
             ending_soon_threshold_seconds=3600,
+            granted_scopes=DEFAULT_SCOPE,
         )
 
     payload = asyncio.run(run())
@@ -794,3 +818,201 @@ def test_fetch_data_paginates_best_offers() -> None:
     assert len(best_offer_calls) == 2
     assert "<PageNumber>1</PageNumber>" in best_offer_calls[0]
     assert "<PageNumber>2</PageNumber>" in best_offer_calls[1]
+
+
+def test_parse_sold_unsold_classification_prefers_sold() -> None:
+    from custom_components.ebay.api import parse_sold_unsold_classification
+
+    root = _root(
+        f"""
+        <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+          <Ack>Success</Ack>
+          <SoldList>
+            <ItemArray>
+              <Item><ItemID>both</ItemID></Item>
+              <Item><ItemID>sold-only</ItemID></Item>
+            </ItemArray>
+          </SoldList>
+          <UnsoldList>
+            <ItemArray>
+              <Item><ItemID>both</ItemID></Item>
+              <Item><ItemID>unsold-only</ItemID></Item>
+            </ItemArray>
+          </UnsoldList>
+        </GetMyeBaySellingResponse>
+        """
+    )
+    classified = parse_sold_unsold_classification(root)
+    assert classified == {
+        "both": "sold",
+        "sold-only": "sold",
+        "unsold-only": "unsold",
+    }
+
+
+def test_build_selling_list_xml_includes_duration() -> None:
+    from custom_components.ebay.api import (
+        SOLD_UNSOLD_DURATION_DAYS,
+        build_get_my_ebay_selling_list_xml,
+    )
+
+    sold_xml = build_get_my_ebay_selling_list_xml("SoldList", page=2)
+    assert "<SoldList>" in sold_xml
+    assert "<Include>true</Include>" in sold_xml
+    assert f"<DurationInDays>{SOLD_UNSOLD_DURATION_DAYS}</DurationInDays>" in sold_xml
+    assert "<PageNumber>2</PageNumber>" in sold_xml
+    assert "<UnsoldList><Include>false</Include></UnsoldList>" in sold_xml
+
+
+def test_sold_unsold_classification_fetch_soft_fails() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name != SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <{call_name}Response xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                    </{call_name}Response>
+                    """
+                )
+            if "<Sort>EndTime</Sort>" in xml_body:
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <ActiveList><ItemArray><Item>
+                        <ItemID>s1</ItemID><Title>Sell</Title>
+                        <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                      </Item></ItemArray></ActiveList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            raise EbayApiError("classification unavailable")
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+    assert "s1" in payload["selling"]
+    assert "sold_unsold_classification" in payload["partial_failures"]
+    assert payload["summary"]["sold_items_count"] is None
+    assert payload["selling_classification"] == {}
+
+
+def test_sold_unsold_classification_fetch_counts() -> None:
+    end_time = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+
+        async def async_call_trading_api(
+            self, call_name: str, xml_body: str
+        ) -> ET.Element:
+            if call_name != SELLING_CALL_NAME:
+                return _root(
+                    f"""
+                    <{call_name}Response xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                    </{call_name}Response>
+                    """
+                )
+            if (
+                "<SoldList>" in xml_body
+                and "<Include>true</Include>"
+                in xml_body.split("<SoldList>")[1].split("</SoldList>")[0]
+            ):
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <SoldList>
+                        <PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>
+                        <ItemArray>
+                          <Item><ItemID>sold1</ItemID></Item>
+                          <Item><ItemID>sold2</ItemID></Item>
+                        </ItemArray>
+                      </SoldList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            if (
+                "<UnsoldList>" in xml_body
+                and "<Include>true</Include>"
+                in xml_body.split("<UnsoldList>")[1].split("</UnsoldList>")[0]
+            ):
+                return _root(
+                    f"""
+                    <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                      <Ack>Success</Ack>
+                      <UnsoldList>
+                        <PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>
+                        <ItemArray>
+                          <Item><ItemID>unsold1</ItemID></Item>
+                        </ItemArray>
+                      </UnsoldList>
+                    </GetMyeBaySellingResponse>
+                    """
+                )
+            return _root(
+                f"""
+                <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
+                  <Ack>Success</Ack>
+                  <ActiveList><ItemArray><Item>
+                    <ItemID>s1</ItemID><Title>Sell</Title>
+                    <ListingDetails><EndTime>{end_time}</EndTime></ListingDetails>
+                  </Item></ItemArray></ActiveList>
+                </GetMyeBaySellingResponse>
+                """
+            )
+
+    async def run() -> dict[str, object]:
+        return await Client().async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=False,
+            ending_soon_threshold_seconds=3600,
+        )
+
+    payload = asyncio.run(run())
+    assert payload["summary"]["sold_items_count"] == 2
+    assert payload["summary"]["unsold_items_count"] == 1
+    assert payload["selling_classification"] == {
+        "sold1": "sold",
+        "sold2": "sold",
+        "unsold1": "unsold",
+    }
+    assert payload["sold_item_ids"] == ["sold1", "sold2"]
+    assert payload["unsold_item_ids"] == ["unsold1"]

@@ -24,6 +24,7 @@ from .const import (
     CONF_FEEDBACK_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
+    CONF_OAUTH_SCOPES,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
@@ -60,6 +61,7 @@ COLLECTION_BY_EVENT_KIND = {
 }
 
 _BASELINE_COLLECTIONS = ("watched", "bidding", "selling")
+_BASELINE_ID_LISTS = ("sold_item_ids", "unsold_item_ids")
 
 
 def _duration_ms(start: float) -> float:
@@ -232,6 +234,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 feedback_enabled=feedback_enabled,
                 messages_enabled=messages_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
+                granted_scopes=self.entry.data.get(CONF_OAUTH_SCOPES),
             )
         except EbayAuthError as exc:
             self._record_refresh_attempt(
@@ -266,6 +269,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload["summary"]["partial_failures"] = payload["partial_failures"]
         payload["summary"]["truncated_collections"] = payload.get(
             "truncated_collections", {}
+        )
+        payload["summary"]["missing_scopes"] = payload.get("missing_scopes", {})
+        payload["summary"]["missing_scope_features"] = payload.get(
+            "missing_scope_features", []
         )
         warnings = payload.get("api_warnings") or []
         payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]
@@ -444,9 +451,19 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         if previous is None:
             return
+        previous_sold_ids_raw = previous.get("sold_item_ids")
         self._detect_selling_events(
             previous["selling"],
             current["selling"],
+            classification=current.get("selling_classification") or {},
+            previous_sold_ids=(
+                None if previous_sold_ids_raw is None else set(previous_sold_ids_raw)
+            ),
+            current_sold_ids=set(current.get("sold_item_ids") or []),
+            classification_incomplete=_collection_truncated(
+                previous, current, "sold_unsold"
+            )
+            or "sold_unsold_classification" in (current.get("partial_failures") or []),
             suppress_incomplete=_collection_truncated(previous, current, "selling"),
         )
         self._detect_watching_events(
@@ -472,11 +489,19 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous: dict[str, dict[str, Any]],
         current: dict[str, dict[str, Any]],
         *,
+        classification: dict[str, str] | None = None,
+        previous_sold_ids: set[str] | None = None,
+        current_sold_ids: set[str] | None = None,
+        classification_incomplete: bool = False,
         suppress_incomplete: bool = False,
         suppress_disappearance: bool | None = None,
     ) -> None:
         if suppress_disappearance is None:
             suppress_disappearance = suppress_incomplete
+        classification = classification or {}
+        current_sold_ids = current_sold_ids or set()
+        sold_via_disappearance: set[str] = set()
+
         for item_id, item in current.items():
             old = previous.get(item_id)
             if not old:
@@ -496,11 +521,32 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._emit_if_increased(
                 "selling", "quantity_sold_increased", old, item, "quantity_sold"
             )
-        if suppress_disappearance:
+        if not suppress_disappearance:
+            for item_id, old in previous.items():
+                if item_id in current:
+                    continue
+                status = classification.get(item_id)
+                if classification_incomplete or status is None:
+                    self._emit("selling", "item_disappeared_unknown", old)
+                elif status == "sold":
+                    self._emit("selling", "item_sold", old)
+                    sold_via_disappearance.add(item_id)
+                elif status == "unsold":
+                    self._emit("selling", "item_ended_unsold", old)
+                else:
+                    self._emit("selling", "item_disappeared_unknown", old)
+
+        if (
+            classification_incomplete
+            or suppress_incomplete
+            or previous_sold_ids is None
+        ):
             return
-        for item_id, old in previous.items():
-            if item_id not in current:
-                self._emit("selling", "item_disappeared_unknown", old)
+        for item_id in sorted(current_sold_ids - previous_sold_ids):
+            if item_id in sold_via_disappearance:
+                continue
+            item = current.get(item_id) or previous.get(item_id) or {"item_id": item_id}
+            self._emit("selling", "item_sale_completed", item)
 
     def _detect_watching_events(
         self,
@@ -1094,6 +1140,14 @@ def _baseline_payload(
             merged = dict(previous.get(key, {}))
             merged.update(current.get(key, {}))
             baseline[key] = merged
+    if truncated.get("sold_unsold"):
+        for key in _BASELINE_ID_LISTS:
+            previous_ids = set(previous.get(key) or [])
+            current_ids = set(current.get(key) or [])
+            baseline[key] = sorted(previous_ids | current_ids)
+        previous_classification = dict(previous.get("selling_classification") or {})
+        previous_classification.update(current.get("selling_classification") or {})
+        baseline["selling_classification"] = previous_classification
     return baseline
 
 

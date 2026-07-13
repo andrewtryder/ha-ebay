@@ -14,7 +14,17 @@ import xml.etree.ElementTree as ET
 
 import aiohttp
 
-from .const import COMPATIBILITY_LEVEL, EBAY_XML_NS, ENV_SANDBOX, NS
+from .const import (
+    COMPATIBILITY_LEVEL,
+    CONF_ANALYTICS_ENABLED,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
+    EBAY_XML_NS,
+    ENV_SANDBOX,
+    NS,
+)
 from .oauth_errors import (
     OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
@@ -57,14 +67,92 @@ BEST_OFFERS_CALL_NAME = "GetBestOffers"
 BEST_OFFERS_ENTRIES_PER_PAGE = 200
 BEST_OFFERS_MAX_PAGES = 25
 
-DEFAULT_SCOPE = (
-    "https://api.ebay.com/oauth/api_scope "
-    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.payment.dispute "
-    "https://api.ebay.com/oauth/api_scope/commerce.feedback "
-    "https://api.ebay.com/oauth/api_scope/commerce.message"
+CORE_SCOPE = "https://api.ebay.com/oauth/api_scope"
+SCOPE_ANALYTICS_READONLY = (
+    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
 )
+SCOPE_FULFILLMENT_READONLY = (
+    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+)
+SCOPE_PAYMENT_DISPUTE = "https://api.ebay.com/oauth/api_scope/sell.payment.dispute"
+SCOPE_FEEDBACK = "https://api.ebay.com/oauth/api_scope/commerce.feedback"
+SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
+
+MODULE_SCOPES: dict[str, tuple[str, ...]] = {
+    CONF_ANALYTICS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
+    CONF_SELLER_STANDARDS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
+    CONF_FULFILLMENT_ENABLED: (SCOPE_FULFILLMENT_READONLY, SCOPE_PAYMENT_DISPUTE),
+    CONF_FEEDBACK_ENABLED: (SCOPE_FEEDBACK,),
+    CONF_MESSAGES_ENABLED: (SCOPE_MESSAGE,),
+}
+
+ALL_OPTIONAL_SCOPES = (
+    SCOPE_ANALYTICS_READONLY,
+    SCOPE_FULFILLMENT_READONLY,
+    SCOPE_PAYMENT_DISPUTE,
+    SCOPE_FEEDBACK,
+    SCOPE_MESSAGE,
+)
+
+
+def parse_scope_set(scopes: str | None) -> set[str]:
+    """Parse a space-delimited OAuth scope string into a set."""
+    if not scopes:
+        return set()
+    return {scope for scope in scopes.split() if scope}
+
+
+def join_scopes(scopes: list[str] | tuple[str, ...] | set[str]) -> str:
+    """Join scopes into a stable space-delimited string."""
+    if isinstance(scopes, set):
+        ordered = sorted(scopes)
+    else:
+        ordered = list(dict.fromkeys(scopes))
+    return " ".join(ordered)
+
+
+def scopes_for_options(options: dict[str, Any]) -> str:
+    """Return the OAuth scope string required by enabled feature options."""
+    scopes: list[str] = [CORE_SCOPE]
+    for option_key, option_scopes in MODULE_SCOPES.items():
+        if options.get(option_key):
+            scopes.extend(option_scopes)
+    return join_scopes(scopes)
+
+
+def missing_scopes_for_options(
+    granted: str | set[str] | None, options: dict[str, Any]
+) -> dict[str, list[str]]:
+    """Return enabled modules whose required scopes are not all granted."""
+    granted_set = granted if isinstance(granted, set) else parse_scope_set(granted)
+    missing: dict[str, list[str]] = {}
+    for option_key, option_scopes in MODULE_SCOPES.items():
+        if not options.get(option_key):
+            continue
+        absent = [scope for scope in option_scopes if scope not in granted_set]
+        if absent:
+            missing[option_key] = absent
+    return missing
+
+
+def resolve_granted_scopes(requested: str, token: dict[str, Any] | None = None) -> str:
+    """Prefer scopes returned by eBay; otherwise store the requested set."""
+    if token:
+        returned = token.get("scope")
+        if isinstance(returned, str) and returned.strip():
+            return join_scopes(parse_scope_set(returned))
+    return join_scopes(parse_scope_set(requested))
+
+
+def has_core_scope(scopes: str | None) -> bool:
+    """Return True when the stored grant includes the core Trading API scope."""
+    return CORE_SCOPE in parse_scope_set(scopes)
+
+
+# Full union retained for docs/tests; routine authorize uses CORE_SCOPE or
+# scopes_for_options().
+DEFAULT_SCOPE = join_scopes((CORE_SCOPE, *ALL_OPTIONAL_SCOPES))
+
 TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 MAX_PAGES = 20
 ANALYTICS_BATCH_SIZE = 100
@@ -143,7 +231,7 @@ def build_consent_url(
     client_id: str,
     runame: str,
     state: str,
-    scope: str = DEFAULT_SCOPE,
+    scope: str = CORE_SCOPE,
 ) -> str:
     """Build an eBay OAuth consent URL."""
     endpoints = endpoints_for(environment)
@@ -590,10 +678,55 @@ def build_get_my_ebay_selling_xml(entries_per_page: int = 100, page: int = 1) ->
 """
 
 
-def build_get_my_ebay_selling_classification_xml(
-    entries_per_page: int = 100, page: int = 1
+SOLD_UNSOLD_DURATION_DAYS = 60
+
+
+def build_get_my_ebay_selling_list_xml(
+    list_name: str,
+    *,
+    entries_per_page: int = 100,
+    page: int = 1,
+    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
 ) -> str:
-    """Build a read-only sold/unsold lookup request for future classification."""
+    """Build GetMyeBaySelling XML for one SoldList or UnsoldList page."""
+    if list_name not in {"SoldList", "UnsoldList"}:
+        raise ValueError(f"Unsupported selling list: {list_name}")
+    sold_block = (
+        f"""  <SoldList>
+    <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
+    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
+  </SoldList>"""
+        if list_name == "SoldList"
+        else "  <SoldList><Include>false</Include></SoldList>"
+    )
+    unsold_block = (
+        f"""  <UnsoldList>
+    <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
+    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
+  </UnsoldList>"""
+        if list_name == "UnsoldList"
+        else "  <UnsoldList><Include>false</Include></UnsoldList>"
+    )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
+  <DetailLevel>ReturnAll</DetailLevel>
+  <ActiveList><Include>false</Include></ActiveList>
+  <ScheduledList><Include>false</Include></ScheduledList>
+{sold_block}
+{unsold_block}
+</GetMyeBaySellingRequest>
+"""
+
+
+def build_get_my_ebay_selling_classification_xml(
+    entries_per_page: int = 100,
+    page: int = 1,
+    *,
+    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
+) -> str:
+    """Build a combined sold/unsold lookup request (single page of each list)."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
   <DetailLevel>ReturnAll</DetailLevel>
@@ -601,10 +734,12 @@ def build_get_my_ebay_selling_classification_xml(
   <ScheduledList><Include>false</Include></ScheduledList>
   <SoldList>
     <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
     <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
   </SoldList>
   <UnsoldList>
     <Include>true</Include>
+    <DurationInDays>{duration_in_days}</DurationInDays>
     <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
   </UnsoldList>
 </GetMyeBaySellingRequest>
@@ -612,9 +747,12 @@ def build_get_my_ebay_selling_classification_xml(
 
 
 def parse_sold_unsold_classification(root: ET.Element) -> dict[str, str]:
-    """Parse explicit sold/unsold item classification when that lookup is enabled."""
+    """Parse sold/unsold ItemIDs from a GetMyeBaySelling response.
+
+    Unsold is applied first, then sold, so SoldList wins if an ItemID appears in both.
+    """
     classified: dict[str, str] = {}
-    for container_name, status in (("SoldList", "sold"), ("UnsoldList", "unsold")):
+    for container_name, status in (("UnsoldList", "unsold"), ("SoldList", "sold")):
         container = root.find(f"e:{container_name}", namespaces=NS)
         if container is None:
             continue
@@ -623,6 +761,19 @@ def parse_sold_unsold_classification(root: ET.Element) -> dict[str, str]:
             if item_id:
                 classified[item_id] = status
     return classified
+
+
+def parse_selling_list_item_ids(root: ET.Element, list_name: str) -> list[str]:
+    """Return ItemIDs from one SoldList or UnsoldList container."""
+    container = root.find(f"e:{list_name}", namespaces=NS)
+    if container is None:
+        return []
+    item_ids: list[str] = []
+    for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
+        item_id = _text(item, "e:ItemID")
+        if item_id:
+            item_ids.append(item_id)
+    return item_ids
 
 
 def build_get_seller_list_xml(entries_per_page: int = 200, page: int = 1) -> str:
@@ -1171,6 +1322,54 @@ class EbayApiClient:
             page += 1
         return _dict_by_item_id(selling_items), truncated
 
+    async def _fetch_selling_list_pages(self, list_name: str) -> tuple[list[str], bool]:
+        """Fetch one SoldList or UnsoldList across pages up to MAX_PAGES."""
+        item_ids: list[str] = []
+        page = 1
+        total_pages = 1
+        truncated = False
+        while page <= total_pages:
+            root = await self.async_call_trading_api(
+                SELLING_CALL_NAME,
+                build_get_my_ebay_selling_list_xml(list_name, page=page),
+            )
+            page_ids = parse_selling_list_item_ids(root, list_name)
+            item_ids.extend(page_ids)
+            reported_pages = _reported_total_pages(root, list_name)
+            truncated = truncated or reported_pages > MAX_PAGES
+            total_pages = max(total_pages, min(reported_pages, MAX_PAGES))
+            _LOGGER.debug(
+                "Fetched %s page page=%s item_count=%s total_pages=%s truncated=%s",
+                list_name,
+                page,
+                len(page_ids),
+                total_pages,
+                truncated,
+            )
+            page += 1
+        return item_ids, truncated
+
+    async def async_fetch_sold_unsold_classification(
+        self,
+    ) -> tuple[dict[str, str], int, int, bool]:
+        """Fetch SoldList/UnsoldList classification and counts.
+
+        Returns (classification, sold_count, unsold_count, truncated).
+        """
+        unsold_ids, unsold_truncated = await self._fetch_selling_list_pages(
+            "UnsoldList"
+        )
+        sold_ids, sold_truncated = await self._fetch_selling_list_pages("SoldList")
+        classified: dict[str, str] = {item_id: "unsold" for item_id in unsold_ids}
+        for item_id in sold_ids:
+            classified[item_id] = "sold"
+        return (
+            classified,
+            len(set(sold_ids)),
+            len(set(unsold_ids)),
+            sold_truncated or unsold_truncated,
+        )
+
     async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
         """Fetch GetSellerList view counts across pages up to MAX_PAGES."""
         views: dict[str, int] = {}
@@ -1497,6 +1696,7 @@ class EbayApiClient:
         feedback_enabled: bool = False,
         messages_enabled: bool = False,
         ending_soon_threshold_seconds: int,
+        granted_scopes: str | None = None,
     ) -> dict[str, Any]:
         """Fetch and normalize all configured read-only telemetry."""
         refresh_start = time.monotonic()
@@ -1523,7 +1723,20 @@ class EbayApiClient:
         orders_truncated = False
         disputes_truncated = False
         messages_truncated = False
+        sold_unsold_truncated = False
+        selling_classification: dict[str, str] = {}
+        sold_items_count: int | None = None
+        unsold_items_count: int | None = None
         seller_ops = empty_seller_ops()
+        feature_options = {
+            CONF_ANALYTICS_ENABLED: analytics_enabled,
+            CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
+            CONF_SELLER_STANDARDS_ENABLED: seller_standards_enabled,
+            CONF_FEEDBACK_ENABLED: feedback_enabled,
+            CONF_MESSAGES_ENABLED: messages_enabled,
+        }
+        missing_by_feature = missing_scopes_for_options(granted_scopes, feature_options)
+        missing_scope_features = sorted(missing_by_feature)
 
         if buying_enabled:
             (
@@ -1539,6 +1752,27 @@ class EbayApiClient:
             selling, selling_truncated = await self._fetch_selling_pages()
             if selling_truncated:
                 partial_failures.append("selling_truncated")
+            try:
+                (
+                    selling_classification,
+                    sold_items_count,
+                    unsold_items_count,
+                    sold_unsold_truncated,
+                ) = await self.async_fetch_sold_unsold_classification()
+                if sold_unsold_truncated:
+                    partial_failures.append("sold_unsold_truncated")
+            except EbayAuthError:
+                raise
+            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                _LOGGER.debug(
+                    "Optional sold/unsold classification failed error=%s",
+                    _safe_exception_context(exc),
+                )
+                partial_failures.append("sold_unsold_classification")
+                selling_classification = {}
+                sold_items_count = None
+                unsold_items_count = None
+                sold_unsold_truncated = True
             try:
                 (
                     seller_list_views,
@@ -1591,26 +1825,33 @@ class EbayApiClient:
                 partial_failures.append("active_offers")
 
             if analytics_enabled:
-                try:
-                    (
-                        views_by_id,
-                        analytics_partial,
-                    ) = await self.async_fetch_analytics_views(list(selling))
-                    for item_id, views in views_by_id.items():
-                        if item_id in selling:
-                            selling[item_id]["analytics_views_30d"] = views
-                    if analytics_partial:
+                if CONF_ANALYTICS_ENABLED in missing_by_feature:
+                    partial_failures.append("analytics_views_missing_scope")
+                else:
+                    try:
+                        (
+                            views_by_id,
+                            analytics_partial,
+                        ) = await self.async_fetch_analytics_views(list(selling))
+                        for item_id, views in views_by_id.items():
+                            if item_id in selling:
+                                selling[item_id]["analytics_views_30d"] = views
+                        if analytics_partial:
+                            partial_failures.append("analytics_views")
+                    except EbayAuthError:
+                        raise
+                    except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                        _LOGGER.debug(
+                            "Optional analytics views failed error=%s",
+                            _safe_exception_context(exc),
+                        )
                         partial_failures.append("analytics_views")
-                except EbayAuthError:
-                    raise
-                except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                    _LOGGER.debug(
-                        "Optional analytics views failed error=%s",
-                        _safe_exception_context(exc),
-                    )
-                    partial_failures.append("analytics_views")
 
-            if fulfillment_enabled:
+        if fulfillment_enabled:
+            if CONF_FULFILLMENT_ENABLED in missing_by_feature:
+                partial_failures.append("orders_missing_scope")
+                partial_failures.append("payment_disputes_missing_scope")
+            else:
                 try:
                     orders_summary, orders_truncated = await self.async_fetch_orders()
                     seller_ops["orders"] = orders_summary
@@ -1641,7 +1882,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("payment_disputes")
 
-            if seller_standards_enabled:
+        if seller_standards_enabled:
+            if CONF_SELLER_STANDARDS_ENABLED in missing_by_feature:
+                partial_failures.append("seller_standards_missing_scope")
+            else:
                 try:
                     seller_ops["standards"] = await self.async_fetch_seller_standards()
                 except EbayAuthError:
@@ -1653,7 +1897,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("seller_standards")
 
-            if feedback_enabled:
+        if feedback_enabled:
+            if CONF_FEEDBACK_ENABLED in missing_by_feature:
+                partial_failures.append("feedback_missing_scope")
+            else:
                 try:
                     seller_ops["feedback"] = await self.async_fetch_feedback()
                 except EbayAuthError:
@@ -1665,7 +1912,10 @@ class EbayApiClient:
                     )
                     partial_failures.append("feedback")
 
-            if messages_enabled:
+        if messages_enabled:
+            if CONF_MESSAGES_ENABLED in missing_by_feature:
+                partial_failures.append("messages_missing_scope")
+            else:
                 try:
                     (
                         messages_summary,
@@ -1696,6 +1946,7 @@ class EbayApiClient:
             "orders": orders_truncated,
             "payment_disputes": disputes_truncated,
             "messages": messages_truncated,
+            "sold_unsold": sold_unsold_truncated,
         }
 
         now = datetime.now(timezone.utc)
@@ -1703,6 +1954,20 @@ class EbayApiClient:
             watched, bidding, selling, ending_soon_threshold_seconds
         )
         summary.update(_seller_ops_summary_keys(seller_ops))
+        summary["sold_items_count"] = sold_items_count
+        summary["unsold_items_count"] = unsold_items_count
+        summary["missing_scopes"] = missing_by_feature
+        summary["missing_scope_features"] = missing_scope_features
+        sold_item_ids = sorted(
+            item_id
+            for item_id, status in selling_classification.items()
+            if status == "sold"
+        )
+        unsold_item_ids = sorted(
+            item_id
+            for item_id, status in selling_classification.items()
+            if status == "unsold"
+        )
         _LOGGER.debug(
             "eBay API refresh completed watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
             len(watched),
@@ -1717,12 +1982,17 @@ class EbayApiClient:
             "bidding": bidding,
             "selling": selling,
             "seller_ops": seller_ops,
+            "selling_classification": selling_classification,
+            "sold_item_ids": sold_item_ids,
+            "unsold_item_ids": unsold_item_ids,
             "summary": summary,
             "last_update": now,
             "last_successful_update": now,
             "partial_failures": partial_failures,
             "truncated_collections": truncated_collections,
             "api_warnings": api_warnings,
+            "missing_scopes": missing_by_feature,
+            "missing_scope_features": missing_scope_features,
         }
 
 
@@ -1734,12 +2004,12 @@ def _seller_ops_summary_keys(seller_ops: dict[str, Any]) -> dict[str, Any]:
     feedback = seller_ops.get("feedback") or {}
     messages = seller_ops.get("messages") or {}
     return {
-        "orders_awaiting_shipment": orders.get("awaiting_shipment", 0),
-        "orders_shipping_today": orders.get("shipping_today", 0),
-        "orders_overdue": orders.get("overdue", 0),
-        "orders_shipped": orders.get("shipped", 0),
-        "orders_partially_fulfilled": orders.get("partially_fulfilled", 0),
-        "open_payment_disputes": disputes.get("open_count", 0),
+        "orders_awaiting_shipment": orders.get("awaiting_shipment"),
+        "orders_shipping_today": orders.get("shipping_today"),
+        "orders_overdue": orders.get("overdue"),
+        "orders_shipped": orders.get("shipped"),
+        "orders_partially_fulfilled": orders.get("partially_fulfilled"),
+        "open_payment_disputes": disputes.get("open_count"),
         "seller_level": standards.get("seller_level"),
         "transaction_defect_rate": standards.get("transaction_defect_rate"),
         "late_shipment_rate": standards.get("late_shipment_rate"),
@@ -1749,14 +2019,14 @@ def _seller_ops_summary_keys(seller_ops: dict[str, Any]) -> dict[str, Any]:
         "item_not_received_metric": standards.get("item_not_received_rating"),
         "item_not_as_described_metric": standards.get("item_not_as_described_rating"),
         "seller_next_evaluation_date": standards.get("next_evaluation_date"),
-        "seller_standard_at_risk": standards.get("at_risk", False),
+        "seller_standard_at_risk": standards.get("at_risk"),
         "feedback_score": feedback.get("score"),
         "positive_feedback_percent": feedback.get("positive_percent"),
-        "recent_positive_feedback": feedback.get("recent_positive", 0),
-        "recent_neutral_feedback": feedback.get("recent_neutral", 0),
-        "recent_negative_feedback": feedback.get("recent_negative", 0),
-        "items_awaiting_feedback": feedback.get("awaiting_count", 0),
-        "unread_conversations": messages.get("unread_count", 0),
-        "buyer_question_conversations": messages.get("buyer_question_count", 0),
+        "recent_positive_feedback": feedback.get("recent_positive"),
+        "recent_neutral_feedback": feedback.get("recent_neutral"),
+        "recent_negative_feedback": feedback.get("recent_negative"),
+        "items_awaiting_feedback": feedback.get("awaiting_count"),
+        "unread_conversations": messages.get("unread_count"),
+        "buyer_question_conversations": messages.get("buyer_question_count"),
         "oldest_unanswered_message_hours": messages.get("oldest_unanswered_hours"),
     }
