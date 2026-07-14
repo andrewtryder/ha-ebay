@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 import yaml
+from homeassistant.components.blueprint import BLUEPRINT_SCHEMA, Blueprint
+from homeassistant.components.blueprint.errors import InvalidBlueprint
+from homeassistant.core import HomeAssistant
+from homeassistant.util import yaml as yaml_util
 
 BLUEPRINTS_DIR = (
     Path(__file__).resolve().parents[1] / "blueprints" / "automation" / "ebay"
@@ -63,3 +68,64 @@ def test_blueprint_structure(filename: str, event_type: str) -> None:
     assert f"'{event_type}'" in rendered or f'"{event_type}"' in rendered
     assert "notify.send_message" in rendered
     assert "integration: ebay" in rendered
+
+
+@pytest.mark.parametrize("filename", sorted(EXPECTED_BLUEPRINTS))
+def test_blueprint_validates_with_home_assistant_schema(filename: str) -> None:
+    """Blueprints must pass Home Assistant's Blueprint schema used on import."""
+    path = BLUEPRINTS_DIR / filename
+    data = yaml_util.load_yaml(str(path))
+    assert isinstance(data, dict)
+    blueprint = Blueprint(
+        data,
+        path=str(path),
+        expected_domain="automation",
+        schema=BLUEPRINT_SCHEMA,
+    )
+    assert blueprint.domain == "automation"
+    assert blueprint.name.startswith("eBay - ")
+
+
+async def test_blueprint_imports_via_hass_config_path(hass: HomeAssistant) -> None:
+    """Copy a blueprint into the HA config tree and load it like a user import."""
+    import logging
+
+    from homeassistant.components.blueprint import BLUEPRINT_SCHEMA
+    from homeassistant.components.blueprint.models import DomainBlueprints
+
+    filename = "notify_when_outbid.yaml"
+    dest_dir = Path(hass.config.path("blueprints", "automation", "ebay"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+    shutil.copy2(BLUEPRINTS_DIR / filename, dest)
+
+    async def _reload(_hass: HomeAssistant, _path: str) -> None:
+        return None
+
+    domain_blueprints = DomainBlueprints(
+        hass,
+        "automation",
+        logging.getLogger(__name__),
+        lambda _hass, _path: False,
+        _reload,
+        BLUEPRINT_SCHEMA,
+    )
+    blueprint = await domain_blueprints.async_get_blueprint(f"ebay/{filename}")
+    assert blueprint.domain == "automation"
+    assert blueprint.name.startswith("eBay - ")
+    assert "outbid" in dest.read_text(encoding="utf-8")
+
+
+def test_invalid_blueprint_domain_is_rejected() -> None:
+    """Wrong blueprint domain must raise InvalidBlueprint."""
+    path = BLUEPRINTS_DIR / "notify_when_outbid.yaml"
+    data = yaml_util.load_yaml(str(path))
+    assert isinstance(data, dict)
+    data["blueprint"]["domain"] = "script"
+    with pytest.raises(InvalidBlueprint):
+        Blueprint(
+            data,
+            path=str(path),
+            expected_domain="automation",
+            schema=BLUEPRINT_SCHEMA,
+        )
