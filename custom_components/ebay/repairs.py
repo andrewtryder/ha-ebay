@@ -14,10 +14,12 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     CONF_ANALYTICS_ENABLED,
+    CONF_BUYING_ENABLED,
     CONF_FEEDBACK_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
     CONF_SITE_ID,
     DOMAIN,
     PARTIAL_FAILURE_SECTION,
@@ -195,6 +197,48 @@ def _section_observed(refreshed_sections: set[str] | None, section: str | None) 
     return section in refreshed_sections
 
 
+def _enabled_sections_for_repairs(coordinator: Any) -> set[str] | None:
+    """Return currently enabled payload sections, or None when unknown.
+
+    ``None`` means every section is treated as enabled (test doubles without
+    real options). Disabled sections clear their repairs instead of preserving
+    them while unobserved.
+    """
+    options = getattr(coordinator, "options", None)
+    if not isinstance(options, dict):
+        return None
+    from .api import enabled_sections_for_options
+
+    return enabled_sections_for_options(
+        buying_enabled=bool(options.get(CONF_BUYING_ENABLED)),
+        selling_enabled=bool(options.get(CONF_SELLING_ENABLED)),
+        analytics_enabled=bool(options.get(CONF_ANALYTICS_ENABLED)),
+        fulfillment_enabled=bool(options.get(CONF_FULFILLMENT_ENABLED)),
+        seller_standards_enabled=bool(options.get(CONF_SELLER_STANDARDS_ENABLED)),
+        feedback_enabled=bool(options.get(CONF_FEEDBACK_ENABLED)),
+        messages_enabled=bool(options.get(CONF_MESSAGES_ENABLED)),
+    )
+
+
+def _section_enabled(enabled_sections: set[str] | None, section: str | None) -> bool:
+    """Return whether repairs for ``section`` should remain active."""
+    if enabled_sections is None or section is None:
+        return True
+    return section in enabled_sections
+
+
+def _section_for_streak_key(streak_key: str) -> str | None:
+    """Return the owning section for a repair streak key, if known."""
+    kind, _, name = streak_key.partition(":")
+    if not name:
+        return None
+    if kind == "truncated":
+        return TRUNCATION_COLLECTION_SECTION.get(name)
+    if kind in ("seller_ops_unavailable", "partial_failure"):
+        return PARTIAL_FAILURE_SECTION.get(name)
+    return None
+
+
 def _preserve_issue_if_present(
     registry: Any, domain: str, issue_id: str, desired: set[str]
 ) -> None:
@@ -224,12 +268,14 @@ async def async_sync_repair_issues(
 
     Soft-fail / truncation streaks only advance when the owning section is in
     ``refreshed_sections``. Pass ``None`` to treat every section as observed.
+    Disabled optional sections clear their issues and streaks immediately.
     """
     await async_sync_reauth_issue(hass, entry, active=False)
 
     desired: set[str] = set()
     entry_id = entry.entry_id
     registry = ir.async_get(hass)
+    enabled_sections = _enabled_sections_for_repairs(coordinator)
 
     # Invalid Site ID / marketplace mapping.
     site_id = str(entry.data.get(CONF_SITE_ID, ""))
@@ -277,6 +323,9 @@ async def async_sync_repair_issues(
     for collection, is_truncated in truncated.items():
         streak_key = f"truncated:{collection}"
         section = TRUNCATION_COLLECTION_SECTION.get(collection)
+        if not _section_enabled(enabled_sections, section):
+            _bump_streak(coordinator, streak_key, active=False, observed=True)
+            continue
         observed = _section_observed(refreshed_sections, section)
         streak = _bump_streak(
             coordinator, streak_key, active=bool(is_truncated), observed=observed
@@ -303,9 +352,12 @@ async def async_sync_repair_issues(
 
     # Seller-operation API unavailable for the account.
     for category, feature in SELLER_OPS_UNAVAILABLE_CATEGORIES.items():
-        active = category in partial_failures
         streak_key = f"seller_ops_unavailable:{feature}"
         section = PARTIAL_FAILURE_SECTION.get(category)
+        if not _section_enabled(enabled_sections, section):
+            _bump_streak(coordinator, streak_key, active=False, observed=True)
+            continue
+        active = category in partial_failures
         observed = _section_observed(refreshed_sections, section)
         streak = _bump_streak(coordinator, streak_key, active=active, observed=observed)
         suffix = f"seller_ops_unavailable_{feature}"
@@ -345,6 +397,9 @@ async def async_sync_repair_issues(
             continue
         streak_key = f"partial_failure:{category}"
         section = PARTIAL_FAILURE_SECTION.get(category)
+        if not _section_enabled(enabled_sections, section):
+            _bump_streak(coordinator, streak_key, active=False, observed=True)
+            continue
         observed = _section_observed(refreshed_sections, section)
         streak = _bump_streak(coordinator, streak_key, active=True, observed=observed)
         suffix = f"partial_failure_{category}"
@@ -370,17 +425,22 @@ async def async_sync_repair_issues(
     # Reset streaks for soft-fail categories that cleared (only when observed).
     for category in list(SELLER_OPS_UNAVAILABLE_CATEGORIES):
         section = PARTIAL_FAILURE_SECTION.get(category)
+        if not _section_enabled(enabled_sections, section):
+            continue
         if not _section_observed(refreshed_sections, section):
             continue
         if category not in partial_failures:
             _bump_streak(
                 coordinator, f"seller_ops_unavailable:{category}", active=False
             )
-    # Clear streaks for partial failures no longer present (only when observed).
+    # Clear streaks for disabled sections and cleared partial failures.
     for streak_key in list(coordinator._repair_streaks):
+        section = _section_for_streak_key(streak_key)
+        if not _section_enabled(enabled_sections, section):
+            _bump_streak(coordinator, streak_key, active=False, observed=True)
+            continue
         if streak_key.startswith("partial_failure:"):
             category = streak_key.split(":", 1)[1]
-            section = PARTIAL_FAILURE_SECTION.get(category)
             if not _section_observed(refreshed_sections, section):
                 continue
             if category not in partial_failures:

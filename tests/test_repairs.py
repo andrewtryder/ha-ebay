@@ -9,8 +9,12 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from custom_components.ebay.const import (
+    CONF_ANALYTICS_ENABLED,
     CONF_FEEDBACK_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_SELLING_ENABLED,
     CONF_SITE_ID,
+    DEFAULT_OPTIONS,
     DOMAIN,
     REPAIR_STREAK_THRESHOLD,
 )
@@ -250,6 +254,169 @@ def test_unrelated_section_refresh_does_not_advance_streak(
     )
     issue_id = issue_id_for(entry.entry_id, "seller_ops_unavailable_seller_standards")
     assert (DOMAIN, issue_id) not in issue_registry.issues
+
+
+@pytest.mark.parametrize(
+    (
+        "option_key",
+        "enabled_options",
+        "disabled_options",
+        "payload",
+        "refreshed",
+        "streak_key",
+        "issue_suffix",
+    ),
+    [
+        (
+            "feedback",
+            {
+                CONF_FEEDBACK_ENABLED: True,
+            },
+            {
+                CONF_FEEDBACK_ENABLED: False,
+            },
+            {
+                "missing_scope_features": [],
+                "missing_scopes": {},
+                "partial_failures": ["feedback"],
+                "truncated_collections": {},
+            },
+            {"feedback"},
+            "seller_ops_unavailable:feedback",
+            "seller_ops_unavailable_feedback",
+        ),
+        (
+            "messages",
+            {
+                CONF_MESSAGES_ENABLED: True,
+            },
+            {
+                CONF_MESSAGES_ENABLED: False,
+            },
+            {
+                "missing_scope_features": [],
+                "missing_scopes": {},
+                "partial_failures": ["messages_truncated"],
+                "truncated_collections": {"messages": True},
+            },
+            {"messages"},
+            "truncated:messages",
+            "truncated_messages",
+        ),
+        (
+            "analytics",
+            {
+                CONF_SELLING_ENABLED: True,
+                CONF_ANALYTICS_ENABLED: True,
+            },
+            {
+                CONF_SELLING_ENABLED: True,
+                CONF_ANALYTICS_ENABLED: False,
+            },
+            {
+                "missing_scope_features": [],
+                "missing_scopes": {},
+                "partial_failures": ["analytics_views"],
+                "truncated_collections": {},
+            },
+            {"analytics"},
+            "partial_failure:analytics_views",
+            "partial_failure_analytics_views",
+        ),
+    ],
+)
+def test_disabling_optional_module_clears_repair_and_streak(
+    issue_registry: _FakeIssueRegistry,
+    option_key: str,
+    enabled_options: dict[str, bool],
+    disabled_options: dict[str, bool],
+    payload: dict[str, Any],
+    refreshed: set[str],
+    streak_key: str,
+    issue_suffix: str,
+) -> None:
+    """Disabled optional sections drop persisted repairs instead of preserving them."""
+    entry = _entry()
+    coordinator = _coordinator()
+    coordinator.options = {**DEFAULT_OPTIONS, **enabled_options}
+
+    for _ in range(REPAIR_STREAK_THRESHOLD):
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections=refreshed,
+            )
+        )
+
+    issue_id = issue_id_for(entry.entry_id, issue_suffix)
+    assert (DOMAIN, issue_id) in issue_registry.issues
+    assert coordinator._repair_streaks.get(streak_key, 0) >= REPAIR_STREAK_THRESHOLD
+
+    # Feature disabled and section not refreshed — historically this preserved the issue.
+    coordinator.options = {**DEFAULT_OPTIONS, **disabled_options}
+    stale_payload = {
+        "missing_scope_features": [],
+        "missing_scopes": {},
+        "partial_failures": list(payload["partial_failures"]),
+        "truncated_collections": dict(payload["truncated_collections"]),
+    }
+    asyncio.run(
+        async_sync_repair_issues(
+            Mock(),
+            entry,
+            coordinator,
+            stale_payload,
+            refreshed_sections={"buying"},
+        )
+    )
+
+    assert (DOMAIN, issue_id) not in issue_registry.issues
+    assert streak_key not in coordinator._repair_streaks
+
+
+def test_enabled_unobserved_section_still_preserves_repair(
+    issue_registry: _FakeIssueRegistry,
+) -> None:
+    """Unobserved enabled sections keep streak-gated issues until rechecked."""
+    entry = _entry()
+    coordinator = _coordinator()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_FEEDBACK_ENABLED: True}
+    payload = {
+        "missing_scope_features": [],
+        "missing_scopes": {},
+        "partial_failures": ["feedback"],
+        "truncated_collections": {},
+    }
+    for _ in range(REPAIR_STREAK_THRESHOLD):
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections={"feedback"},
+            )
+        )
+    issue_id = issue_id_for(entry.entry_id, "seller_ops_unavailable_feedback")
+    assert (DOMAIN, issue_id) in issue_registry.issues
+
+    asyncio.run(
+        async_sync_repair_issues(
+            Mock(),
+            entry,
+            coordinator,
+            payload,
+            refreshed_sections={"buying"},
+        )
+    )
+    assert (DOMAIN, issue_id) in issue_registry.issues
+    assert (
+        coordinator._repair_streaks.get("seller_ops_unavailable:feedback", 0)
+        >= REPAIR_STREAK_THRESHOLD
+    )
 
 
 def test_persisted_streaks_recreate_issue_immediately(
