@@ -698,6 +698,35 @@ def build_get_my_ebay_selling_xml(entries_per_page: int = 100, page: int = 1) ->
 
 
 SOLD_UNSOLD_DURATION_DAYS = 60
+SOLD_UNSOLD_REFRESH_HOURS = 6
+
+
+def _parse_optional_datetime(value: Any) -> datetime | None:
+    """Parse an optional datetime or ISO string."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _should_fetch_sold_unsold(
+    previous_selling: dict[str, Any],
+    current_selling: dict[str, Any],
+    last_fetched: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether SoldList/UnsoldList classification should be refreshed."""
+    if set(previous_selling) - set(current_selling):
+        return True
+    if last_fetched is None:
+        return True
+    stamp = now or datetime.now(timezone.utc)
+    return stamp - last_fetched >= timedelta(hours=SOLD_UNSOLD_REFRESH_HOURS)
 
 
 def build_get_my_ebay_selling_list_xml(
@@ -1833,6 +1862,10 @@ class EbayApiClient:
 
         sold_items_count = base["summary"].get("sold_items_count")
         unsold_items_count = base["summary"].get("unsold_items_count")
+        sold_unsold_last_fetched = _parse_optional_datetime(
+            base.get("sold_unsold_last_fetched")
+            or (base.get("summary") or {}).get("sold_unsold_last_fetched")
+        )
 
         if SECTION_BUYING in sections and buying_enabled:
             (
@@ -1854,32 +1887,41 @@ class EbayApiClient:
             )
 
         if SECTION_SELLING in sections and selling_enabled:
+            previous_selling = dict(base["selling"])
             selling, selling_truncated = await self._fetch_selling_pages()
             truncated_collections["selling"] = selling_truncated
             if selling_truncated:
                 partial_failures.append("selling_truncated")
-            try:
-                (
-                    selling_classification,
-                    sold_items_count,
-                    unsold_items_count,
-                    sold_unsold_truncated,
-                ) = await self.async_fetch_sold_unsold_classification()
-                truncated_collections["sold_unsold"] = sold_unsold_truncated
-                if sold_unsold_truncated:
-                    partial_failures.append("sold_unsold_truncated")
-            except EbayAuthError:
-                raise
-            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                _LOGGER.debug(
-                    "Optional sold/unsold classification failed error=%s",
-                    _safe_exception_context(exc),
-                )
-                partial_failures.append("sold_unsold_classification")
-                selling_classification = {}
-                sold_items_count = None
-                unsold_items_count = None
-                truncated_collections["sold_unsold"] = True
+            fetch_now = datetime.now(timezone.utc)
+            if _should_fetch_sold_unsold(
+                previous_selling,
+                selling,
+                sold_unsold_last_fetched,
+                now=fetch_now,
+            ):
+                try:
+                    (
+                        selling_classification,
+                        sold_items_count,
+                        unsold_items_count,
+                        sold_unsold_truncated,
+                    ) = await self.async_fetch_sold_unsold_classification()
+                    truncated_collections["sold_unsold"] = sold_unsold_truncated
+                    if sold_unsold_truncated:
+                        partial_failures.append("sold_unsold_truncated")
+                    sold_unsold_last_fetched = fetch_now
+                except EbayAuthError:
+                    raise
+                except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+                    _LOGGER.debug(
+                        "Optional sold/unsold classification failed error=%s",
+                        _safe_exception_context(exc),
+                    )
+                    partial_failures.append("sold_unsold_classification")
+                    selling_classification = {}
+                    sold_items_count = None
+                    unsold_items_count = None
+                    truncated_collections["sold_unsold"] = True
             try:
                 (
                     seller_list_views,
@@ -2140,6 +2182,12 @@ class EbayApiClient:
         summary.update(_seller_ops_summary_keys(seller_ops))
         summary["sold_items_count"] = sold_items_count
         summary["unsold_items_count"] = unsold_items_count
+        summary["sold_unsold_window_days"] = SOLD_UNSOLD_DURATION_DAYS
+        summary["sold_unsold_last_fetched"] = (
+            sold_unsold_last_fetched.isoformat()
+            if isinstance(sold_unsold_last_fetched, datetime)
+            else sold_unsold_last_fetched
+        )
         summary["missing_scopes"] = missing_by_feature
         summary["missing_scope_features"] = missing_scope_features
         summary["section_last_fetched"] = {
@@ -2193,6 +2241,7 @@ class EbayApiClient:
             "section_last_fetched": section_last_fetched,
             "section_last_attempt": section_last_attempt,
             "section_last_success": section_last_success,
+            "sold_unsold_last_fetched": sold_unsold_last_fetched,
             "refreshed_sections": sorted(sections),
         }
 
@@ -2346,6 +2395,7 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
             "section_last_fetched": {},
             "section_last_attempt": {},
             "section_last_success": {},
+            "sold_unsold_last_fetched": None,
         }
     section_last_fetched = _parse_section_dt_map(previous.get("section_last_fetched"))
     section_last_attempt = _parse_section_dt_map(previous.get("section_last_attempt"))
@@ -2373,6 +2423,8 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
         "section_last_fetched": section_last_fetched,
         "section_last_attempt": section_last_attempt,
         "section_last_success": section_last_success,
+        "sold_unsold_last_fetched": previous.get("sold_unsold_last_fetched")
+        or (previous.get("summary") or {}).get("sold_unsold_last_fetched"),
     }
 
 

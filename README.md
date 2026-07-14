@@ -17,7 +17,7 @@ Requires Home Assistant `2026.3.0+`.
 ## Features
 
 - Buying and watching: watched items, bids, winning/outbid status, price changes, and ending-soon alerts
-- Selling: active listings, bids, offers, watchers, questions, views, and quantity sold
+- Selling: active listings, bids, offers, watchers, questions, views, quantity sold, and recent sold/unsold counts (last 60 days via SoldList/UnsoldList)
 - Optional seller operations: orders, fulfillment, payment disputes, seller standards, feedback, and buyer messages
 - Directional and threshold-based watched-price events
 - Calendars for watched, bidding, and selling end times
