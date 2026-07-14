@@ -119,6 +119,30 @@ def test_missing_scopes_for_options() -> None:
     )
 
 
+def test_missing_scopes_analytics_skipped_without_selling_key() -> None:
+    """Omitting CONF_SELLING_ENABLED skips Analytics (same as selling off)."""
+    assert (
+        missing_scopes_for_options(
+            CORE_SCOPE,
+            {CONF_ANALYTICS_ENABLED: True},
+        )
+        == {}
+    )
+
+
+def test_missing_scopes_analytics_with_selling_mirrors_runtime() -> None:
+    """Runtime feature_options include selling so Analytics missing scope is detected."""
+    missing = missing_scopes_for_options(
+        CORE_SCOPE,
+        {
+            CONF_SELLING_ENABLED: True,
+            CONF_ANALYTICS_ENABLED: True,
+        },
+    )
+    assert list(missing) == [CONF_ANALYTICS_ENABLED]
+    assert missing[CONF_ANALYTICS_ENABLED] == [SCOPE_ANALYTICS_READONLY]
+
+
 def test_has_core_scope_and_resolve_granted_scopes() -> None:
     assert has_core_scope(CORE_SCOPE)
     assert has_core_scope(DEFAULT_SCOPE)
@@ -260,3 +284,53 @@ def test_analytics_unknown_site_becomes_partial_failure() -> None:
     payload = asyncio.run(run())
     assert client.async_fetch_analytics_views.await_count == 0
     assert "analytics_views" in payload["partial_failures"]
+
+
+def test_analytics_missing_scope_classified_when_selling_enabled() -> None:
+    """Runtime refresh reports analytics_views_missing_scope when scope absent."""
+    from custom_components.ebay.api import SECTION_ANALYTICS
+    from custom_components.ebay.const import CONF_ANALYTICS_ENABLED
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+            self.async_fetch_analytics_views = AsyncMock()
+
+    client = Client()
+    previous = {
+        "selling": {"s1": {"item_id": "s1", "title": "Item"}},
+        "watched": {},
+        "bidding": {},
+        "summary": {"sold_items_count": None, "unsold_items_count": None},
+        "seller_ops": {},
+        "partial_failures": [],
+        "truncated_collections": {},
+        "section_last_fetched": {},
+        "selling_classification": {},
+        "api_warnings": [],
+    }
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=True,
+            analytics_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=CORE_SCOPE,
+            previous=previous,
+            sections={SECTION_ANALYTICS},
+        )
+
+    payload = asyncio.run(run())
+    assert client.async_fetch_analytics_views.await_count == 0
+    assert "analytics_views_missing_scope" in payload["partial_failures"]
+    assert CONF_ANALYTICS_ENABLED in payload["missing_scope_features"]
+    assert "analytics_views" not in payload["partial_failures"]

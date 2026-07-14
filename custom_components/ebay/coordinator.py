@@ -153,6 +153,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._manual_refresh_last_requested: float | None = None
         self._force_full_refresh = False
         self._repair_streaks: dict[str, int] = {}
+        self._repair_streaks_dirty = False
         super().__init__(
             hass,
             _LOGGER,
