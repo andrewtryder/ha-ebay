@@ -1783,6 +1783,12 @@ class EbayApiClient:
         section_last_fetched: dict[str, datetime] = dict(
             base.get("section_last_fetched") or {}
         )
+        section_last_attempt: dict[str, datetime] = dict(
+            base.get("section_last_attempt") or {}
+        )
+        section_last_success: dict[str, datetime] = dict(
+            base.get("section_last_success") or section_last_fetched
+        )
         partial_failures = [
             category
             for category in base.get("partial_failures") or []
@@ -1828,7 +1834,13 @@ class EbayApiClient:
             truncated_collections["bidding"] = bidding_truncated
             if watched_truncated or bidding_truncated:
                 partial_failures.append("buying_truncated")
-            section_last_fetched[SECTION_BUYING] = datetime.now(timezone.utc)
+            _stamp_section_attempt(
+                SECTION_BUYING,
+                success=True,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_SELLING in sections and selling_enabled:
             selling, selling_truncated = await self._fetch_selling_pages()
@@ -1909,17 +1921,26 @@ class EbayApiClient:
                     _safe_exception_context(exc),
                 )
                 partial_failures.append("active_offers")
-            section_last_fetched[SECTION_SELLING] = datetime.now(timezone.utc)
+            _stamp_section_attempt(
+                SECTION_SELLING,
+                success=True,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_ANALYTICS in sections and analytics_enabled and selling_enabled:
+            analytics_ok = True
             if CONF_ANALYTICS_ENABLED in missing_by_feature:
                 partial_failures.append("analytics_views_missing_scope")
+                analytics_ok = False
             elif not is_known_site_id(self.site_id):
                 _LOGGER.debug(
                     "Skipping analytics views for unknown site_id=%s",
                     self.site_id,
                 )
                 partial_failures.append("analytics_views")
+                analytics_ok = False
             else:
                 try:
                     (
@@ -1931,6 +1952,7 @@ class EbayApiClient:
                             selling[item_id]["analytics_views_30d"] = views
                     if analytics_partial:
                         partial_failures.append("analytics_views")
+                        analytics_ok = False
                 except EbayAuthError:
                     raise
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
@@ -1939,12 +1961,21 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("analytics_views")
-            section_last_fetched[SECTION_ANALYTICS] = datetime.now(timezone.utc)
+                    analytics_ok = False
+            _stamp_section_attempt(
+                SECTION_ANALYTICS,
+                success=analytics_ok,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_FULFILLMENT in sections and fulfillment_enabled:
+            fulfillment_ok = True
             if CONF_FULFILLMENT_ENABLED in missing_by_feature:
                 partial_failures.append("orders_missing_scope")
                 partial_failures.append("payment_disputes_missing_scope")
+                fulfillment_ok = False
             else:
                 try:
                     orders_summary, orders_truncated = await self.async_fetch_orders()
@@ -1960,6 +1991,7 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("orders")
+                    fulfillment_ok = False
                 try:
                     (
                         disputes_summary,
@@ -1977,11 +2009,20 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("payment_disputes")
-            section_last_fetched[SECTION_FULFILLMENT] = datetime.now(timezone.utc)
+                    fulfillment_ok = False
+            _stamp_section_attempt(
+                SECTION_FULFILLMENT,
+                success=fulfillment_ok,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_SELLER_STANDARDS in sections and seller_standards_enabled:
+            standards_ok = True
             if CONF_SELLER_STANDARDS_ENABLED in missing_by_feature:
                 partial_failures.append("seller_standards_missing_scope")
+                standards_ok = False
             else:
                 try:
                     seller_ops["standards"] = await self.async_fetch_seller_standards()
@@ -1993,11 +2034,20 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("seller_standards")
-            section_last_fetched[SECTION_SELLER_STANDARDS] = datetime.now(timezone.utc)
+                    standards_ok = False
+            _stamp_section_attempt(
+                SECTION_SELLER_STANDARDS,
+                success=standards_ok,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_FEEDBACK in sections and feedback_enabled:
+            feedback_ok = True
             if CONF_FEEDBACK_ENABLED in missing_by_feature:
                 partial_failures.append("feedback_missing_scope")
+                feedback_ok = False
             else:
                 try:
                     seller_ops["feedback"] = await self.async_fetch_feedback()
@@ -2009,11 +2059,20 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("feedback")
-            section_last_fetched[SECTION_FEEDBACK] = datetime.now(timezone.utc)
+                    feedback_ok = False
+            _stamp_section_attempt(
+                SECTION_FEEDBACK,
+                success=feedback_ok,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if SECTION_MESSAGES in sections and messages_enabled:
+            messages_ok = True
             if CONF_MESSAGES_ENABLED in missing_by_feature:
                 partial_failures.append("messages_missing_scope")
+                messages_ok = False
             else:
                 try:
                     (
@@ -2032,7 +2091,14 @@ class EbayApiClient:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("messages")
-            section_last_fetched[SECTION_MESSAGES] = datetime.now(timezone.utc)
+                    messages_ok = False
+            _stamp_section_attempt(
+                SECTION_MESSAGES,
+                success=messages_ok,
+                section_last_attempt=section_last_attempt,
+                section_last_success=section_last_success,
+                section_last_fetched=section_last_fetched,
+            )
 
         if trading_sections:
             api_warnings = dedupe_trading_warnings(self._api_warnings)
@@ -2068,6 +2134,14 @@ class EbayApiClient:
         summary["section_last_fetched"] = {
             key: value.isoformat() if isinstance(value, datetime) else value
             for key, value in section_last_fetched.items()
+        }
+        summary["section_last_attempt"] = {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in section_last_attempt.items()
+        }
+        summary["section_last_success"] = {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in section_last_success.items()
         }
         sold_item_ids = sorted(
             item_id
@@ -2106,6 +2180,8 @@ class EbayApiClient:
             "missing_scopes": missing_by_feature,
             "missing_scope_features": missing_scope_features,
             "section_last_fetched": section_last_fetched,
+            "section_last_attempt": section_last_attempt,
+            "section_last_success": section_last_success,
             "refreshed_sections": sorted(sections),
         }
 
@@ -2208,6 +2284,37 @@ def _copy_seller_ops(seller_ops: dict[str, Any]) -> dict[str, Any]:
     return copied
 
 
+def _stamp_section_attempt(
+    section: str,
+    *,
+    success: bool,
+    section_last_attempt: dict[str, datetime],
+    section_last_success: dict[str, datetime],
+    section_last_fetched: dict[str, datetime],
+    when: datetime | None = None,
+) -> None:
+    """Record a section attempt; stamp success/fetched only when successful."""
+    stamp = when or datetime.now(timezone.utc)
+    section_last_attempt[section] = stamp
+    if success:
+        section_last_success[section] = stamp
+        section_last_fetched[section] = stamp
+
+
+def _parse_section_dt_map(raw: dict[str, Any] | None) -> dict[str, datetime]:
+    """Parse a section→datetime map from previous payloads."""
+    result: dict[str, datetime] = {}
+    for key, value in (raw or {}).items():
+        if isinstance(value, datetime):
+            result[key] = value
+        elif isinstance(value, str):
+            try:
+                result[key] = datetime.fromisoformat(value)
+            except ValueError:
+                continue
+    return result
+
+
 def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
     """Return a mutable payload shell seeded from a previous coordinator payload."""
     if not previous:
@@ -2226,16 +2333,16 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
             "missing_scopes": {},
             "missing_scope_features": [],
             "section_last_fetched": {},
+            "section_last_attempt": {},
+            "section_last_success": {},
         }
-    section_last_fetched: dict[str, datetime] = {}
-    for key, value in (previous.get("section_last_fetched") or {}).items():
-        if isinstance(value, datetime):
-            section_last_fetched[key] = value
-        elif isinstance(value, str):
-            try:
-                section_last_fetched[key] = datetime.fromisoformat(value)
-            except ValueError:
-                continue
+    section_last_fetched = _parse_section_dt_map(previous.get("section_last_fetched"))
+    section_last_attempt = _parse_section_dt_map(previous.get("section_last_attempt"))
+    section_last_success = _parse_section_dt_map(previous.get("section_last_success"))
+    if not section_last_success and section_last_fetched:
+        section_last_success = dict(section_last_fetched)
+    if not section_last_attempt and section_last_fetched:
+        section_last_attempt = dict(section_last_fetched)
     truncated = dict(_EMPTY_TRUNCATED_COLLECTIONS)
     truncated.update(previous.get("truncated_collections") or {})
     return {
@@ -2253,6 +2360,8 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
         "missing_scopes": previous.get("missing_scopes") or {},
         "missing_scope_features": list(previous.get("missing_scope_features") or []),
         "section_last_fetched": section_last_fetched,
+        "section_last_attempt": section_last_attempt,
+        "section_last_success": section_last_success,
     }
 
 

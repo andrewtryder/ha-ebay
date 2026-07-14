@@ -175,9 +175,65 @@ SECTION_FEEDBACK_INTERVAL_MINUTES = 60
 SECTION_ANALYTICS_INTERVAL_MINUTES = 60
 SECTION_SELLER_STANDARDS_INTERVAL_MINUTES = 1440
 
-# Soft-fail / truncation conditions must be seen this many consecutive refreshes
-# before a Repairs issue is created.
+# Soft-fail retry cadence (minutes). Missing-scope failures do not use these.
+SECTION_FEEDBACK_RETRY_MINUTES = 60
+SECTION_SELLER_STANDARDS_RETRY_MINUTES = 60
+SECTION_ANALYTICS_RETRY_MINUTES = 60
+
+# Soft-fail / truncation conditions must be seen this many consecutive section
+# attempts before a Repairs issue is created.
 REPAIR_STREAK_THRESHOLD = 3
+
+# Truncation collection keys → owning payload section (for repair streak gating).
+TRUNCATION_COLLECTION_SECTION = {
+    "watched": SECTION_BUYING,
+    "bidding": SECTION_BUYING,
+    "selling": SECTION_SELLING,
+    "seller_list_views": SECTION_SELLING,
+    "active_offers": SECTION_SELLING,
+    "sold_unsold": SECTION_SELLING,
+    "orders": SECTION_FULFILLMENT,
+    "payment_disputes": SECTION_FULFILLMENT,
+    "messages": SECTION_MESSAGES,
+}
+
+# Partial-failure / seller-ops categories → owning payload section.
+PARTIAL_FAILURE_SECTION = {
+    "buying_truncated": SECTION_BUYING,
+    "selling_truncated": SECTION_SELLING,
+    "sold_unsold_truncated": SECTION_SELLING,
+    "sold_unsold_classification": SECTION_SELLING,
+    "seller_list_views_truncated": SECTION_SELLING,
+    "seller_list_views": SECTION_SELLING,
+    "active_offers_truncated": SECTION_SELLING,
+    "active_offers": SECTION_SELLING,
+    "analytics_views": SECTION_ANALYTICS,
+    "analytics_views_missing_scope": SECTION_ANALYTICS,
+    "orders": SECTION_FULFILLMENT,
+    "orders_truncated": SECTION_FULFILLMENT,
+    "orders_missing_scope": SECTION_FULFILLMENT,
+    "payment_disputes": SECTION_FULFILLMENT,
+    "payment_disputes_truncated": SECTION_FULFILLMENT,
+    "payment_disputes_missing_scope": SECTION_FULFILLMENT,
+    "seller_standards": SECTION_SELLER_STANDARDS,
+    "seller_standards_missing_scope": SECTION_SELLER_STANDARDS,
+    "feedback": SECTION_FEEDBACK,
+    "feedback_missing_scope": SECTION_FEEDBACK,
+    "messages": SECTION_MESSAGES,
+    "messages_truncated": SECTION_MESSAGES,
+    "messages_missing_scope": SECTION_MESSAGES,
+}
+
+MISSING_SCOPE_PARTIAL_FAILURES = frozenset(
+    {
+        "analytics_views_missing_scope",
+        "orders_missing_scope",
+        "payment_disputes_missing_scope",
+        "seller_standards_missing_scope",
+        "feedback_missing_scope",
+        "messages_missing_scope",
+    }
+)
 
 
 def section_interval_minutes(section: str, poll_interval: int) -> int:
@@ -190,4 +246,17 @@ def section_interval_minutes(section: str, poll_interval: int) -> int:
         return SECTION_ANALYTICS_INTERVAL_MINUTES
     if section == SECTION_SELLER_STANDARDS:
         return SECTION_SELLER_STANDARDS_INTERVAL_MINUTES
+    return max(poll_interval, 1)
+
+
+def section_retry_minutes(section: str, poll_interval: int) -> int:
+    """Return the soft-fail retry delay in minutes for a payload section."""
+    if section == SECTION_FEEDBACK:
+        return SECTION_FEEDBACK_RETRY_MINUTES
+    if section == SECTION_SELLER_STANDARDS:
+        return SECTION_SELLER_STANDARDS_RETRY_MINUTES
+    if section == SECTION_ANALYTICS:
+        return SECTION_ANALYTICS_RETRY_MINUTES
+    if section == SECTION_MESSAGES:
+        return max(poll_interval, 1) * 2
     return max(poll_interval, 1)

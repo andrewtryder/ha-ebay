@@ -19,7 +19,9 @@ from .const import (
     CONF_SELLER_STANDARDS_ENABLED,
     CONF_SITE_ID,
     DOMAIN,
+    PARTIAL_FAILURE_SECTION,
     REPAIR_STREAK_THRESHOLD,
+    TRUNCATION_COLLECTION_SECTION,
 )
 from .seller_ops import SITE_ID_TO_MARKETPLACE, is_known_site_id
 
@@ -109,9 +111,17 @@ async def async_sync_reauth_issue(
     ir.async_delete_issue(hass, DOMAIN, issue_id)
 
 
-def _bump_streak(coordinator: Any, key: str, *, active: bool) -> int:
-    """Update and return the consecutive-observation streak for a condition."""
+def _bump_streak(
+    coordinator: Any, key: str, *, active: bool, observed: bool = True
+) -> int:
+    """Update and return the consecutive-observation streak for a condition.
+
+    When ``observed`` is False the streak is left unchanged (section was not
+    attempted on this refresh).
+    """
     streaks: dict[str, int] = coordinator._repair_streaks
+    if not observed:
+        return streaks.get(key, 0)
     if not active:
         streaks.pop(key, None)
         return 0
@@ -119,17 +129,51 @@ def _bump_streak(coordinator: Any, key: str, *, active: bool) -> int:
     return streaks[key]
 
 
+def _section_observed(refreshed_sections: set[str] | None, section: str | None) -> bool:
+    """Return whether the owning section was attempted on this refresh.
+
+    ``None`` refreshed_sections means observe all (legacy/tests).
+    """
+    if refreshed_sections is None or section is None:
+        return True
+    return section in refreshed_sections
+
+
+def _preserve_issue_if_present(
+    registry: Any, domain: str, issue_id: str, desired: set[str]
+) -> None:
+    """Keep an existing issue in the desired set without recreating it."""
+    if (domain, issue_id) in getattr(registry, "issues", {}):
+        desired.add(issue_id)
+        return
+    # Home Assistant IssueRegistry stores issues keyed by (domain, issue_id).
+    try:
+        for issue in registry.issues.values():
+            if issue.domain == domain and issue.issue_id == issue_id:
+                desired.add(issue_id)
+                return
+    except (AttributeError, TypeError):
+        return
+
+
 async def async_sync_repair_issues(
     hass: HomeAssistant,
     entry: ConfigEntry,
     coordinator: Any,
     payload: dict[str, Any],
+    *,
+    refreshed_sections: set[str] | None = None,
 ) -> None:
-    """Create or delete repairs from the latest coordinator payload."""
+    """Create or delete repairs from the latest coordinator payload.
+
+    Soft-fail / truncation streaks only advance when the owning section is in
+    ``refreshed_sections``. Pass ``None`` to treat every section as observed.
+    """
     await async_sync_reauth_issue(hass, entry, active=False)
 
     desired: set[str] = set()
     entry_id = entry.entry_id
+    registry = ir.async_get(hass)
 
     # Invalid Site ID / marketplace mapping.
     site_id = str(entry.data.get(CONF_SITE_ID, ""))
@@ -176,11 +220,18 @@ async def async_sync_repair_issues(
     # Consistent truncation.
     for collection, is_truncated in truncated.items():
         streak_key = f"truncated:{collection}"
-        streak = _bump_streak(coordinator, streak_key, active=bool(is_truncated))
-        if streak < REPAIR_STREAK_THRESHOLD:
-            continue
+        section = TRUNCATION_COLLECTION_SECTION.get(collection)
+        observed = _section_observed(refreshed_sections, section)
+        streak = _bump_streak(
+            coordinator, streak_key, active=bool(is_truncated), observed=observed
+        )
         suffix = f"truncated_{collection}"
         issue_id = issue_id_for(entry_id, suffix)
+        if not observed:
+            _preserve_issue_if_present(registry, DOMAIN, issue_id, desired)
+            continue
+        if streak < REPAIR_STREAK_THRESHOLD:
+            continue
         desired.add(issue_id)
         ir.async_create_issue(
             hass,
@@ -197,11 +248,16 @@ async def async_sync_repair_issues(
     for category, feature in SELLER_OPS_UNAVAILABLE_CATEGORIES.items():
         active = category in partial_failures
         streak_key = f"seller_ops_unavailable:{feature}"
-        streak = _bump_streak(coordinator, streak_key, active=active)
-        if streak < REPAIR_STREAK_THRESHOLD:
-            continue
+        section = PARTIAL_FAILURE_SECTION.get(category)
+        observed = _section_observed(refreshed_sections, section)
+        streak = _bump_streak(coordinator, streak_key, active=active, observed=observed)
         suffix = f"seller_ops_unavailable_{feature}"
         issue_id = issue_id_for(entry_id, suffix)
+        if not observed:
+            _preserve_issue_if_present(registry, DOMAIN, issue_id, desired)
+            continue
+        if streak < REPAIR_STREAK_THRESHOLD:
+            continue
         desired.add(issue_id)
         ir.async_create_issue(
             hass,
@@ -230,11 +286,16 @@ async def async_sync_repair_issues(
         if category in _SKIP_PARTIAL_FAILURE_CATEGORIES:
             continue
         streak_key = f"partial_failure:{category}"
-        streak = _bump_streak(coordinator, streak_key, active=True)
-        if streak < REPAIR_STREAK_THRESHOLD:
-            continue
+        section = PARTIAL_FAILURE_SECTION.get(category)
+        observed = _section_observed(refreshed_sections, section)
+        streak = _bump_streak(coordinator, streak_key, active=True, observed=observed)
         suffix = f"partial_failure_{category}"
         issue_id = issue_id_for(entry_id, suffix)
+        if not observed:
+            _preserve_issue_if_present(registry, DOMAIN, issue_id, desired)
+            continue
+        if streak < REPAIR_STREAK_THRESHOLD:
+            continue
         desired.add(issue_id)
         ir.async_create_issue(
             hass,
@@ -247,21 +308,26 @@ async def async_sync_repair_issues(
             data={"entry_id": entry_id, "category": category},
         )
 
-    # Reset streaks for soft-fail categories that cleared.
+    # Reset streaks for soft-fail categories that cleared (only when observed).
     for category in list(SELLER_OPS_UNAVAILABLE_CATEGORIES):
+        section = PARTIAL_FAILURE_SECTION.get(category)
+        if not _section_observed(refreshed_sections, section):
+            continue
         if category not in partial_failures:
             _bump_streak(
                 coordinator, f"seller_ops_unavailable:{category}", active=False
             )
-    # Clear streaks for partial failures no longer present.
+    # Clear streaks for partial failures no longer present (only when observed).
     for streak_key in list(coordinator._repair_streaks):
         if streak_key.startswith("partial_failure:"):
             category = streak_key.split(":", 1)[1]
+            section = PARTIAL_FAILURE_SECTION.get(category)
+            if not _section_observed(refreshed_sections, section):
+                continue
             if category not in partial_failures:
                 _bump_streak(coordinator, streak_key, active=False)
 
     # Delete issues that are no longer desired (except reauth handled above).
-    registry = ir.async_get(hass)
     prefix = f"{entry_id}_"
     for issue in list(registry.issues.values()):
         if issue.domain != DOMAIN or not issue.issue_id.startswith(prefix):
