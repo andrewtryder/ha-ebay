@@ -21,6 +21,7 @@ from .const import (
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
     EBAY_XML_NS,
     ENV_SANDBOX,
     NS,
@@ -123,8 +124,14 @@ def scopes_for_options(options: dict[str, Any]) -> str:
     """Return the OAuth scope string required by enabled feature options."""
     scopes: list[str] = [CORE_SCOPE]
     for option_key, option_scopes in MODULE_SCOPES.items():
-        if options.get(option_key):
-            scopes.extend(option_scopes)
+        if not options.get(option_key):
+            continue
+        # Analytics is only useful/scheduled when Selling is also enabled.
+        if option_key == CONF_ANALYTICS_ENABLED and not options.get(
+            CONF_SELLING_ENABLED
+        ):
+            continue
+        scopes.extend(option_scopes)
     return join_scopes(scopes)
 
 
@@ -136,6 +143,10 @@ def missing_scopes_for_options(
     missing: dict[str, list[str]] = {}
     for option_key, option_scopes in MODULE_SCOPES.items():
         if not options.get(option_key):
+            continue
+        if option_key == CONF_ANALYTICS_ENABLED and not options.get(
+            CONF_SELLING_ENABLED
+        ):
             continue
         absent = [scope for scope in option_scopes if scope not in granted_set]
         if absent:

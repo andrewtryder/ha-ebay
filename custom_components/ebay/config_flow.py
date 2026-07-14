@@ -407,6 +407,8 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         draft = self._ensure_draft()
         if user_input is not None:
             draft.update(user_input)
+            if not draft.get(CONF_SELLING_ENABLED):
+                draft[CONF_ANALYTICS_ENABLED] = False
             return await self.async_step_init()
         return self.async_show_form(
             step_id="selling",
@@ -483,6 +485,9 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                     ),
                 },
             )
+
+        if not draft.get(CONF_SELLING_ENABLED):
+            draft[CONF_ANALYTICS_ENABLED] = False
 
         result = self.async_create_entry(title="", data=dict(draft))
         granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
