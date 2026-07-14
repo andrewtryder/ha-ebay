@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.2](https://github.com/andrewtryder/ha-ebay/compare/v0.6.1...v0.6.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* clear repairs when optional features are disabled ([6152c55](https://github.com/andrewtryder/ha-ebay/commit/6152c55557c918ad12783538f5b52746167ef66b))
+* persist repair streaks and analytics missing-scope detection ([6595bd4](https://github.com/andrewtryder/ha-ebay/commit/6595bd4572e367b9ed7d8dfd8a38226941141ff9))
+* persist repair streaks and detect analytics missing scope at runtime ([6222a76](https://github.com/andrewtryder/ha-ebay/commit/6222a761f9e1df3fbf770033ef1dd6826a483cbd))
+* persist repair streaks and detect analytics missing scope at runtime ([#53](https://github.com/andrewtryder/ha-ebay/issues/53)) ([69a5166](https://github.com/andrewtryder/ha-ebay/commit/69a516665ef528bc101a5007a415abd67f6d4936))
+
 ## [0.6.1](https://github.com/andrewtryder/ha-ebay/compare/v0.6.0...v0.6.1) (2026-07-14)
 
 
