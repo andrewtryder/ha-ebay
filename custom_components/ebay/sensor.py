@@ -38,10 +38,13 @@ from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
 _LOGGER = logging.getLogger(__name__)
 
+ENUM_UNKNOWN = "UNKNOWN"
+
 SELLER_LEVEL_OPTIONS = [
     "TOP_RATED",
     "ABOVE_STANDARD",
     "BELOW_STANDARD",
+    ENUM_UNKNOWN,
 ]
 
 CUSTOMER_SERVICE_RATING_OPTIONS = [
@@ -52,6 +55,7 @@ CUSTOMER_SERVICE_RATING_OPTIONS = [
     "VERY_LOW",
     "ABOVE_STANDARD",
     "BELOW_STANDARD",
+    ENUM_UNKNOWN,
 ]
 
 
@@ -704,8 +708,7 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             text = str(value)
             options = self.entity_description.options or []
             if options and text not in options:
-                # Keep unknown eBay enums visible rather than dropping the state.
-                return text
+                return ENUM_UNKNOWN
             return text
         return value
 
@@ -713,7 +716,7 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return bounded summary context."""
         summary = self.coordinator.data["summary"]
-        return {
+        attrs: dict[str, Any] = {
             "items_ending_soon": summary.get("items_ending_soon"),
             "items_with_offers": summary.get("items_with_offers"),
             "items_with_bids": summary.get("items_with_bids"),
@@ -726,6 +729,14 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             "truncated_collections": summary.get("truncated_collections"),
             "api_warnings": summary.get("api_warnings"),
         }
+        if self.entity_description.device_class == SensorDeviceClass.ENUM:
+            raw = summary.get(self.entity_description.value_key)
+            if raw is not None:
+                text = str(raw)
+                options = self.entity_description.options or []
+                if options and text not in options:
+                    attrs["raw_value"] = text
+        return attrs
 
 
 class EbayDiagnosticSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
