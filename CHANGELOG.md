@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1](https://github.com/andrewtryder/ha-ebay/compare/v0.6.0...v0.6.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* gate repairs and seller-ops refresh correctness ([#44](https://github.com/andrewtryder/ha-ebay/issues/44)) ([8e78ac5](https://github.com/andrewtryder/ha-ebay/commit/8e78ac598b20b791cd942f4e43ba85ac75de44ca))
+* map unknown eBay enums to UNKNOWN ([#45](https://github.com/andrewtryder/ha-ebay/issues/45)) ([b7c6ecb](https://github.com/andrewtryder/ha-ebay/commit/b7c6ecb5971b5acc74ac697b2bc5b6492c9f8a2a))
+* require Selling when Analytics is enabled ([#46](https://github.com/andrewtryder/ha-ebay/issues/46)) ([843c4a8](https://github.com/andrewtryder/ha-ebay/commit/843c4a8c17feda3fb0b1ab8b3be282c0fb456e29))
+
 ## [0.6.0](https://github.com/andrewtryder/ha-ebay/compare/v0.5.3...v0.6.0) (2026-07-13)
 
 
