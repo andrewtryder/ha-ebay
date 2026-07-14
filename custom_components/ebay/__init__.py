@@ -40,6 +40,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .api import EbayApiClient, has_core_scope
     from .coordinator import EbayDataUpdateCoordinator
+    from .repairs import async_load_repair_streaks
 
     if not has_core_scope(entry.data.get(CONF_OAUTH_SCOPES)):
         raise ConfigEntryAuthFailed(
@@ -67,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         oauth_session=oauth_session,
     )
     coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
+    coordinator._repair_streaks = await async_load_repair_streaks(hass, entry.entry_id)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(
@@ -77,17 +79,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload an eBay config entry."""
+    """Unload an eBay config entry.
+
+    Repair issues stay in the registry across reload. Streaks are flushed so
+    the next setup can recreate threshold-gated issues immediately.
+    """
     from homeassistant.const import Platform
 
-    from .repairs import async_delete_entry_issues
+    from .repairs import async_save_repair_streaks
 
     coordinator = entry.runtime_data
     coordinator.cancel_scheduled_events()
-    async_delete_entry_issues(hass, entry)
+    await async_save_repair_streaks(hass, entry.entry_id, coordinator._repair_streaks)
     return await hass.config_entries.async_unload_platforms(
         entry, [Platform(platform) for platform in PLATFORMS]
     )
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Clean up repairs and persisted streaks when a config entry is removed."""
+    from .repairs import async_delete_entry_issues, async_remove_repair_streaks
+
+    async_delete_entry_issues(hass, entry)
+    await async_remove_repair_streaks(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

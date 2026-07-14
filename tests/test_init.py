@@ -72,6 +72,12 @@ def _patch_setup(*, coordinator: Mock, client: Any = None) -> ExitStack:
     )
     stack.enter_context(
         patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        )
+    )
+    stack.enter_context(
+        patch(
             "homeassistant.helpers.config_entry_oauth2_flow.async_register_implementation"
         )
     )
@@ -311,11 +317,45 @@ def test_async_unload_cancels_timers_and_unloads_platforms() -> None:
     hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
     entry = _mock_entry()
     coordinator = Mock()
+    coordinator._repair_streaks = {"truncation:watched": 3}
     entry.runtime_data = coordinator
 
-    assert asyncio.run(ebay_integration.async_unload_entry(hass, entry)) is True
+    with (
+        patch(
+            "custom_components.ebay.repairs.async_save_repair_streaks",
+            new_callable=AsyncMock,
+        ) as save_streaks,
+        patch(
+            "custom_components.ebay.repairs.async_delete_entry_issues"
+        ) as delete_issues,
+    ):
+        assert asyncio.run(ebay_integration.async_unload_entry(hass, entry)) is True
+
     coordinator.cancel_scheduled_events.assert_called_once()
+    save_streaks.assert_awaited_once_with(
+        hass, entry.entry_id, coordinator._repair_streaks
+    )
+    delete_issues.assert_not_called()
     hass.config_entries.async_unload_platforms.assert_awaited()
+
+
+def test_async_remove_entry_clears_issues_and_streaks() -> None:
+    hass = Mock()
+    entry = _mock_entry()
+
+    with (
+        patch(
+            "custom_components.ebay.repairs.async_delete_entry_issues"
+        ) as delete_issues,
+        patch(
+            "custom_components.ebay.repairs.async_remove_repair_streaks",
+            new_callable=AsyncMock,
+        ) as remove_streaks,
+    ):
+        asyncio.run(ebay_integration.async_remove_entry(hass, entry))
+
+    delete_issues.assert_called_once_with(hass, entry)
+    remove_streaks.assert_awaited_once_with(hass, entry.entry_id)
 
 
 def test_options_listener_reloads_entry() -> None:
@@ -357,6 +397,10 @@ def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
         patch(
             "custom_components.ebay.coordinator.EbayDataUpdateCoordinator",
             return_value=coordinator,
+        ),
+        patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
         ),
         patch(
             "homeassistant.helpers.aiohttp_client.async_get_clientsession",

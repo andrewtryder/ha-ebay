@@ -1847,6 +1847,7 @@ class EbayApiClient:
                 truncated_collections[key] = False
 
         feature_options = {
+            CONF_SELLING_ENABLED: selling_enabled,
             CONF_ANALYTICS_ENABLED: analytics_enabled,
             CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
             CONF_SELLER_STANDARDS_ENABLED: seller_standards_enabled,
