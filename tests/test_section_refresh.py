@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
-from custom_components.ebay.api import EbayApiClient
+from custom_components.ebay.api import EbayApiClient, EbayError
 from custom_components.ebay.const import (
     SECTION_FEEDBACK,
     SECTION_FULFILLMENT,
     SECTION_MESSAGES,
+    SECTION_SELLER_STANDARDS,
 )
 from custom_components.ebay.seller_ops import empty_seller_ops
 
@@ -134,3 +135,45 @@ def test_fulfillment_only_refresh_updates_orders() -> None:
     assert payload["seller_ops"]["orders"]["awaiting_shipment"] == 4
     assert payload["api_warnings"] == previous["api_warnings"]
     assert SECTION_FULFILLMENT in payload["section_last_fetched"]
+    assert SECTION_FULFILLMENT in payload["section_last_success"]
+    assert SECTION_FULFILLMENT in payload["section_last_attempt"]
+
+
+def test_seller_standards_soft_fail_does_not_stamp_success() -> None:
+    previous = {
+        "watched": {},
+        "bidding": {},
+        "selling": {},
+        "seller_ops": empty_seller_ops(),
+        "selling_classification": {},
+        "summary": {},
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+        "section_last_fetched": {},
+        "section_last_attempt": {},
+        "section_last_success": {},
+    }
+    client = _client()
+    client.async_fetch_seller_standards = AsyncMock(side_effect=EbayError("boom"))
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_sections(
+            {SECTION_SELLER_STANDARDS},
+            previous=previous,
+            buying_enabled=False,
+            selling_enabled=False,
+            analytics_enabled=False,
+            seller_standards_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=(
+                "https://api.ebay.com/oauth/api_scope "
+                "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
+            ),
+        )
+
+    payload = asyncio.run(run())
+    assert "seller_standards" in payload["partial_failures"]
+    assert SECTION_SELLER_STANDARDS in payload["section_last_attempt"]
+    assert SECTION_SELLER_STANDARDS not in payload["section_last_success"]
+    assert SECTION_SELLER_STANDARDS not in payload["section_last_fetched"]

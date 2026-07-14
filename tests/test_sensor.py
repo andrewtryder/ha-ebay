@@ -395,6 +395,65 @@ def test_summary_timestamp_and_enum_native_values() -> None:
     )
 
 
+def test_unknown_enum_maps_to_unknown_and_preserves_raw() -> None:
+    """Unrecognized eBay enums must stay within declared options."""
+    from custom_components.ebay.sensor import (
+        CUSTOMER_SERVICE_RATING_OPTIONS,
+        ENUM_UNKNOWN,
+        EbaySummarySensor,
+        SELLER_LEVEL_OPTIONS,
+    )
+
+    coordinator = _SelectionCoordinator(
+        options=dict(DEFAULT_OPTIONS),
+        data={
+            "summary": {
+                "seller_level": "PLATINUM_PLUS",
+                "item_not_received_metric": "0.42",
+            },
+            "selling": {},
+            "watched": {},
+            "bidding": {},
+        },
+    )
+    level_desc = next(item for item in SUMMARY_SENSORS if item.key == "seller_level")
+    inr_desc = next(
+        item for item in SUMMARY_SENSORS if item.key == "item_not_received_metric"
+    )
+    level = EbaySummarySensor(coordinator, Mock(entry_id="e"), level_desc)
+    inr = EbaySummarySensor(coordinator, Mock(entry_id="e"), inr_desc)
+
+    assert level.native_value == ENUM_UNKNOWN
+    assert level.native_value in (level_desc.options or SELLER_LEVEL_OPTIONS)
+    assert level.extra_state_attributes["raw_value"] == "PLATINUM_PLUS"
+
+    assert inr.native_value == ENUM_UNKNOWN
+    assert inr.native_value in (inr_desc.options or CUSTOMER_SERVICE_RATING_OPTIONS)
+    assert inr.extra_state_attributes["raw_value"] == "0.42"
+    assert ENUM_UNKNOWN in SELLER_LEVEL_OPTIONS
+    assert ENUM_UNKNOWN in CUSTOMER_SERVICE_RATING_OPTIONS
+
+
+def test_parse_customer_service_prefers_rating_enum() -> None:
+    from custom_components.ebay.seller_ops import parse_customer_service_metric
+
+    parsed = parse_customer_service_metric(
+        {
+            "dimensionMetrics": [
+                {
+                    "metrics": [
+                        {
+                            "avgRatingOrScore": 0.12,
+                            "benchmark": {"rating": "AVERAGE"},
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+    assert parsed["rating"] == "AVERAGE"
+
+
 def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:
     from custom_components.ebay.api import _seller_ops_summary_keys
     from custom_components.ebay.seller_ops import empty_seller_ops

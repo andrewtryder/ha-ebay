@@ -27,6 +27,7 @@ from custom_components.ebay.const import (
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
 )
 
 
@@ -62,10 +63,41 @@ def test_scopes_for_options_unions_enabled_modules() -> None:
     assert len(scopes) == 4
 
 
+def test_scopes_for_options_analytics_requires_selling() -> None:
+    alone = parse_scope_set(
+        scopes_for_options(
+            {
+                CONF_ANALYTICS_ENABLED: True,
+                CONF_SELLING_ENABLED: False,
+            }
+        )
+    )
+    assert SCOPE_ANALYTICS_READONLY not in alone
+
+    both = parse_scope_set(
+        scopes_for_options(
+            {
+                CONF_ANALYTICS_ENABLED: True,
+                CONF_SELLING_ENABLED: True,
+            }
+        )
+    )
+    assert SCOPE_ANALYTICS_READONLY in both
+
+    assert (
+        missing_scopes_for_options(
+            CORE_SCOPE,
+            {CONF_ANALYTICS_ENABLED: True, CONF_SELLING_ENABLED: False},
+        )
+        == {}
+    )
+
+
 def test_scopes_for_options_dedupes_shared_analytics_scope() -> None:
     scopes = scopes_for_options(
         {
             CONF_ANALYTICS_ENABLED: True,
+            CONF_SELLING_ENABLED: True,
             CONF_SELLER_STANDARDS_ENABLED: True,
         }
     ).split()

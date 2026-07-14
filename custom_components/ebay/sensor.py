@@ -38,10 +38,13 @@ from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
 
 _LOGGER = logging.getLogger(__name__)
 
+ENUM_UNKNOWN = "UNKNOWN"
+
 SELLER_LEVEL_OPTIONS = [
     "TOP_RATED",
     "ABOVE_STANDARD",
     "BELOW_STANDARD",
+    ENUM_UNKNOWN,
 ]
 
 CUSTOMER_SERVICE_RATING_OPTIONS = [
@@ -52,6 +55,7 @@ CUSTOMER_SERVICE_RATING_OPTIONS = [
     "VERY_LOW",
     "ABOVE_STANDARD",
     "BELOW_STANDARD",
+    ENUM_UNKNOWN,
 ]
 
 
@@ -712,8 +716,7 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             text = str(value)
             options = self.entity_description.options or []
             if options and text not in options:
-                # Keep unknown eBay enums visible rather than dropping the state.
-                return text
+                return ENUM_UNKNOWN
             return text
         return value
 
@@ -742,6 +745,13 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             attrs["window_days"] = summary.get(
                 "sold_unsold_window_days", SOLD_UNSOLD_DURATION_DAYS
             )
+        if self.entity_description.device_class == SensorDeviceClass.ENUM:
+            raw = summary.get(self.entity_description.value_key)
+            if raw is not None:
+                text = str(raw)
+                options = self.entity_description.options or []
+                if options and text not in options:
+                    attrs["raw_value"] = text
         return attrs
 
 

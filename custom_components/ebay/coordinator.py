@@ -45,6 +45,8 @@ from .const import (
     ENTITY_MODE_MINIMAL,
     LEGACY_COMPATIBILITY_EVENT_TYPES,
     MANUAL_REFRESH_COOLDOWN_SECONDS,
+    MISSING_SCOPE_PARTIAL_FAILURES,
+    PARTIAL_FAILURE_SECTION,
     RECENT_EVENTS_MAX,
     REFRESH_RESULT_AUTH_ERROR,
     REFRESH_RESULT_ERROR,
@@ -53,6 +55,7 @@ from .const import (
     REFRESH_RESULT_UNKNOWN,
     TITLE_HISTORY_MAX_LEN,
     section_interval_minutes,
+    section_retry_minutes,
 )
 from .options_parse import parse_price_targets, pinned_ids, to_decimal
 
@@ -74,6 +77,44 @@ _BASELINE_ID_LISTS = ("sold_item_ids", "unsold_item_ids")
 def _duration_ms(start: float) -> float:
     """Return elapsed monotonic time in milliseconds."""
     return (time.monotonic() - start) * 1000
+
+
+def _parse_section_timestamp(value: Any) -> datetime | None:
+    """Parse a section timestamp from a datetime or ISO string."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _section_timestamps(data: dict[str, Any], *keys: str) -> dict[str, datetime]:
+    """Merge section timestamp maps; earlier keys take precedence."""
+    result: dict[str, datetime] = {}
+    for key in keys:
+        raw = data.get(key) or {}
+        if not isinstance(raw, dict):
+            continue
+        for section, value in raw.items():
+            if section in result:
+                continue
+            parsed = _parse_section_timestamp(value)
+            if parsed is not None:
+                result[section] = parsed
+    return result
+
+
+def _section_has_missing_scope(partial_failures: set[str], section: str) -> bool:
+    """Return whether the section's last failure was a missing-scope condition."""
+    for category in MISSING_SCOPE_PARTIAL_FAILURES:
+        if category not in partial_failures:
+            continue
+        if PARTIAL_FAILURE_SECTION.get(category) == section:
+            return True
+    return False
 
 
 class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -219,23 +260,35 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return enabled
         now = datetime.now(timezone.utc)
         poll_interval = int(self.options[CONF_POLL_INTERVAL])
-        last_fetched = (self.data or {}).get("section_last_fetched") or {}
+        last_success = _section_timestamps(
+            self.data, "section_last_success", "section_last_fetched"
+        )
+        last_attempt = _section_timestamps(self.data, "section_last_attempt")
+        partial_failures = set(self.data.get("partial_failures") or [])
         due: set[str] = set()
         for section in enabled:
-            last = last_fetched.get(section)
-            if last is None:
+            success = last_success.get(section)
+            attempt = last_attempt.get(section)
+            if success is None and attempt is None:
                 due.add(section)
                 continue
-            if isinstance(last, str):
-                try:
-                    last = datetime.fromisoformat(last)
-                except ValueError:
-                    due.add(section)
-                    continue
+
             interval = timedelta(
                 minutes=section_interval_minutes(section, poll_interval)
             )
-            if now - last >= interval:
+            if success is not None and now - success >= interval:
+                due.add(section)
+                continue
+
+            # Soft-fail retry: last attempt is newer than last success (or no success).
+            if attempt is None:
+                continue
+            if success is not None and attempt <= success:
+                continue
+            if _section_has_missing_scope(partial_failures, section):
+                continue
+            retry = timedelta(minutes=section_retry_minutes(section, poll_interval))
+            if now - attempt >= retry:
                 due.add(section)
         return due
 
@@ -286,9 +339,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else REFRESH_RESULT_SUCCESS,
                 error_category=None,
             )
-            from .repairs import async_sync_repair_issues
-
-            await async_sync_repair_issues(self.hass, self.entry, self, self.data)
+            # No section attempts this tick — do not advance repair streaks.
             return self.data
         try:
             payload = await self.api.async_fetch_data(
@@ -345,10 +396,15 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         payload["summary"]["missing_scope_features"] = payload.get(
             "missing_scope_features", []
         )
-        payload["summary"]["section_last_fetched"] = {
-            key: value.isoformat() if isinstance(value, datetime) else value
-            for key, value in (payload.get("section_last_fetched") or {}).items()
-        }
+        for key in (
+            "section_last_fetched",
+            "section_last_attempt",
+            "section_last_success",
+        ):
+            payload["summary"][key] = {
+                k: v.isoformat() if isinstance(v, datetime) else v
+                for k, v in (payload.get(key) or {}).items()
+            }
         warnings = payload.get("api_warnings") or []
         payload["summary"]["api_warnings"] = warnings[:API_WARNINGS_STATE_ATTR_MAX]
         result = (
@@ -365,7 +421,14 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         from .repairs import async_sync_repair_issues
 
-        await async_sync_repair_issues(self.hass, self.entry, self, payload)
+        refreshed = set(payload.get("refreshed_sections") or due_sections)
+        await async_sync_repair_issues(
+            self.hass,
+            self.entry,
+            self,
+            payload,
+            refreshed_sections=refreshed,
+        )
         _LOGGER.debug(
             "eBay coordinator refresh completed entry_id=%s refreshed_sections=%s watched_count=%s bidding_count=%s selling_count=%s partial_failures=%s truncated_collections=%s duration_ms=%.1f",
             self.entry.entry_id,
@@ -559,9 +622,11 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._detect_seller_ops_events(
             previous.get("seller_ops") or {},
             current.get("seller_ops") or {},
-            suppress_incomplete=_collection_truncated(previous, current, "orders")
-            or _collection_truncated(previous, current, "messages")
-            or _collection_truncated(previous, current, "payment_disputes"),
+            suppress_orders=_collection_truncated(previous, current, "orders"),
+            suppress_disputes=_collection_truncated(
+                previous, current, "payment_disputes"
+            ),
+            suppress_messages=_collection_truncated(previous, current, "messages"),
         )
 
     def _detect_selling_events(
@@ -881,7 +946,9 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         previous: dict[str, Any],
         current: dict[str, Any],
         *,
-        suppress_incomplete: bool = False,
+        suppress_orders: bool = False,
+        suppress_disputes: bool = False,
+        suppress_messages: bool = False,
     ) -> None:
         """Emit seller-ops transition events from order/standards/feedback/message diffs."""
         prev_orders = (previous.get("orders") or {}).get("by_id") or {}
@@ -889,7 +956,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for order_id, order in curr_orders.items():
             old = prev_orders.get(order_id)
             if not old:
-                if not suppress_incomplete:
+                if not suppress_orders:
                     self._emit("seller_ops", "order_received", order)
                     if order.get("paid"):
                         self._emit("seller_ops", "order_paid", order)
@@ -912,7 +979,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         prev_disputes = (previous.get("disputes") or {}).get("by_id") or {}
         curr_disputes = (current.get("disputes") or {}).get("by_id") or {}
         for dispute_id, dispute in curr_disputes.items():
-            if dispute_id not in prev_disputes and not suppress_incomplete:
+            if dispute_id not in prev_disputes and not suppress_disputes:
                 self._emit(
                     "seller_ops",
                     "payment_dispute_opened",
@@ -1004,7 +1071,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             old = prev_messages.get(conversation_id)
             if old:
                 continue
-            if suppress_incomplete:
+            if suppress_messages:
                 continue
             subject = convo.get("subject") or convo.get("title")
             payload = {
