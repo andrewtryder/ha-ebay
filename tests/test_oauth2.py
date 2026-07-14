@@ -991,6 +991,38 @@ def test_options_flow_menu_sections_and_save() -> None:
     assert created["data"]["analytics_enabled"] is False
 
 
+def test_options_flow_disables_analytics_when_selling_off() -> None:
+    """Analytics cannot remain enabled without Selling."""
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+
+    entry = type("Entry", (), {"options": {}, "data": {}})()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    flow._draft = {
+        "poll_interval": 30,
+        "ending_soon_threshold": 60,
+        "entity_mode": "balanced",
+        "per_item_cap": 25,
+        "pinned_item_ids": "",
+        "pinned_item_price_targets": "",
+        "watched_price_change_min_percent": 0,
+        "watched_price_drop_threshold": "",
+        "watched_price_drop_currency": "",
+        "buying_enabled": True,
+        "selling_enabled": True,
+        "analytics_enabled": True,
+        "fulfillment_enabled": False,
+        "seller_standards_enabled": False,
+        "feedback_enabled": False,
+        "messages_enabled": False,
+    }
+    asyncio.run(
+        flow.async_step_selling({"selling_enabled": False, "analytics_enabled": True})
+    )
+    assert flow._draft["selling_enabled"] is False
+    assert flow._draft["analytics_enabled"] is False
+
+
 def test_options_flow_starts_reauth_when_scopes_missing() -> None:
     """Enabling a module without granted scopes starts reauthorization."""
     from custom_components.ebay.config_flow import EbayOptionsFlow
