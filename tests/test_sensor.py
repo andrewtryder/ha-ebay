@@ -301,9 +301,17 @@ def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
     )
     sensor = EbaySummarySensor(coordinator, Mock(entry_id="entry-1"), description)
     attrs = sensor.extra_state_attributes
-    assert attrs["partial_failures"] == ["selling_truncated"]
-    assert attrs["truncated_collections"] == {"selling": True}
-    assert attrs["api_warnings"] == [{"code": "1"}]
+    assert attrs == {"last_update": None}
+    assert "partial_failures" not in attrs
+
+    context_desc = next(
+        item for item in SUMMARY_SENSORS if item.key == "refresh_context"
+    )
+    context = EbaySummarySensor(coordinator, Mock(entry_id="entry-1"), context_desc)
+    context_attrs = context.extra_state_attributes
+    assert context_attrs["partial_failures"] == ["selling_truncated"]
+    assert context_attrs["truncated_collections"] == {"selling": True}
+    assert context_attrs["api_warnings"] == [{"code": "1"}]
 
 
 def test_summary_sensors_are_gated_by_feature_options() -> None:
@@ -397,3 +405,54 @@ def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:
     assert summary["unread_conversations"] is None
     assert summary["seller_standard_at_risk"] is None
     assert summary["recent_positive_feedback"] is None
+
+
+def test_sold_unsold_window_days_attribute() -> None:
+    from custom_components.ebay.api import SOLD_UNSOLD_DURATION_DAYS
+    from custom_components.ebay.sensor import EbaySummarySensor
+
+    coordinator = _SelectionCoordinator(
+        options=dict(DEFAULT_OPTIONS),
+        data={
+            "summary": {
+                "sold_items_count": 3,
+                "sold_unsold_window_days": SOLD_UNSOLD_DURATION_DAYS,
+                "last_update": "2026-07-13T00:00:00+00:00",
+            },
+            "selling": {},
+            "watched": {},
+            "bidding": {},
+        },
+    )
+    description = next(
+        item for item in SUMMARY_SENSORS if item.key == "sold_items_count"
+    )
+    attrs = EbaySummarySensor(
+        coordinator, Mock(entry_id="e"), description
+    ).extra_state_attributes
+    assert attrs["window_days"] == SOLD_UNSOLD_DURATION_DAYS
+
+
+def test_should_fetch_sold_unsold_on_disappearance_or_stale() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from custom_components.ebay.api import _should_fetch_sold_unsold
+
+    now = datetime.now(timezone.utc)
+    assert _should_fetch_sold_unsold({"a": {}}, {}, None, now=now) is True
+    assert (
+        _should_fetch_sold_unsold(
+            {"a": {}}, {"a": {}}, now - timedelta(hours=1), now=now
+        )
+        is False
+    )
+    assert (
+        _should_fetch_sold_unsold(
+            {"a": {}}, {"a": {}}, now - timedelta(hours=7), now=now
+        )
+        is True
+    )
+    assert (
+        _should_fetch_sold_unsold({"a": {}}, {}, now - timedelta(hours=1), now=now)
+        is True
+    )

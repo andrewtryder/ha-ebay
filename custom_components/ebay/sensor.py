@@ -22,7 +22,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import API_WARNINGS_STATE_ATTR_MAX
+from .api import API_WARNINGS_STATE_ATTR_MAX, SOLD_UNSOLD_DURATION_DAYS
 from .const import (
     CONF_BUYING_ENABLED,
     CONF_FEEDBACK_ENABLED,
@@ -338,6 +338,14 @@ SUMMARY_SENSORS = [
         native_unit_of_measurement=UnitOfTime.HOURS,
         state_class=SensorStateClass.MEASUREMENT,
         entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="refresh_context",
+        translation_key="refresh_context",
+        value_key="last_successful_update",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        device_class=SensorDeviceClass.TIMESTAMP,
     ),
 ]
 
@@ -711,21 +719,30 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return bounded summary context."""
+        """Return attributes relevant to this sensor."""
         summary = self.coordinator.data["summary"]
-        return {
-            "items_ending_soon": summary.get("items_ending_soon"),
-            "items_with_offers": summary.get("items_with_offers"),
-            "items_with_bids": summary.get("items_with_bids"),
-            "items_with_questions": summary.get("items_with_questions"),
-            "highest_watcher_count_item": summary.get("highest_watcher_count_item"),
-            "highest_view_count_item": summary.get("highest_view_count_item"),
+        if self.entity_description.key == "refresh_context":
+            return {
+                "items_ending_soon": summary.get("items_ending_soon"),
+                "items_with_offers": summary.get("items_with_offers"),
+                "items_with_bids": summary.get("items_with_bids"),
+                "items_with_questions": summary.get("items_with_questions"),
+                "highest_watcher_count_item": summary.get("highest_watcher_count_item"),
+                "highest_view_count_item": summary.get("highest_view_count_item"),
+                "last_update": summary.get("last_update"),
+                "last_successful_update": summary.get("last_successful_update"),
+                "partial_failures": summary.get("partial_failures"),
+                "truncated_collections": summary.get("truncated_collections"),
+                "api_warnings": summary.get("api_warnings"),
+            }
+        attrs: dict[str, Any] = {
             "last_update": summary.get("last_update"),
-            "last_successful_update": summary.get("last_successful_update"),
-            "partial_failures": summary.get("partial_failures"),
-            "truncated_collections": summary.get("truncated_collections"),
-            "api_warnings": summary.get("api_warnings"),
         }
+        if self.entity_description.key in {"sold_items_count", "unsold_items_count"}:
+            attrs["window_days"] = summary.get(
+                "sold_unsold_window_days", SOLD_UNSOLD_DURATION_DAYS
+            )
+        return attrs
 
 
 class EbayDiagnosticSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):

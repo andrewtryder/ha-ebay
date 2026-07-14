@@ -194,10 +194,10 @@
         "name": "Quantity sold across active listings"
       },
       "sold_items_count": {
-        "name": "Sold items"
+        "name": "Recent sold items"
       },
       "unsold_items_count": {
-        "name": "Unsold items"
+        "name": "Recent unsold items"
       },
       "selling_total_watchers": {
         "name": "Selling total watchers"
@@ -276,6 +276,9 @@
       },
       "oldest_unanswered_message_hours": {
         "name": "Oldest unanswered message age"
+      },
+      "refresh_context": {
+        "name": "Refresh context"
       },
       "last_successful_update": {
         "name": "Last successful update"
