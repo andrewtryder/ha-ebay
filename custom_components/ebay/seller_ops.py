@@ -331,6 +331,19 @@ def parse_seller_standards_profiles(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_CS_RATING_ENUMS = frozenset(
+    {
+        "VERY_HIGH",
+        "HIGH",
+        "AVERAGE",
+        "LOW",
+        "VERY_LOW",
+        "ABOVE_STANDARD",
+        "BELOW_STANDARD",
+    }
+)
+
+
 def parse_customer_service_metric(payload: dict[str, Any]) -> dict[str, Any]:
     """Extract rating and peer-benchmark flag from a CS metric response."""
     dimension_metrics = payload.get("dimensionMetrics") or []
@@ -341,15 +354,22 @@ def parse_customer_service_metric(payload: dict[str, Any]) -> dict[str, Any]:
         metrics = metric.get("metrics") or []
         if metrics:
             entry = metrics[0]
-            rating = entry.get("avgRatingOrScore") or entry.get("rating")
-            if rating is None:
-                rating = (
+            raw_score = entry.get("avgRatingOrScore") or entry.get("rating")
+            if raw_score is None:
+                raw_score = (
                     (entry.get("value") or {}).get("value")
                     if isinstance(entry.get("value"), dict)
                     else entry.get("value")
                 )
             benchmark = entry.get("benchmark") or {}
             rating_enum = benchmark.get("rating") or entry.get("metricRating")
+            # Prefer a declared enum over a numeric score for sensor state.
+            if isinstance(rating_enum, str) and rating_enum in _CS_RATING_ENUMS:
+                rating = rating_enum
+            elif isinstance(raw_score, str) and raw_score in _CS_RATING_ENUMS:
+                rating = raw_score
+            elif raw_score is not None:
+                rating = raw_score
             if rating_enum in {"LOW", "VERY_LOW", "BELOW_STANDARD"}:
                 above_benchmark = True
             # "Above peer benchmark" means worse than peers for defect-style metrics.
