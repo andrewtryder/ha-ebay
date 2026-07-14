@@ -344,6 +344,65 @@ def test_empty_due_sections_returns_cached_payload() -> None:
     api.async_fetch_data.assert_not_awaited()
 
 
+def test_due_sections_retries_soft_failed_standards() -> None:
+    coordinator = _coordinator()
+    now = datetime.now(timezone.utc)
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "seller_standards_enabled": True,
+        "poll_interval": 30,
+    }
+    # Soft-fail: attempt newer than success, within normal 1440m window.
+    coordinator.data = {
+        "partial_failures": ["seller_standards"],
+        "section_last_success": {
+            "buying": now,
+            "selling": now,
+            "seller_standards": now - timedelta(hours=2),
+        },
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+            "seller_standards": now - timedelta(hours=2),
+        },
+        "section_last_attempt": {
+            "buying": now,
+            "selling": now,
+            "seller_standards": now - timedelta(minutes=61),
+        },
+    }
+    due = coordinator._due_sections(force=False)
+    assert due == {"seller_standards"}
+
+
+def test_due_sections_does_not_retry_missing_scope() -> None:
+    coordinator = _coordinator()
+    now = datetime.now(timezone.utc)
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "seller_standards_enabled": True,
+        "poll_interval": 30,
+    }
+    coordinator.data = {
+        "partial_failures": ["seller_standards_missing_scope"],
+        "section_last_success": {
+            "buying": now,
+            "selling": now,
+        },
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+        },
+        "section_last_attempt": {
+            "buying": now,
+            "selling": now,
+            "seller_standards": now - timedelta(hours=2),
+        },
+    }
+    due = coordinator._due_sections(force=False)
+    assert "seller_standards" not in due
+
+
 def test_section_refresh_passes_due_sections_and_previous() -> None:
     now = datetime.now(timezone.utc)
     previous = {

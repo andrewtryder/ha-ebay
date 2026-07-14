@@ -1232,7 +1232,13 @@ def test_seller_ops_order_and_message_events() -> None:
             }
         },
     }
-    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=False)
+    coordinator._detect_seller_ops_events(
+        previous,
+        current,
+        suppress_orders=False,
+        suppress_disputes=False,
+        suppress_messages=False,
+    )
     assert "order_received" in events
     assert "order_paid" in events
     assert "shipment_due_soon" in events
@@ -1283,8 +1289,113 @@ def test_seller_ops_suppress_incomplete_blocks_new_events() -> None:
             }
         },
     }
-    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=True)
+    coordinator._detect_seller_ops_events(
+        previous,
+        current,
+        suppress_orders=True,
+        suppress_disputes=True,
+        suppress_messages=True,
+    )
     assert events == []
+
+
+def test_seller_ops_messages_truncation_does_not_block_orders() -> None:
+    """Messages truncation must not suppress new order or dispute events."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {},
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "paid": False,
+                    "shipped": False,
+                    "has_tracking": False,
+                    "due_soon": False,
+                    "overdue": False,
+                }
+            }
+        },
+        "disputes": {"by_id": {"d1": {"dispute_id": "d1", "order_id": "o1"}}},
+        "standards": {},
+        "feedback": {},
+        "messages": {
+            "by_id": {
+                "c1": {
+                    "conversation_id": "c1",
+                    "is_buyer_question": True,
+                    "subject": "Q",
+                }
+            }
+        },
+    }
+    coordinator._detect_seller_ops_events(
+        previous,
+        current,
+        suppress_orders=False,
+        suppress_disputes=False,
+        suppress_messages=True,
+    )
+    assert "order_received" in events
+    assert "payment_dispute_opened" in events
+    assert "new_buyer_question" not in events
+
+
+def test_seller_ops_orders_truncation_does_not_block_messages() -> None:
+    """Orders truncation must not suppress new message events."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {},
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {
+            "by_id": {
+                "o1": {
+                    "order_id": "o1",
+                    "paid": False,
+                    "shipped": False,
+                    "has_tracking": False,
+                    "due_soon": False,
+                    "overdue": False,
+                }
+            }
+        },
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {},
+        "messages": {
+            "by_id": {
+                "c1": {
+                    "conversation_id": "c1",
+                    "is_buyer_question": True,
+                    "subject": "Q",
+                }
+            }
+        },
+    }
+    coordinator._detect_seller_ops_events(
+        previous,
+        current,
+        suppress_orders=True,
+        suppress_disputes=False,
+        suppress_messages=False,
+    )
+    assert "order_received" not in events
+    assert "new_buyer_question" in events
 
 
 def test_seller_ops_existing_order_and_message_variants() -> None:
@@ -1337,7 +1448,13 @@ def test_seller_ops_existing_order_and_message_variants() -> None:
             }
         },
     }
-    coordinator._detect_seller_ops_events(previous, current, suppress_incomplete=False)
+    coordinator._detect_seller_ops_events(
+        previous,
+        current,
+        suppress_orders=False,
+        suppress_disputes=False,
+        suppress_messages=False,
+    )
     assert "order_paid" in events
     assert "order_marked_shipped" in events
     assert "tracking_added" in events

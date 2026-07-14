@@ -185,7 +185,15 @@ def test_seller_ops_unavailable_after_streak(
     }
 
     for _ in range(REPAIR_STREAK_THRESHOLD):
-        asyncio.run(async_sync_repair_issues(Mock(), entry, coordinator, payload))
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections={"seller_standards"},
+            )
+        )
 
     issue_id = issue_id_for(entry.entry_id, "seller_ops_unavailable_seller_standards")
     assert (DOMAIN, issue_id) in issue_registry.issues
@@ -194,6 +202,37 @@ def test_seller_ops_unavailable_after_streak(
         DOMAIN,
         issue_id_for(entry.entry_id, "partial_failure_seller_standards"),
     ) not in issue_registry.issues
+
+
+def test_unrelated_section_refresh_does_not_advance_streak(
+    issue_registry: _FakeIssueRegistry,
+) -> None:
+    entry = _entry()
+    coordinator = _coordinator()
+    payload = {
+        "missing_scope_features": [],
+        "missing_scopes": {},
+        "partial_failures": ["seller_standards"],
+        "truncated_collections": {},
+    }
+
+    for _ in range(REPAIR_STREAK_THRESHOLD):
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections={"buying"},
+            )
+        )
+
+    assert (
+        coordinator._repair_streaks.get("seller_ops_unavailable:seller_standards", 0)
+        == 0
+    )
+    issue_id = issue_id_for(entry.entry_id, "seller_ops_unavailable_seller_standards")
+    assert (DOMAIN, issue_id) not in issue_registry.issues
 
 
 def test_delete_entry_issues(issue_registry: _FakeIssueRegistry) -> None:
