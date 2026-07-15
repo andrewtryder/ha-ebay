@@ -134,6 +134,41 @@ def test_parse_feedback_summary_and_items() -> None:
     }
 
 
+def test_parse_feedback_summary_documented_shape() -> None:
+    """Parse feedbackRatingSummary / ratingSummaryByRatingType / metrics."""
+    summary = parse_feedback_summary(
+        {
+            "feedbackRatingSummary": {
+                "ratingSummaryByRatingType": [
+                    {
+                        "ratingType": "OVERALL_EXPERIENCE",
+                        "period": {"value": 30, "unit": "DAY"},
+                        "feedbackMetrics": [
+                            {"metricName": "FEEDBACK_SCORE", "value": "88"},
+                            {
+                                "metricName": "POSITIVE_FEEDBACK_PERCENTAGE",
+                                "value": "98.5",
+                            },
+                        ],
+                        "feedbackRatingValueDistribution": [
+                            {"ratingValue": "POSITIVE", "count": 40},
+                            {"ratingValue": "NEUTRAL", "count": 2},
+                            {"ratingValue": "NEGATIVE", "count": 1},
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    assert summary == {
+        "score": 88,
+        "positive_percent": 98.5,
+        "recent_positive": 40,
+        "recent_neutral": 2,
+        "recent_negative": 1,
+    }
+
+
 def test_normalize_conversation_no_body() -> None:
     convo = normalize_conversation(
         {

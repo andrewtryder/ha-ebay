@@ -9,7 +9,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from custom_components.ebay.api import EbayApiClient, EbayPartialFailure
+from custom_components.ebay.api import (
+    EbayApiClient,
+    EbayPartialFailure,
+    map_rest_failure_category,
+)
 
 
 class _Response:
@@ -32,11 +36,15 @@ class _Context:
         return None
 
 
-def _client(responses: list[_Response]) -> EbayApiClient:
+def _client(
+    responses: list[_Response], *, capture: list[dict[str, Any]] | None = None
+) -> EbayApiClient:
     session = Mock()
     queue = list(responses)
 
-    def _get(*_args: Any, **_kwargs: Any) -> _Context:
+    def _get(*args: Any, **kwargs: Any) -> _Context:
+        if capture is not None:
+            capture.append({"args": args, "kwargs": kwargs})
         return _Context(queue.pop(0))
 
     session.get = Mock(side_effect=_get)
@@ -52,6 +60,10 @@ def _client(responses: list[_Response]) -> EbayApiClient:
     client._access_token = "token"
     client._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
     return client
+
+
+def _identity_response(username: str = "seller_user") -> _Response:
+    return _Response(json_payload={"userId": "007IND2xyeBay", "username": username})
 
 
 def test_fetch_orders_and_disputes() -> None:
@@ -105,6 +117,7 @@ def test_fetch_orders_and_disputes() -> None:
 
 
 def test_fetch_standards_feedback_messages() -> None:
+    capture: list[dict[str, Any]] = []
     client = _client(
         [
             _Response(
@@ -138,11 +151,26 @@ def test_fetch_standards_feedback_messages() -> None:
                 }
             ),
             _Response(json_payload={"dimensionMetrics": []}),
+            _identity_response("seller_user"),
             _Response(
                 json_payload={
-                    "sellerMetrics": {
-                        "feedbackScore": 50,
-                        "positiveFeedbackPercent": 100,
+                    "feedbackRatingSummary": {
+                        "ratingSummaryByRatingType": [
+                            {
+                                "ratingType": "OVERALL_EXPERIENCE",
+                                "period": {"value": 30, "unit": "DAY"},
+                                "feedbackMetrics": [
+                                    {"metricName": "FEEDBACK_SCORE", "value": "50"},
+                                    {
+                                        "metricName": "POSITIVE_FEEDBACK_PERCENTAGE",
+                                        "value": "100",
+                                    },
+                                ],
+                                "feedbackRatingValueDistribution": [
+                                    {"ratingValue": "POSITIVE", "count": 10},
+                                ],
+                            }
+                        ]
                     }
                 }
             ),
@@ -169,7 +197,8 @@ def test_fetch_standards_feedback_messages() -> None:
                     "total": 1,
                 }
             ),
-        ]
+        ],
+        capture=capture,
     )
     standards = asyncio.run(client.async_fetch_seller_standards())
     assert standards["seller_level"] == "TOP_RATED"
@@ -177,7 +206,41 @@ def test_fetch_standards_feedback_messages() -> None:
 
     feedback = asyncio.run(client.async_fetch_feedback())
     assert feedback["score"] == 50
+    assert feedback["positive_percent"] == 100.0
+    # Item counts overwrite summary distribution when any item counts are non-zero.
+    assert feedback["recent_positive"] == 1
     assert feedback["awaiting_count"] == 2
+
+    summary_calls = [
+        call
+        for call in capture
+        if call["args"] and "feedback_rating_summary" in str(call["args"][0])
+    ]
+    assert summary_calls
+    assert summary_calls[0]["kwargs"]["params"]["user_id"] == "seller_user"
+    assert (
+        "ratingType:OVERALL_EXPERIENCE"
+        in summary_calls[0]["kwargs"]["params"]["filter"]
+    )
+
+    items_calls = [
+        call
+        for call in capture
+        if call["args"]
+        and str(call["args"][0]).endswith("/feedback")
+        and "feedback_rating_summary" not in str(call["args"][0])
+    ]
+    assert items_calls
+    assert items_calls[0]["kwargs"]["params"]["user_id"] == "seller_user"
+    assert items_calls[0]["kwargs"]["params"]["feedback_type"] == "FEEDBACK_RECEIVED"
+
+    awaiting_calls = [
+        call
+        for call in capture
+        if call["args"] and "awaiting_feedback" in str(call["args"][0])
+    ]
+    assert awaiting_calls
+    assert "user_id" not in awaiting_calls[0]["kwargs"]["params"]
 
     messages, truncated = asyncio.run(client.async_fetch_messages())
     assert truncated is False
@@ -288,15 +351,24 @@ def test_fetch_feedback_keeps_summary_when_items_soft_fail() -> None:
     from unittest.mock import AsyncMock
 
     client = _client([])
+    client._feedback_user_id = "seller_user"
     summary = {
-        "sellerMetrics": {
-            "feedbackScore": 50,
-            "positiveFeedbackPercent": 100,
+        "feedbackRatingSummary": {
+            "ratingSummaryByRatingType": [
+                {
+                    "ratingType": "OVERALL_EXPERIENCE",
+                    "feedbackMetrics": [
+                        {"metricName": "FEEDBACK_SCORE", "value": "50"},
+                        {"metricName": "POSITIVE_FEEDBACK_PERCENTAGE", "value": "100"},
+                    ],
+                }
+            ]
         }
     }
 
     async def _rest_get(url: str, **kwargs: Any) -> dict[str, Any]:
         if "feedback_rating_summary" in url:
+            assert kwargs.get("params", {}).get("user_id") == "seller_user"
             return summary
         raise EbayPartialFailure("feedback")
 
@@ -304,6 +376,73 @@ def test_fetch_feedback_keeps_summary_when_items_soft_fail() -> None:
     feedback = asyncio.run(client.async_fetch_feedback())
     assert feedback["score"] == 50
     assert feedback["awaiting_count"] is None
+
+
+def test_map_rest_failure_category_feedback() -> None:
+    assert map_rest_failure_category("feedback", 400) == "feedback_invalid_request"
+    assert map_rest_failure_category("feedback", 403) == "feedback_forbidden"
+    assert (
+        map_rest_failure_category(
+            "feedback",
+            403,
+            {
+                "errors": [
+                    {
+                        "category": "REQUEST",
+                        "message": "Account is not eligible for this API",
+                    }
+                ]
+            },
+        )
+        == "feedback"
+    )
+    assert map_rest_failure_category("orders", 400) == "orders"
+
+
+def test_feedback_http_400_maps_to_invalid_request() -> None:
+    client = _client(
+        [
+            _identity_response(),
+            _Response(
+                status=400,
+                json_payload={
+                    "errors": [
+                        {
+                            "errorId": 35001,
+                            "message": "Invalid request: user_id is required",
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+    with pytest.raises(EbayPartialFailure, match="feedback_invalid_request"):
+        asyncio.run(client.async_fetch_feedback())
+
+
+def test_feedback_user_id_is_cached_across_calls() -> None:
+    capture: list[dict[str, Any]] = []
+    client = _client(
+        [
+            _identity_response("cached_seller"),
+            _Response(json_payload={"feedbackRatingSummary": {}}),
+            _Response(json_payload={"feedbackEntries": []}),
+            _Response(json_payload={"total": 0}),
+            _Response(json_payload={"feedbackRatingSummary": {}}),
+            _Response(json_payload={"feedbackEntries": []}),
+            _Response(json_payload={"total": 0}),
+        ],
+        capture=capture,
+    )
+    asyncio.run(client.async_fetch_feedback())
+    asyncio.run(client.async_fetch_feedback())
+    identity_calls = [
+        call
+        for call in capture
+        if call["args"] and "commerce/identity" in str(call["args"][0])
+    ]
+    assert len(identity_calls) == 1
+    assert client._feedback_user_id == "cached_seller"
 
 
 def test_fetch_seller_standards_skips_metrics_for_unknown_site() -> None:

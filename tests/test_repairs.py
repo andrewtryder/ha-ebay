@@ -419,6 +419,42 @@ def test_enabled_unobserved_section_still_preserves_repair(
     )
 
 
+def test_feedback_invalid_request_uses_partial_failure_not_unavailable(
+    issue_registry: _FakeIssueRegistry,
+) -> None:
+    """HTTP 400-style feedback_invalid_request must not claim API unavailability."""
+    entry = _entry()
+    coordinator = _coordinator()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_FEEDBACK_ENABLED: True}
+    payload = {
+        "missing_scope_features": [],
+        "missing_scopes": {},
+        "partial_failures": ["feedback_invalid_request"],
+        "truncated_collections": {},
+    }
+    for _ in range(REPAIR_STREAK_THRESHOLD):
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections={"feedback"},
+            )
+        )
+
+    unavailable_id = issue_id_for(entry.entry_id, "seller_ops_unavailable_feedback")
+    partial_id = issue_id_for(
+        entry.entry_id, "partial_failure_feedback_invalid_request"
+    )
+    assert (DOMAIN, unavailable_id) not in issue_registry.issues
+    assert (DOMAIN, partial_id) in issue_registry.issues
+    assert (
+        coordinator._repair_streaks.get("partial_failure:feedback_invalid_request", 0)
+        >= REPAIR_STREAK_THRESHOLD
+    )
+
+
 def test_persisted_streaks_recreate_issue_immediately(
     issue_registry: _FakeIssueRegistry,
 ) -> None:
