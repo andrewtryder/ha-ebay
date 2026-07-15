@@ -198,6 +198,10 @@ class EbayApiError(EbayError):
 class EbayPartialFailure(EbayError):
     """Optional eBay API section failed."""
 
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
 
 class EbayParseError(EbayError):
     """eBay response could not be parsed."""
@@ -216,6 +220,7 @@ class EbayEndpoints:
     payment_disputes: str
     feedback: str
     messages: str
+    identity: str
 
 
 def endpoints_for(environment: str) -> EbayEndpoints:
@@ -231,6 +236,7 @@ def endpoints_for(environment: str) -> EbayEndpoints:
             payment_disputes="https://apiz.sandbox.ebay.com/sell/fulfillment/v1",
             feedback="https://api.sandbox.ebay.com/commerce/feedback/v1",
             messages="https://api.sandbox.ebay.com/commerce/message/v1",
+            identity="https://apiz.sandbox.ebay.com/commerce/identity/v1",
         )
     return EbayEndpoints(
         trading="https://api.ebay.com/ws/api.dll",
@@ -242,7 +248,70 @@ def endpoints_for(environment: str) -> EbayEndpoints:
         payment_disputes="https://apiz.ebay.com/sell/fulfillment/v1",
         feedback="https://api.ebay.com/commerce/feedback/v1",
         messages="https://api.ebay.com/commerce/message/v1",
+        identity="https://apiz.ebay.com/commerce/identity/v1",
     )
+
+
+_ELIGIBILITY_OR_PERMISSION_MARKERS = (
+    "not eligible",
+    "not permitted",
+    "not authorized",
+    "access denied",
+    "insufficient permission",
+    "does not have permission",
+    "not allowed to access",
+    "unavailable for this account",
+    "account is not",
+)
+
+
+def _safe_ebay_error_payload(payload: Any) -> dict[str, Any] | None:
+    """Return a dict error payload when present."""
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_eligibility_or_permission_error(payload: dict[str, Any] | None) -> bool:
+    """Return True when eBay error details indicate eligibility/permission denial."""
+    if not payload:
+        return False
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return False
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        category = str(err.get("category") or "").upper()
+        if category in {"AUTH", "AUTHENTICATION", "AUTHORIZATION"}:
+            return True
+        blob = " ".join(
+            str(err.get(key) or "")
+            for key in ("message", "longMessage", "domain", "errorId")
+        ).lower()
+        if any(marker in blob for marker in _ELIGIBILITY_OR_PERMISSION_MARKERS):
+            return True
+    return False
+
+
+def map_rest_failure_category(
+    category: str, status: int, error_payload: dict[str, Any] | None = None
+) -> str:
+    """Map HTTP status + safe eBay errors to a repair-friendly failure category.
+
+    Feedback 400s are commonly invalid requests (for example a missing user_id),
+    not account unavailability. Reserve the plain ``feedback`` category for
+    explicit eligibility/permission denials so Repairs wording stays accurate.
+    """
+    if category != "feedback":
+        return category
+    if status == 400:
+        return "feedback_invalid_request"
+    if status == 403:
+        if _is_eligibility_or_permission_error(error_payload):
+            return "feedback"
+        return "feedback_forbidden"
+    if status == 404:
+        return "feedback_not_found"
+    return category
 
 
 def build_consent_url(
@@ -958,6 +1027,8 @@ class EbayApiClient:
         self._endpoints = endpoints_for(environment)
         self._access_token: str | None = None
         self._access_token_expires_at: datetime | None = None
+        # Cached authenticated eBay username for Feedback API user_id params.
+        self._feedback_user_id: str | None = None
         self._api_warnings: list[dict[str, str | None]] = []
 
     async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
@@ -1043,6 +1114,8 @@ class EbayApiClient:
         """Clear cached access token state."""
         self._access_token = None
         self._access_token_expires_at = None
+        # User id is account-scoped; clear so a reauth cannot reuse a stale handle.
+        self._feedback_user_id = None
 
     async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
         headers = {
@@ -1496,7 +1569,24 @@ class EbayApiClient:
                 if allow_404 and response.status == 404:
                     return {}
                 if response.status in {400, 403, 404}:
-                    raise EbayPartialFailure(partial_category)
+                    error_payload: dict[str, Any] | None = None
+                    try:
+                        error_payload = _safe_ebay_error_payload(
+                            await response.json(content_type=None)
+                        )
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                        error_payload = None
+                    mapped = map_rest_failure_category(
+                        partial_category, response.status, error_payload
+                    )
+                    _LOGGER.debug(
+                        "REST GET soft-failed category=%s mapped=%s status=%s duration_ms=%.1f",
+                        partial_category,
+                        mapped,
+                        response.status,
+                        _duration_ms(request_start),
+                    )
+                    raise EbayPartialFailure(mapped)
                 if response.status >= 400:
                     raise EbayApiError(
                         f"eBay REST call failed with HTTP {response.status}"
@@ -1516,6 +1606,27 @@ class EbayApiClient:
                 return payload if isinstance(payload, dict) else {}
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise EbayPartialFailure(partial_category) from exc
+
+    async def async_get_feedback_user_id(self) -> str:
+        """Return the authenticated account username for Feedback API user_id."""
+        if self._feedback_user_id:
+            return self._feedback_user_id
+        try:
+            payload = await self._async_rest_get(
+                f"{self._endpoints.identity}/user/",
+                partial_category="identity",
+            )
+        except EbayPartialFailure as exc:
+            raise EbayPartialFailure("feedback_invalid_request") from exc
+        # Feedback docs require the eBay username in user_id; Identity exposes
+        # both username and userId under the default identity scope.
+        user_id = (
+            payload.get("username") or payload.get("userId") or payload.get("userID")
+        )
+        if not isinstance(user_id, str) or not user_id.strip():
+            raise EbayPartialFailure("feedback_invalid_request")
+        self._feedback_user_id = user_id.strip()
+        return self._feedback_user_id
 
     async def async_fetch_orders(
         self,
@@ -1655,10 +1766,12 @@ class EbayApiClient:
     async def async_fetch_feedback(self) -> dict[str, Any]:
         """Fetch feedback summary, recent counts, and awaiting-feedback count."""
         feedback = empty_seller_ops()["feedback"]
+        ebay_user_id = await self.async_get_feedback_user_id()
         try:
             summary_payload = await self._async_rest_get(
                 f"{self._endpoints.feedback}/feedback_rating_summary",
                 params={
+                    "user_id": ebay_user_id,
                     "filter": "ratingType:OVERALL_EXPERIENCE,lookbackPeriodInDays:30",
                 },
                 partial_category="feedback",
@@ -1672,7 +1785,9 @@ class EbayApiClient:
             items_payload = await self._async_rest_get(
                 f"{self._endpoints.feedback}/feedback",
                 params={
-                    "filter": "feedback_type:FEEDBACK_RECEIVED,period:30,role:SELLER",
+                    "user_id": ebay_user_id,
+                    "feedback_type": "FEEDBACK_RECEIVED",
+                    "filter": "period:30,role:SELLER",
                     "limit": "50",
                     "offset": "0",
                 },
@@ -1691,6 +1806,7 @@ class EbayApiClient:
             pass
 
         try:
+            # Awaiting feedback is scoped to the OAuth user; no user_id param.
             awaiting_payload = await self._async_rest_get(
                 f"{self._endpoints.feedback}/awaiting_feedback",
                 params={"limit": "50", "offset": "0"},
@@ -2107,6 +2223,14 @@ class EbayApiClient:
                     seller_ops["feedback"] = await self.async_fetch_feedback()
                 except EbayAuthError:
                     raise
+                except EbayPartialFailure as exc:
+                    failure = exc.category or "feedback"
+                    _LOGGER.debug(
+                        "Optional feedback fetch failed error=%s",
+                        _safe_exception_context(exc),
+                    )
+                    partial_failures.append(failure)
+                    feedback_ok = False
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
                     _LOGGER.debug(
                         "Optional feedback fetch failed error=%s",

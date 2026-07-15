@@ -384,6 +384,67 @@ def parse_customer_service_metric(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _as_list(value: Any) -> list[Any]:
+    """Coerce a single object or list into a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _feedback_metric_value(metrics: Any, *names: str) -> Any:
+    """Return the first matching feedbackMetrics value by metric name/key."""
+    if not isinstance(metrics, list):
+        return None
+    wanted = {name.upper() for name in names}
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            continue
+        key = str(
+            metric.get("metricName")
+            or metric.get("metricKey")
+            or metric.get("name")
+            or ""
+        ).upper()
+        if key in wanted:
+            return metric.get("value")
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _period_days(period: Any) -> int | str | None:
+    """Extract lookback days from a period object or scalar."""
+    if isinstance(period, dict):
+        days = period.get("value")
+        unit = str(period.get("unit") or period.get("periodUnit") or "DAY").upper()
+        if days is not None and unit in {"DAY", "DAYS", ""}:
+            return days
+        return (
+            period.get("periodInDays")
+            or period.get("lookbackPeriodInDays")
+            or period.get("value")
+        )
+    return period
+
+
 def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Parse Commerce feedback rating summary without usernames or comments."""
     score = None
@@ -392,74 +453,138 @@ def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
     recent_neutral = 0
     recent_negative = 0
 
-    # Commerce Feedback shapes vary; accept common containers.
-    summaries = payload.get("feedbackRatingSummaries") or payload.get("summary") or []
-    if isinstance(summaries, dict):
-        summaries = [summaries]
-    for summary in summaries:
-        overall = (
-            summary.get("overallExperience") or summary.get("ratingSummary") or summary
+    # Documented shape:
+    # feedbackRatingSummary -> ratingSummaryByRatingType ->
+    #   feedbackMetrics / feedbackRatingValueDistribution
+    documented_summaries = _as_list(
+        payload.get("feedbackRatingSummary")
+        or payload.get("feedbackRatingSummaries")
+        or payload.get("summary")
+    )
+    for summary in documented_summaries:
+        if not isinstance(summary, dict):
+            continue
+        by_type = _as_list(
+            summary.get("ratingSummaryByRatingType")
+            or summary.get("overallExperience")
+            or summary.get("ratingSummary")
+            or summary
         )
-        if isinstance(overall, dict):
-            if score is None and overall.get("feedbackScore") is not None:
-                try:
-                    score = int(overall.get("feedbackScore"))
-                except (TypeError, ValueError):
-                    pass
-            if (
-                positive_percent is None
-                and overall.get("positiveFeedbackPercent") is not None
-            ):
-                try:
-                    positive_percent = float(overall.get("positiveFeedbackPercent"))
-                except (TypeError, ValueError):
-                    pass
-        periods = summary.get("periodSummaries") or summary.get("feedbackPeriods") or []
-        for period in periods:
-            period_days = period.get("periodInDays") or period.get(
-                "lookbackPeriodInDays"
+        for rating_summary in by_type:
+            if not isinstance(rating_summary, dict):
+                continue
+            rating_type = str(
+                rating_summary.get("ratingType")
+                or rating_summary.get("rating_type")
+                or "OVERALL_EXPERIENCE"
+            ).upper()
+            if rating_type not in {"OVERALL_EXPERIENCE", ""}:
+                continue
+
+            metrics = rating_summary.get("feedbackMetrics") or []
+            if score is None:
+                score = _coerce_int(
+                    _feedback_metric_value(metrics, "FEEDBACK_SCORE", "SCORE")
+                    or rating_summary.get("feedbackScore")
+                )
+            if positive_percent is None:
+                positive_percent = _coerce_float(
+                    _feedback_metric_value(
+                        metrics,
+                        "POSITIVE_FEEDBACK_PERCENTAGE",
+                        "POSITIVE_FEEDBACK_PERCENT",
+                        "POSITIVE_PERCENTAGE",
+                    )
+                    or rating_summary.get("positiveFeedbackPercent")
+                )
+
+            distribution = (
+                rating_summary.get("feedbackRatingValueDistribution")
+                or rating_summary.get("ratingValueDistribution")
+                or []
+            )
+            period_days = _period_days(
+                rating_summary.get("period")
+                or rating_summary.get("lookbackPeriod")
+                or rating_summary.get("periodInDays")
             )
             if period_days not in {30, "30", None}:
-                # Prefer 30-day bucket when labeled; otherwise accept first.
                 if recent_positive or recent_neutral or recent_negative:
                     continue
-            counts = period.get("counts") or period
-            try:
-                recent_positive = int(
-                    counts.get("positive")
-                    or counts.get("positiveFeedbackCount")
-                    or recent_positive
-                    or 0
+            if isinstance(distribution, list) and distribution:
+                pos = neu = neg = 0
+                for entry in distribution:
+                    if not isinstance(entry, dict):
+                        continue
+                    label = str(
+                        entry.get("ratingValue")
+                        or entry.get("value")
+                        or entry.get("feedbackRating")
+                        or ""
+                    ).upper()
+                    count = (
+                        _coerce_int(entry.get("count") or entry.get("valueCount")) or 0
+                    )
+                    if label in {"POSITIVE", "FEEDBACK_POSITIVE"}:
+                        pos += count
+                    elif label in {"NEUTRAL", "FEEDBACK_NEUTRAL"}:
+                        neu += count
+                    elif label in {"NEGATIVE", "FEEDBACK_NEGATIVE"}:
+                        neg += count
+                if pos or neu or neg:
+                    recent_positive = pos
+                    recent_neutral = neu
+                    recent_negative = neg
+                    continue
+
+            # Legacy periodSummaries / feedbackPeriods containers.
+            periods = (
+                rating_summary.get("periodSummaries")
+                or rating_summary.get("feedbackPeriods")
+                or summary.get("periodSummaries")
+                or summary.get("feedbackPeriods")
+                or []
+            )
+            for period in periods:
+                if not isinstance(period, dict):
+                    continue
+                period_days = period.get("periodInDays") or period.get(
+                    "lookbackPeriodInDays"
                 )
-                recent_neutral = int(
-                    counts.get("neutral")
-                    or counts.get("neutralFeedbackCount")
-                    or recent_neutral
-                    or 0
-                )
-                recent_negative = int(
-                    counts.get("negative")
-                    or counts.get("negativeFeedbackCount")
-                    or recent_negative
-                    or 0
-                )
-            except (TypeError, ValueError):
-                continue
+                if period_days not in {30, "30", None}:
+                    if recent_positive or recent_neutral or recent_negative:
+                        continue
+                counts = period.get("counts") or period
+                try:
+                    recent_positive = int(
+                        counts.get("positive")
+                        or counts.get("positiveFeedbackCount")
+                        or recent_positive
+                        or 0
+                    )
+                    recent_neutral = int(
+                        counts.get("neutral")
+                        or counts.get("neutralFeedbackCount")
+                        or recent_neutral
+                        or 0
+                    )
+                    recent_negative = int(
+                        counts.get("negative")
+                        or counts.get("negativeFeedbackCount")
+                        or recent_negative
+                        or 0
+                    )
+                except (TypeError, ValueError):
+                    continue
 
     seller_metrics = payload.get("sellerMetrics") or {}
     if score is None and seller_metrics.get("feedbackScore") is not None:
-        try:
-            score = int(seller_metrics["feedbackScore"])
-        except (TypeError, ValueError):
-            pass
+        score = _coerce_int(seller_metrics["feedbackScore"])
     if (
         positive_percent is None
         and seller_metrics.get("positiveFeedbackPercent") is not None
     ):
-        try:
-            positive_percent = float(seller_metrics["positiveFeedbackPercent"])
-        except (TypeError, ValueError):
-            pass
+        positive_percent = _coerce_float(seller_metrics["positiveFeedbackPercent"])
 
     return {
         "score": score,
@@ -472,11 +597,21 @@ def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 def parse_feedback_items(payload: dict[str, Any]) -> dict[str, int]:
     """Count recent feedback by comment type without retaining comments/usernames."""
-    items = payload.get("feedbackEntries") or payload.get("feedbackItems") or []
+    items = (
+        payload.get("feedbackEntries")
+        or payload.get("feedbackItems")
+        or payload.get("feedback")
+        or []
+    )
     counts = {"recent_positive": 0, "recent_neutral": 0, "recent_negative": 0}
     for item in items:
+        if not isinstance(item, dict):
+            continue
         comment_type = str(
-            item.get("commentType") or item.get("feedbackType") or ""
+            item.get("commentType")
+            or item.get("feedbackType")
+            or item.get("rating")
+            or ""
         ).upper()
         if comment_type in {"POSITIVE", "FEEDBACK_POSITIVE"}:
             counts["recent_positive"] += 1
@@ -493,6 +628,7 @@ def parse_awaiting_feedback_count(payload: dict[str, Any]) -> int:
         payload.get("itemsAwaitingFeedback")
         or payload.get("awaitingFeedbackItems")
         or payload.get("lineItems")
+        or payload.get("items")
         or []
     )
     total = payload.get("total")
