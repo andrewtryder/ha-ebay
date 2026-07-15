@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.3](https://github.com/andrewtryder/ha-ebay/compare/v0.6.2...v0.6.3) (2026-07-15)
+
+
+### Bug Fixes
+
+* send Feedback API user_id and parse rating summary ([a8ea0c4](https://github.com/andrewtryder/ha-ebay/commit/a8ea0c4b4014fdc2f1a36629bbf7200eab082bad))
+* send Feedback API user_id and parse rating summary ([aa34900](https://github.com/andrewtryder/ha-ebay/commit/aa3490008f2854e927010228dd71e3928bfd4187))
+
 ## [0.6.2](https://github.com/andrewtryder/ha-ebay/compare/v0.6.1...v0.6.2) (2026-07-14)
 
 
