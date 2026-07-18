@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.4](https://github.com/andrewtryder/ha-ebay/compare/v0.6.3...v0.6.4) (2026-07-18)
+
+
+### Bug Fixes
+
+* resolve Feedback username via Trading GetUser ([a57265d](https://github.com/andrewtryder/ha-ebay/commit/a57265d62ec12406a81610077c0d012ed130da10))
+* resolve Feedback username via Trading GetUser ([941d864](https://github.com/andrewtryder/ha-ebay/commit/941d864e4cfdb81c8c908554bed55a3581e9c63a))
+
 ## [0.6.3](https://github.com/andrewtryder/ha-ebay/compare/v0.6.2...v0.6.3) (2026-07-15)
 
 
