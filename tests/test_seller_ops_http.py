@@ -5,14 +5,20 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
+import xml.etree.ElementTree as ET
 
 import pytest
 
 from custom_components.ebay.api import (
+    EBAY_XML_NS,
     EbayApiClient,
+    EbayApiError,
     EbayPartialFailure,
+    GET_USER_CALL_NAME,
     map_rest_failure_category,
+    merge_partial_failure_details,
+    sanitize_ebay_rest_errors,
 )
 
 
@@ -62,8 +68,28 @@ def _client(
     return client
 
 
-def _identity_response(username: str = "seller_user") -> _Response:
-    return _Response(json_payload={"userId": "007IND2xyeBay", "username": username})
+def _get_user_root(username: str = "seller_user") -> ET.Element:
+    return ET.fromstring(
+        f"""<?xml version="1.0" encoding="utf-8"?>
+<GetUserResponse xmlns="{EBAY_XML_NS}">
+  <Ack>Success</Ack>
+  <User><UserID>{username}</UserID></User>
+</GetUserResponse>
+"""
+    )
+
+
+def _stub_get_user(client: EbayApiClient, username: str = "seller_user") -> AsyncMock:
+    """Stub Trading GetUser for Feedback username resolution."""
+    mock = AsyncMock(return_value=_get_user_root(username))
+
+    async def _call(call_name: str, xml_body: str) -> ET.Element:
+        assert call_name == GET_USER_CALL_NAME
+        assert "GetUserRequest" in xml_body
+        return await mock(call_name, xml_body)
+
+    client.async_call_trading_api = AsyncMock(side_effect=_call)  # type: ignore[method-assign]
+    return mock
 
 
 def test_fetch_orders_and_disputes() -> None:
@@ -151,7 +177,6 @@ def test_fetch_standards_feedback_messages() -> None:
                 }
             ),
             _Response(json_payload={"dimensionMetrics": []}),
-            _identity_response("seller_user"),
             _Response(
                 json_payload={
                     "feedbackRatingSummary": {
@@ -200,6 +225,7 @@ def test_fetch_standards_feedback_messages() -> None:
         ],
         capture=capture,
     )
+    _stub_get_user(client, "seller_user")
     standards = asyncio.run(client.async_fetch_seller_standards())
     assert standards["seller_level"] == "TOP_RATED"
     assert standards["item_not_received_above_benchmark"] is True
@@ -399,10 +425,62 @@ def test_map_rest_failure_category_feedback() -> None:
     assert map_rest_failure_category("orders", 400) == "orders"
 
 
+def test_sanitize_ebay_rest_errors_redacts_and_truncates() -> None:
+    errors = sanitize_ebay_rest_errors(
+        {
+            "errors": [
+                {
+                    "errorId": 35001,
+                    "domain": "API_FEEDBACK",
+                    "category": "REQUEST",
+                    "message": "Invalid request token=secret-value",
+                    "longMessage": "x" * 300,
+                },
+                "skip-me",
+            ]
+        }
+    )
+    assert len(errors) == 1
+    assert errors[0]["error_id"] == 35001
+    assert errors[0]["message"] == "[redacted]"
+    assert errors[0]["long_message"] is not None
+    assert len(errors[0]["long_message"]) == 241
+    assert errors[0]["long_message"].endswith("…")
+
+
+def test_merge_partial_failure_details_keeps_active_newest() -> None:
+    merged = merge_partial_failure_details(
+        [
+            {
+                "mapped_category": "orders",
+                "request_category": "orders",
+                "http_status": 403,
+                "errors": [],
+            },
+            {
+                "mapped_category": "feedback_invalid_request",
+                "request_category": "feedback",
+                "http_status": 400,
+                "errors": [{"error_id": 1}],
+            },
+        ],
+        [
+            {
+                "mapped_category": "feedback_invalid_request",
+                "request_category": "feedback",
+                "http_status": 400,
+                "errors": [{"error_id": 2}],
+            }
+        ],
+        ["feedback_invalid_request"],
+    )
+    assert len(merged) == 1
+    assert merged[0]["errors"][0]["error_id"] == 2
+
+
 def test_feedback_http_400_maps_to_invalid_request() -> None:
     client = _client(
         [
-            _identity_response(),
             _Response(
                 status=400,
                 json_payload={
@@ -416,15 +494,39 @@ def test_feedback_http_400_maps_to_invalid_request() -> None:
             ),
         ]
     )
-    with pytest.raises(EbayPartialFailure, match="feedback_invalid_request"):
+    _stub_get_user(client)
+    with pytest.raises(
+        EbayPartialFailure, match="feedback_invalid_request"
+    ) as exc_info:
         asyncio.run(client.async_fetch_feedback())
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["http_status"] == 400
+    assert exc_info.value.details["request_category"] == "feedback"
+    assert exc_info.value.details["errors"][0]["error_id"] == 35001
+    assert client._partial_failure_details[0]["mapped_category"] == (
+        "feedback_invalid_request"
+    )
+
+
+def test_feedback_user_lookup_failure_is_not_invalid_request() -> None:
+    client = _client([])
+    client.async_call_trading_api = AsyncMock(  # type: ignore[method-assign]
+        side_effect=EbayApiError("eBay Trading API returned Ack='Failure'")
+    )
+    with pytest.raises(EbayPartialFailure, match="feedback_user_lookup") as exc_info:
+        asyncio.run(client.async_fetch_feedback())
+    assert exc_info.value.details is not None
+    assert exc_info.value.details["source"] == "GetUser"
+    assert exc_info.value.details["reason"] == "EbayApiError"
+    assert client._partial_failure_details[0]["mapped_category"] == (
+        "feedback_user_lookup"
+    )
 
 
 def test_feedback_user_id_is_cached_across_calls() -> None:
     capture: list[dict[str, Any]] = []
     client = _client(
         [
-            _identity_response("cached_seller"),
             _Response(json_payload={"feedbackRatingSummary": {}}),
             _Response(json_payload={"feedbackEntries": []}),
             _Response(json_payload={"total": 0}),
@@ -434,21 +536,15 @@ def test_feedback_user_id_is_cached_across_calls() -> None:
         ],
         capture=capture,
     )
+    get_user = _stub_get_user(client, "cached_seller")
     asyncio.run(client.async_fetch_feedback())
     asyncio.run(client.async_fetch_feedback())
-    identity_calls = [
-        call
-        for call in capture
-        if call["args"] and "commerce/identity" in str(call["args"][0])
-    ]
-    assert len(identity_calls) == 1
+    assert get_user.await_count == 1
     assert client._feedback_user_id == "cached_seller"
 
 
 def test_fetch_seller_standards_skips_metrics_for_unknown_site() -> None:
     """Unknown site IDs return profiles without INR/INAD marketplace calls."""
-    from unittest.mock import AsyncMock
-
     client = _client([])
     client.site_id = "999"
     calls: list[str] = []

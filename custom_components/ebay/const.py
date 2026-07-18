@@ -219,6 +219,7 @@ PARTIAL_FAILURE_SECTION = {
     "seller_standards_missing_scope": SECTION_SELLER_STANDARDS,
     "feedback": SECTION_FEEDBACK,
     "feedback_invalid_request": SECTION_FEEDBACK,
+    "feedback_user_lookup": SECTION_FEEDBACK,
     "feedback_forbidden": SECTION_FEEDBACK,
     "feedback_not_found": SECTION_FEEDBACK,
     "feedback_missing_scope": SECTION_FEEDBACK,
