@@ -69,6 +69,7 @@ def test_diagnostics_without_coordinator_data() -> None:
         "unread_conversations": 0,
     }
     assert result["partial_failure_categories"] == []
+    assert result["partial_failure_details"] == []
     assert result["truncated_collections"] == {}
     assert result["api_warnings"] == []
     assert result["section_last_fetched_ages_minutes"] == {}
@@ -94,6 +95,23 @@ def test_diagnostics_with_coordinator_data() -> None:
                 "selling": {"s1": {}},
                 "summary": {"last_successful_update": "2026-01-01T00:00:00+00:00"},
                 "partial_failures": ["analytics_views"],
+                "partial_failure_details": [
+                    {
+                        "mapped_category": "analytics_views",
+                        "request_category": "analytics_views",
+                        "http_status": 403,
+                        "errors": [
+                            {
+                                "error_id": 1100,
+                                "message": "Access denied",
+                                "long_message": None,
+                                "domain": "API_ANALYTICS",
+                                "category": "REQUEST",
+                            }
+                        ],
+                        "source": "rest",
+                    }
+                ],
                 "truncated_collections": {"selling": True},
                 "api_warnings": [{"code": "1", "short_message": "warn"}],
                 "section_last_fetched": {
@@ -113,6 +131,8 @@ def test_diagnostics_with_coordinator_data() -> None:
         "unread_conversations": 0,
     }
     assert result["partial_failure_categories"] == ["analytics_views"]
+    assert result["partial_failure_details"][0]["http_status"] == 403
+    assert result["partial_failure_details"][0]["errors"][0]["error_id"] == 1100
     assert result["truncated_collections"] == {"selling": True}
     assert result["api_warnings"] == [{"code": "1", "short_message": "warn"}]
     assert "buying" in result["section_last_fetched_ages_minutes"]

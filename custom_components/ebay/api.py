@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import parse_qs, urlencode, urlparse
 import xml.etree.ElementTree as ET
 
@@ -73,6 +73,7 @@ READ_ONLY_CALL_NAME = "GetMyeBayBuying"
 SELLING_CALL_NAME = "GetMyeBaySelling"
 SELLER_LIST_CALL_NAME = "GetSellerList"
 BEST_OFFERS_CALL_NAME = "GetBestOffers"
+GET_USER_CALL_NAME = "GetUser"
 BEST_OFFERS_ENTRIES_PER_PAGE = 200
 BEST_OFFERS_MAX_PAGES = 25
 
@@ -177,6 +178,8 @@ MAX_PAGES = 20
 ANALYTICS_BATCH_SIZE = 100
 _WARNING_MESSAGE_MAX_LEN = 240
 API_WARNINGS_STATE_ATTR_MAX = 10
+_PARTIAL_FAILURE_DETAILS_MAX = 20
+_PARTIAL_FAILURE_ERRORS_MAX = 5
 
 
 class EbayError(Exception):
@@ -198,9 +201,10 @@ class EbayApiError(EbayError):
 class EbayPartialFailure(EbayError):
     """Optional eBay API section failed."""
 
-    def __init__(self, category: str) -> None:
+    def __init__(self, category: str, *, details: dict[str, Any] | None = None) -> None:
         super().__init__(category)
         self.category = category
+        self.details = details
 
 
 class EbayParseError(EbayError):
@@ -220,7 +224,6 @@ class EbayEndpoints:
     payment_disputes: str
     feedback: str
     messages: str
-    identity: str
 
 
 def endpoints_for(environment: str) -> EbayEndpoints:
@@ -236,7 +239,6 @@ def endpoints_for(environment: str) -> EbayEndpoints:
             payment_disputes="https://apiz.sandbox.ebay.com/sell/fulfillment/v1",
             feedback="https://api.sandbox.ebay.com/commerce/feedback/v1",
             messages="https://api.sandbox.ebay.com/commerce/message/v1",
-            identity="https://apiz.sandbox.ebay.com/commerce/identity/v1",
         )
     return EbayEndpoints(
         trading="https://api.ebay.com/ws/api.dll",
@@ -248,7 +250,6 @@ def endpoints_for(environment: str) -> EbayEndpoints:
         payment_disputes="https://apiz.ebay.com/sell/fulfillment/v1",
         feedback="https://api.ebay.com/commerce/feedback/v1",
         messages="https://api.ebay.com/commerce/message/v1",
-        identity="https://apiz.ebay.com/commerce/identity/v1",
     )
 
 
@@ -268,6 +269,96 @@ _ELIGIBILITY_OR_PERMISSION_MARKERS = (
 def _safe_ebay_error_payload(payload: Any) -> dict[str, Any] | None:
     """Return a dict error payload when present."""
     return payload if isinstance(payload, dict) else None
+
+
+def sanitize_ebay_rest_errors(
+    payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Extract sanitized errorId/message fields from an eBay REST error payload."""
+    if not payload:
+        return []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return []
+    sanitized: list[dict[str, Any]] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        message = err.get("message")
+        long_message = err.get("longMessage")
+        entry = {
+            "error_id": err.get("errorId"),
+            "domain": err.get("domain") if isinstance(err.get("domain"), str) else None,
+            "category": err.get("category")
+            if isinstance(err.get("category"), str)
+            else None,
+            "message": _sanitize_warning_text(
+                str(message) if message is not None else None
+            ),
+            "long_message": _sanitize_warning_text(
+                str(long_message) if long_message is not None else None
+            ),
+        }
+        if (
+            entry["error_id"] is not None
+            or entry["message"]
+            or entry["long_message"]
+            or entry["domain"]
+            or entry["category"]
+        ):
+            sanitized.append(entry)
+        if len(sanitized) >= _PARTIAL_FAILURE_ERRORS_MAX:
+            break
+    return sanitized
+
+
+def build_partial_failure_detail(
+    *,
+    mapped_category: str,
+    request_category: str,
+    http_status: int | None = None,
+    errors: list[dict[str, Any]] | None = None,
+    source: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Build a diagnostics-safe soft-failure detail record."""
+    detail: dict[str, Any] = {
+        "mapped_category": mapped_category,
+        "request_category": request_category,
+        "http_status": http_status,
+        "errors": list(errors or []),
+    }
+    if source:
+        detail["source"] = source
+    if reason:
+        detail["reason"] = reason
+    return detail
+
+
+def merge_partial_failure_details(
+    previous: list[dict[str, Any]] | None,
+    new_details: list[dict[str, Any]],
+    active_categories: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Retain details for active failure categories, preferring newest per category."""
+    active = set(active_categories)
+    by_category: dict[str, dict[str, Any]] = {}
+    for detail in list(previous or []) + list(new_details):
+        if not isinstance(detail, dict):
+            continue
+        category = detail.get("mapped_category")
+        if not isinstance(category, str) or category not in active:
+            continue
+        by_category[category] = detail
+    ordered_keys = (
+        list(active_categories)
+        if isinstance(active_categories, list)
+        else sorted(active)
+    )
+    ordered = [
+        by_category[category] for category in ordered_keys if category in by_category
+    ]
+    return ordered[:_PARTIAL_FAILURE_DETAILS_MAX]
 
 
 def _is_eligibility_or_permission_error(payload: dict[str, Any] | None) -> bool:
@@ -921,6 +1012,15 @@ def build_get_best_offers_xml(
 """
 
 
+def build_get_user_xml() -> str:
+    """Build GetUser XML for the OAuth-authenticated account."""
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetUserRequest xmlns="{EBAY_XML_NS}">
+  <DetailLevel>ReturnSummary</DetailLevel>
+</GetUserRequest>
+"""
+
+
 def _dict_by_item_id(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(item["item_id"]): item for item in items if item.get("item_id")}
 
@@ -1030,6 +1130,24 @@ class EbayApiClient:
         # Cached authenticated eBay username for Feedback API user_id params.
         self._feedback_user_id: str | None = None
         self._api_warnings: list[dict[str, str | None]] = []
+        self._partial_failure_details: list[dict[str, Any]] = []
+
+    def _record_partial_failure_detail(self, detail: dict[str, Any] | None) -> None:
+        """Store a sanitized soft-failure detail for diagnostics."""
+        if not detail:
+            return
+        self._partial_failure_details.append(detail)
+        if len(self._partial_failure_details) > _PARTIAL_FAILURE_DETAILS_MAX:
+            self._partial_failure_details = self._partial_failure_details[
+                -_PARTIAL_FAILURE_DETAILS_MAX:
+            ]
+
+    def _raise_partial_failure(
+        self, category: str, *, details: dict[str, Any] | None = None
+    ) -> NoReturn:
+        """Record optional details and raise EbayPartialFailure."""
+        self._record_partial_failure_detail(details)
+        raise EbayPartialFailure(category, details=details)
 
     async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
         """Exchange an authorization code for OAuth tokens."""
@@ -1579,14 +1697,24 @@ class EbayApiClient:
                     mapped = map_rest_failure_category(
                         partial_category, response.status, error_payload
                     )
+                    errors = sanitize_ebay_rest_errors(error_payload)
+                    details = build_partial_failure_detail(
+                        mapped_category=mapped,
+                        request_category=partial_category,
+                        http_status=response.status,
+                        errors=errors,
+                        source="rest",
+                    )
                     _LOGGER.debug(
-                        "REST GET soft-failed category=%s mapped=%s status=%s duration_ms=%.1f",
+                        "REST GET soft-failed category=%s mapped=%s status=%s "
+                        "error_ids=%s duration_ms=%.1f",
                         partial_category,
                         mapped,
                         response.status,
+                        [err.get("error_id") for err in errors],
                         _duration_ms(request_start),
                     )
-                    raise EbayPartialFailure(mapped)
+                    self._raise_partial_failure(mapped, details=details)
                 if response.status >= 400:
                     raise EbayApiError(
                         f"eBay REST call failed with HTTP {response.status}"
@@ -1605,27 +1733,45 @@ class EbayApiClient:
                 )
                 return payload if isinstance(payload, dict) else {}
         except (aiohttp.ClientError, TimeoutError) as exc:
-            raise EbayPartialFailure(partial_category) from exc
+            details = build_partial_failure_detail(
+                mapped_category=partial_category,
+                request_category=partial_category,
+                source="rest",
+                reason="transport",
+            )
+            self._record_partial_failure_detail(details)
+            raise EbayPartialFailure(partial_category, details=details) from exc
 
     async def async_get_feedback_user_id(self) -> str:
         """Return the authenticated account username for Feedback API user_id."""
         if self._feedback_user_id:
             return self._feedback_user_id
         try:
-            payload = await self._async_rest_get(
-                f"{self._endpoints.identity}/user/",
-                partial_category="identity",
+            root = await self.async_call_trading_api(
+                GET_USER_CALL_NAME, build_get_user_xml()
             )
-        except EbayPartialFailure as exc:
-            raise EbayPartialFailure("feedback_invalid_request") from exc
-        # Feedback docs require the eBay username in user_id; Identity exposes
-        # both username and userId under the default identity scope.
-        user_id = (
-            payload.get("username") or payload.get("userId") or payload.get("userID")
-        )
-        if not isinstance(user_id, str) or not user_id.strip():
-            raise EbayPartialFailure("feedback_invalid_request")
-        self._feedback_user_id = user_id.strip()
+        except EbayAuthError:
+            raise
+        except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
+            details = build_partial_failure_detail(
+                mapped_category="feedback_user_lookup",
+                request_category="feedback_user_lookup",
+                source="GetUser",
+                reason=type(exc).__name__,
+            )
+            self._record_partial_failure_detail(details)
+            raise EbayPartialFailure("feedback_user_lookup", details=details) from exc
+        # Feedback requires the public eBay username; Trading UserID is that value.
+        user_id = _text(root, "e:User/e:UserID")
+        if not user_id:
+            details = build_partial_failure_detail(
+                mapped_category="feedback_user_lookup",
+                request_category="feedback_user_lookup",
+                source="GetUser",
+                reason="missing_user_id",
+            )
+            self._raise_partial_failure("feedback_user_lookup", details=details)
+        self._feedback_user_id = user_id
         return self._feedback_user_id
 
     async def async_fetch_orders(
@@ -1976,6 +2122,7 @@ class EbayApiClient:
         trading_sections = SECTION_BUYING in sections or SECTION_SELLING in sections
         if trading_sections:
             self._api_warnings = []
+        self._partial_failure_details = []
 
         sold_items_count = base["summary"].get("sold_items_count")
         unsold_items_count = base["summary"].get("unsold_items_count")
@@ -2300,6 +2447,12 @@ class EbayApiClient:
             elif category in partial_failures:
                 partial_failures = [c for c in partial_failures if c != category]
 
+        partial_failure_details = merge_partial_failure_details(
+            base.get("partial_failure_details"),
+            self._partial_failure_details,
+            partial_failures,
+        )
+
         now = datetime.now(timezone.utc)
         summary = summarize_payload(
             watched, bidding, selling, ending_soon_threshold_seconds
@@ -2361,6 +2514,7 @@ class EbayApiClient:
             "partial_failures": partial_failures,
             "truncated_collections": truncated_collections,
             "api_warnings": api_warnings,
+            "partial_failure_details": partial_failure_details,
             "missing_scopes": missing_by_feature,
             "missing_scope_features": missing_scope_features,
             "section_last_fetched": section_last_fetched,
@@ -2398,7 +2552,16 @@ PARTIAL_FAILURE_CATEGORIES_BY_SECTION: dict[str, frozenset[str]] = {
     SECTION_SELLER_STANDARDS: frozenset(
         {"seller_standards_missing_scope", "seller_standards"}
     ),
-    SECTION_FEEDBACK: frozenset({"feedback_missing_scope", "feedback"}),
+    SECTION_FEEDBACK: frozenset(
+        {
+            "feedback_missing_scope",
+            "feedback",
+            "feedback_invalid_request",
+            "feedback_user_lookup",
+            "feedback_forbidden",
+            "feedback_not_found",
+        }
+    ),
     SECTION_MESSAGES: frozenset(
         {"messages_missing_scope", "messages_truncated", "messages"}
     ),
@@ -2515,6 +2678,7 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
             "partial_failures": [],
             "truncated_collections": dict(_EMPTY_TRUNCATED_COLLECTIONS),
             "api_warnings": [],
+            "partial_failure_details": [],
             "missing_scopes": {},
             "missing_scope_features": [],
             "section_last_fetched": {},
@@ -2543,6 +2707,7 @@ def _payload_shell(previous: dict[str, Any] | None) -> dict[str, Any]:
         "partial_failures": list(previous.get("partial_failures") or []),
         "truncated_collections": truncated,
         "api_warnings": list(previous.get("api_warnings") or []),
+        "partial_failure_details": list(previous.get("partial_failure_details") or []),
         "missing_scopes": previous.get("missing_scopes") or {},
         "missing_scope_features": list(previous.get("missing_scope_features") or []),
         "section_last_fetched": section_last_fetched,

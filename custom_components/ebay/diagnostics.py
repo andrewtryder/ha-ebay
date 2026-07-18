@@ -125,6 +125,7 @@ async def async_get_config_entry_diagnostics(
         "last_refresh_result": coordinator.last_refresh_result,
         "last_error_category": coordinator.last_error_category,
         "partial_failure_categories": data.get("partial_failures", []),
+        "partial_failure_details": data.get("partial_failure_details", []),
         "missing_scope_features": data.get("missing_scope_features")
         or summary.get("missing_scope_features", []),
         "missing_scopes": data.get("missing_scopes")
