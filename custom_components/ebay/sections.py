@@ -1,8 +1,8 @@
 """SectionSpec registry for coordinator payload sections.
 
 Single source of truth for refresh cadence, OAuth scopes, marketplace gates,
-truncation keys, and partial-failure categories. Fetch orchestration remains in
-``api.py``; per-API fetchers live under ``clients/``.
+truncation keys, and partial-failure categories. Fetch orchestration lives in
+``section_fetch.py``; per-API fetchers live under ``clients/``.
 """
 
 from __future__ import annotations
