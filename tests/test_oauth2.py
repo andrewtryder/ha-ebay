@@ -59,6 +59,8 @@ EXPECTED_AUTH_CODE_SCOPES = {
     "https://api.ebay.com/oauth/api_scope/sell.payment.dispute",
     FEEDBACK_SCOPE,
     "https://api.ebay.com/oauth/api_scope/commerce.message",
+    "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.finances",
 }
 
 
