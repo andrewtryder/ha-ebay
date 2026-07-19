@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 DOMAIN = "ebay"
 
@@ -171,18 +172,6 @@ SECTION_SELLER_STANDARDS = "seller_standards"
 SECTION_ACCOUNT_PRIVILEGES = "account_privileges"
 SECTION_FINANCES = "finances"
 
-ALL_SECTIONS = (
-    SECTION_BUYING,
-    SECTION_SELLING,
-    SECTION_FULFILLMENT,
-    SECTION_MESSAGES,
-    SECTION_FEEDBACK,
-    SECTION_ANALYTICS,
-    SECTION_SELLER_STANDARDS,
-    SECTION_ACCOUNT_PRIVILEGES,
-    SECTION_FINANCES,
-)
-
 SECTION_FEEDBACK_INTERVAL_MINUTES = 60
 SECTION_ANALYTICS_INTERVAL_MINUTES = 60
 SECTION_SELLER_STANDARDS_INTERVAL_MINUTES = 1440
@@ -200,74 +189,24 @@ SECTION_FINANCES_RETRY_MINUTES = 60
 # attempts before a Repairs issue is created.
 REPAIR_STREAK_THRESHOLD = 3
 
-# Truncation collection keys → owning payload section (for repair streak gating).
-TRUNCATION_COLLECTION_SECTION = {
-    "watched": SECTION_BUYING,
-    "bidding": SECTION_BUYING,
-    "selling": SECTION_SELLING,
-    "seller_list_views": SECTION_SELLING,
-    "active_offers": SECTION_SELLING,
-    "sold_unsold": SECTION_SELLING,
-    "orders": SECTION_FULFILLMENT,
-    "payment_disputes": SECTION_FULFILLMENT,
-    "messages": SECTION_MESSAGES,
-}
 
-# Partial-failure / seller-ops categories → owning payload section.
-PARTIAL_FAILURE_SECTION = {
-    "buying_truncated": SECTION_BUYING,
-    "selling_truncated": SECTION_SELLING,
-    "sold_unsold_truncated": SECTION_SELLING,
-    "sold_unsold_classification": SECTION_SELLING,
-    "seller_list_views_truncated": SECTION_SELLING,
-    "seller_list_views": SECTION_SELLING,
-    "active_offers_truncated": SECTION_SELLING,
-    "active_offers": SECTION_SELLING,
-    "analytics_views": SECTION_ANALYTICS,
-    "analytics_views_missing_scope": SECTION_ANALYTICS,
-    "analytics_views_unsupported": SECTION_ANALYTICS,
-    "orders": SECTION_FULFILLMENT,
-    "orders_truncated": SECTION_FULFILLMENT,
-    "orders_missing_scope": SECTION_FULFILLMENT,
-    "payment_disputes": SECTION_FULFILLMENT,
-    "payment_disputes_truncated": SECTION_FULFILLMENT,
-    "payment_disputes_missing_scope": SECTION_FULFILLMENT,
-    "seller_standards": SECTION_SELLER_STANDARDS,
-    "seller_standards_missing_scope": SECTION_SELLER_STANDARDS,
-    "feedback": SECTION_FEEDBACK,
-    "feedback_invalid_request": SECTION_FEEDBACK,
-    "feedback_user_lookup": SECTION_FEEDBACK,
-    "feedback_forbidden": SECTION_FEEDBACK,
-    "feedback_not_found": SECTION_FEEDBACK,
-    "feedback_missing_scope": SECTION_FEEDBACK,
-    "messages": SECTION_MESSAGES,
-    "messages_truncated": SECTION_MESSAGES,
-    "messages_missing_scope": SECTION_MESSAGES,
-    "account_privileges": SECTION_ACCOUNT_PRIVILEGES,
-    "account_privileges_missing_scope": SECTION_ACCOUNT_PRIVILEGES,
-    "account_privileges_unsupported": SECTION_ACCOUNT_PRIVILEGES,
-    "finances": SECTION_FINANCES,
-    "finances_missing_scope": SECTION_FINANCES,
-    "finances_unsupported": SECTION_FINANCES,
-}
+def __getattr__(name: str) -> Any:
+    """Lazy re-exports owned by the SectionSpec registry."""
+    if name in {
+        "ALL_SECTIONS",
+        "PARTIAL_FAILURE_SECTION",
+        "TRUNCATION_COLLECTION_SECTION",
+        "MISSING_SCOPE_PARTIAL_FAILURES",
+    }:
+        from . import sections
 
-MISSING_SCOPE_PARTIAL_FAILURES = frozenset(
-    {
-        "analytics_views_missing_scope",
-        "orders_missing_scope",
-        "payment_disputes_missing_scope",
-        "seller_standards_missing_scope",
-        "feedback_missing_scope",
-        "messages_missing_scope",
-        "account_privileges_missing_scope",
-        "finances_missing_scope",
-    }
-)
+        return getattr(sections, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def section_interval_minutes(section: str, poll_interval: int) -> int:
     """Return the refresh interval in minutes for a payload section."""
-    # Lazy import avoids a circular dependency (sections → api → const).
+    # Lazy import avoids a circular dependency (sections → const).
     from .sections import MESSAGES_POLL_MULTIPLIER, SECTION_SPECS
 
     poll = max(poll_interval, 1)

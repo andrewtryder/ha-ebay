@@ -92,6 +92,13 @@ from .const import (
 from .marketplace import accept_language_for_site, capability_supported
 from .models import ApiFailure
 from .parsers.payload import _dict_by_item_id, summarize_payload
+from .sections import (
+    EMPTY_TRUNCATED_COLLECTIONS as _EMPTY_TRUNCATED_COLLECTIONS,
+    PARTIAL_FAILURE_CATEGORIES_BY_SECTION,
+    SECTION_SPECS,
+    TRUNCATED_KEYS_BY_SECTION,
+    enabled_sections_for_options,
+)
 from .parsers.trading_builders import (
     BEST_OFFERS_CALL_NAME,
     BEST_OFFERS_ENTRIES_PER_PAGE,
@@ -331,15 +338,17 @@ class EbayApiClient(
         ``previous`` (or an empty shell).
         """
         enabled_sections = enabled_sections_for_options(
-            buying_enabled=buying_enabled,
-            selling_enabled=selling_enabled,
-            analytics_enabled=analytics_enabled,
-            fulfillment_enabled=fulfillment_enabled,
-            seller_standards_enabled=seller_standards_enabled,
-            feedback_enabled=feedback_enabled,
-            messages_enabled=messages_enabled,
-            account_privileges_enabled=account_privileges_enabled,
-            finances_enabled=finances_enabled,
+            {
+                CONF_BUYING_ENABLED: buying_enabled,
+                CONF_SELLING_ENABLED: selling_enabled,
+                CONF_ANALYTICS_ENABLED: analytics_enabled,
+                CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
+                CONF_SELLER_STANDARDS_ENABLED: seller_standards_enabled,
+                CONF_FEEDBACK_ENABLED: feedback_enabled,
+                CONF_MESSAGES_ENABLED: messages_enabled,
+                CONF_ACCOUNT_PRIVILEGES_ENABLED: account_privileges_enabled,
+                CONF_FINANCES_ENABLED: finances_enabled,
+            }
         )
         due = enabled_sections if sections is None else (sections & enabled_sections)
         return await self.async_fetch_sections(
@@ -571,7 +580,10 @@ class EbayApiClient(
             if CONF_ANALYTICS_ENABLED in missing_by_feature:
                 partial_failures.append("analytics_views_missing_scope")
                 analytics_ok = False
-            elif not capability_supported(self.site_id, "traffic_report"):
+            elif not capability_supported(
+                self.site_id,
+                SECTION_SPECS[SECTION_ANALYTICS].marketplace_capability or "",
+            ):
                 _LOGGER.debug(
                     "Skipping analytics traffic report; unsupported for site_id=%s",
                     self.site_id,
@@ -750,7 +762,10 @@ class EbayApiClient(
             if CONF_ACCOUNT_PRIVILEGES_ENABLED in missing_by_feature:
                 partial_failures.append("account_privileges_missing_scope")
                 privileges_ok = False
-            elif not capability_supported(self.site_id, "account_privileges"):
+            elif not capability_supported(
+                self.site_id,
+                SECTION_SPECS[SECTION_ACCOUNT_PRIVILEGES].marketplace_capability or "",
+            ):
                 _LOGGER.debug(
                     "Skipping account privileges; unsupported for site_id=%s",
                     self.site_id,
@@ -784,7 +799,10 @@ class EbayApiClient(
             if CONF_FINANCES_ENABLED in missing_by_feature:
                 partial_failures.append("finances_missing_scope")
                 finances_ok = False
-            elif not capability_supported(self.site_id, "finances"):
+            elif not capability_supported(
+                self.site_id,
+                SECTION_SPECS[SECTION_FINANCES].marketplace_capability or "",
+            ):
                 # Many marketplaces need digital request signing for Finances;
                 # treat those as unsupported rather than attempting unsigned calls.
                 _LOGGER.debug(
@@ -923,125 +941,6 @@ class EbayApiClient(
             "sold_unsold_last_fetched": sold_unsold_last_fetched,
             "refreshed_sections": sorted(sections),
         }
-
-
-PARTIAL_FAILURE_CATEGORIES_BY_SECTION: dict[str, frozenset[str]] = {
-    SECTION_BUYING: frozenset({"buying_truncated"}),
-    SECTION_SELLING: frozenset(
-        {
-            "selling_truncated",
-            "sold_unsold_truncated",
-            "sold_unsold_classification",
-            "seller_list_views_truncated",
-            "seller_list_views",
-            "active_offers_truncated",
-            "active_offers",
-        }
-    ),
-    SECTION_ANALYTICS: frozenset(
-        {
-            "analytics_views_missing_scope",
-            "analytics_views",
-            "analytics_views_unsupported",
-        }
-    ),
-    SECTION_FULFILLMENT: frozenset(
-        {
-            "orders_missing_scope",
-            "payment_disputes_missing_scope",
-            "orders_truncated",
-            "orders",
-            "payment_disputes_truncated",
-            "payment_disputes",
-        }
-    ),
-    SECTION_SELLER_STANDARDS: frozenset(
-        {"seller_standards_missing_scope", "seller_standards"}
-    ),
-    SECTION_FEEDBACK: frozenset(
-        {
-            "feedback_missing_scope",
-            "feedback",
-            "feedback_invalid_request",
-            "feedback_user_lookup",
-            "feedback_forbidden",
-            "feedback_not_found",
-        }
-    ),
-    SECTION_MESSAGES: frozenset(
-        {"messages_missing_scope", "messages_truncated", "messages"}
-    ),
-    SECTION_ACCOUNT_PRIVILEGES: frozenset(
-        {
-            "account_privileges_missing_scope",
-            "account_privileges_unsupported",
-            "account_privileges",
-        }
-    ),
-    SECTION_FINANCES: frozenset(
-        {
-            "finances_missing_scope",
-            "finances_unsupported",
-            "finances",
-        }
-    ),
-}
-
-TRUNCATED_KEYS_BY_SECTION: dict[str, tuple[str, ...]] = {
-    SECTION_BUYING: ("watched", "bidding"),
-    SECTION_SELLING: ("selling", "seller_list_views", "active_offers", "sold_unsold"),
-    SECTION_FULFILLMENT: ("orders", "payment_disputes"),
-    SECTION_MESSAGES: ("messages",),
-}
-
-_EMPTY_TRUNCATED_COLLECTIONS = {
-    "watched": False,
-    "bidding": False,
-    "selling": False,
-    "seller_list_views": False,
-    "active_offers": False,
-    "orders": False,
-    "payment_disputes": False,
-    "messages": False,
-    "sold_unsold": False,
-}
-
-
-def enabled_sections_for_options(
-    *,
-    buying_enabled: bool,
-    selling_enabled: bool,
-    analytics_enabled: bool,
-    fulfillment_enabled: bool,
-    seller_standards_enabled: bool,
-    feedback_enabled: bool,
-    messages_enabled: bool,
-    account_privileges_enabled: bool = False,
-    finances_enabled: bool = False,
-) -> set[str]:
-    """Return payload sections that should be fetched for the given options."""
-    from .sections import SECTION_SPECS
-
-    option_flags = {
-        CONF_BUYING_ENABLED: buying_enabled,
-        CONF_SELLING_ENABLED: selling_enabled,
-        CONF_ANALYTICS_ENABLED: analytics_enabled,
-        CONF_FULFILLMENT_ENABLED: fulfillment_enabled,
-        CONF_SELLER_STANDARDS_ENABLED: seller_standards_enabled,
-        CONF_FEEDBACK_ENABLED: feedback_enabled,
-        CONF_MESSAGES_ENABLED: messages_enabled,
-        CONF_ACCOUNT_PRIVILEGES_ENABLED: account_privileges_enabled,
-        CONF_FINANCES_ENABLED: finances_enabled,
-    }
-    sections: set[str] = set()
-    for key, spec in SECTION_SPECS.items():
-        if spec.option_key is None or not option_flags.get(spec.option_key):
-            continue
-        # Analytics is only scheduled when Selling is also enabled.
-        if key == SECTION_ANALYTICS and not selling_enabled:
-            continue
-        sections.add(key)
-    return sections
 
 
 def _copy_seller_ops(seller_ops: dict[str, Any]) -> dict[str, Any]:

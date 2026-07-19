@@ -48,8 +48,6 @@ from .const import (
     ENTITY_MODE_MINIMAL,
     LEGACY_COMPATIBILITY_EVENT_TYPES,
     MANUAL_REFRESH_COOLDOWN_SECONDS,
-    MISSING_SCOPE_PARTIAL_FAILURES,
-    PARTIAL_FAILURE_SECTION,
     RECENT_EVENTS_MAX,
     REFRESH_RESULT_AUTH_ERROR,
     REFRESH_RESULT_ERROR,
@@ -61,6 +59,7 @@ from .const import (
     section_retry_minutes,
 )
 from .options_parse import parse_price_targets, pinned_ids, to_decimal
+from .sections import MISSING_SCOPE_PARTIAL_FAILURES, PARTIAL_FAILURE_SECTION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -272,19 +271,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _enabled_sections(self) -> set[str]:
         """Return sections enabled by the current options."""
-        return enabled_sections_for_options(
-            buying_enabled=bool(self.options[CONF_BUYING_ENABLED]),
-            selling_enabled=bool(self.options[CONF_SELLING_ENABLED]),
-            analytics_enabled=bool(self.options[CONF_ANALYTICS_ENABLED]),
-            fulfillment_enabled=bool(self.options[CONF_FULFILLMENT_ENABLED]),
-            seller_standards_enabled=bool(self.options[CONF_SELLER_STANDARDS_ENABLED]),
-            feedback_enabled=bool(self.options[CONF_FEEDBACK_ENABLED]),
-            messages_enabled=bool(self.options[CONF_MESSAGES_ENABLED]),
-            account_privileges_enabled=bool(
-                self.options[CONF_ACCOUNT_PRIVILEGES_ENABLED]
-            ),
-            finances_enabled=bool(self.options[CONF_FINANCES_ENABLED]),
-        )
+        return enabled_sections_for_options(self.options)
 
     def _due_sections(self, *, force: bool) -> set[str]:
         """Return enabled sections that are due for refresh."""
