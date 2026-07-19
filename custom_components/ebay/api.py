@@ -1,22 +1,74 @@
-"""Read-only eBay API client and parsers."""
+"""Read-only eBay API client facade.
+
+Public imports stay at ``custom_components.ebay.api``. Implementation is split
+across ``clients/`` (HTTP mixins) and ``parsers/`` (pure helpers).
+"""
 
 from __future__ import annotations
 
-import asyncio
-import base64
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-import json
+from datetime import datetime, timezone
 import logging
 import time
-from typing import Any, NoReturn
-from urllib.parse import parse_qs, urlencode, urlparse
-import xml.etree.ElementTree as ET
+from typing import Any
 
 import aiohttp
 
+from .clients.account import AccountClientMixin
+from .clients.analytics import AnalyticsClientMixin
+from .clients.endpoints import (
+    EbayEndpoints,
+    build_consent_url,
+    endpoints_for,
+    extract_authorization_code,
+    extract_oauth_callback_params,
+)
+from .clients.errors import (
+    API_WARNINGS_STATE_ATTR_MAX,
+    EbayApiError,
+    EbayAuthError,
+    EbayAuthTransientError,
+    EbayError,
+    EbayParseError,
+    EbayPartialFailure,
+    _error_text_blob,
+    _is_eligibility_or_permission_error,
+    _is_unsupported_error,
+    _safe_ebay_error_payload,
+    build_api_failure,
+    build_partial_failure_detail,
+    classify_rest_status,
+    endpoint_key_from_url,
+    map_rest_failure_category,
+    merge_partial_failure_details,
+    sanitize_ebay_rest_errors,
+)
+from .clients.feedback import FeedbackClientMixin
+from .clients.finances import FinancesClientMixin
+from .clients.fulfillment import FulfillmentClientMixin
+from .clients.http import TOKEN_REFRESH_MARGIN, RestClientMixin
+from .clients.messages import MessagesClientMixin
+from .clients.scopes import (
+    ALL_OPTIONAL_SCOPES,
+    CORE_SCOPE,
+    DEFAULT_SCOPE,
+    MODULE_SCOPES,
+    SCOPE_ACCOUNT_READONLY,
+    SCOPE_ANALYTICS_READONLY,
+    SCOPE_FEEDBACK,
+    SCOPE_FINANCES,
+    SCOPE_FULFILLMENT_READONLY,
+    SCOPE_MESSAGE,
+    SCOPE_PAYMENT_DISPUTE,
+    has_core_scope,
+    join_scopes,
+    missing_scopes_for_options,
+    parse_scope_set,
+    resolve_granted_scopes,
+    scopes_for_options,
+)
+from .clients.seller_standards import SellerStandardsClientMixin
+from .clients.trading import TradingClientMixin
 from .const import (
-    COMPATIBILITY_LEVEL,
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
@@ -27,8 +79,6 @@ from .const import (
     CONF_SELLER_STANDARDS_ENABLED,
     CONF_SELLING_ENABLED,
     EBAY_XML_NS,
-    ENV_SANDBOX,
-    NS,
     SECTION_ACCOUNT_PRIVILEGES,
     SECTION_ANALYTICS,
     SECTION_BUYING,
@@ -40,1198 +90,191 @@ from .const import (
     SECTION_SELLING,
 )
 from .marketplace import accept_language_for_site, capability_supported
-from .models import ApiFailure, FailureClassification
-from .oauth_errors import (
-    OAuth2TokenRequestError,
-    OAuth2TokenRequestReauthError,
-    OAuth2TokenRequestTransientError,
-    oauth_token_error,
-    oauth_token_request_error,
-    oauth_token_transient_error,
+from .models import ApiFailure
+from .parsers.payload import _dict_by_item_id, summarize_payload
+from .parsers.trading_builders import (
+    BEST_OFFERS_CALL_NAME,
+    BEST_OFFERS_ENTRIES_PER_PAGE,
+    BEST_OFFERS_MAX_PAGES,
+    GET_USER_CALL_NAME,
+    READ_ONLY_CALL_NAME,
+    SELLER_LIST_CALL_NAME,
+    SELLING_CALL_NAME,
+    SOLD_UNSOLD_DURATION_DAYS,
+    SOLD_UNSOLD_REFRESH_HOURS,
+    _parse_optional_datetime,
+    _should_fetch_sold_unsold,
+    build_get_best_offers_xml,
+    build_get_my_ebay_buying_xml,
+    build_get_my_ebay_selling_classification_xml,
+    build_get_my_ebay_selling_list_xml,
+    build_get_my_ebay_selling_xml,
+    build_get_seller_list_xml,
+    build_get_user_xml,
+    parse_selling_list_item_ids,
+    parse_sold_unsold_classification,
 )
-from .seller_ops import (
-    CONVERSATIONS_MAX_PAGES,
-    CONVERSATIONS_PAGE_LIMIT,
-    DISPUTES_MAX_PAGES,
-    DISPUTES_PAGE_LIMIT,
-    FEEDBACK_ITEMS_MAX_PAGES,
-    FEEDBACK_ITEMS_PAGE_LIMIT,
-    FEEDBACK_RECENT_IDS_MAX,
-    ORDERS_LOOKBACK_DAYS,
-    ORDERS_MAX_PAGES,
-    ORDERS_PAGE_LIMIT,
-    empty_seller_ops,
-    encode_creation_date_filter,
-    encode_fulfillment_status_filter,
-    marketplace_id_for_site,
-    normalize_conversation,
-    normalize_dispute,
-    normalize_order,
-    parse_account_privileges,
-    parse_awaiting_feedback_count,
-    parse_customer_service_metric,
-    parse_feedback_items,
-    parse_feedback_summary,
-    parse_last_payout,
-    parse_seller_funds_summary,
-    parse_seller_standards_profiles,
-    summarize_disputes,
-    summarize_messages,
-    summarize_orders,
+from .parsers.trading_items import (
+    active_offers_by_item_id,
+    analytics_views_by_item_id,
+    pagination_total_pages,
+    parse_buying_item,
+    parse_container,
+    parse_selling_container,
+    parse_selling_item,
+    seller_list_views_by_item_id,
 )
+from .parsers.xml import (
+    ANALYTICS_BATCH_SIZE,
+    MAX_PAGES,
+    _duration_ms,
+    _safe_exception_context,
+    _to_bool,
+    _to_float,
+    _to_int,
+    _total_pages,
+    chunk_item_ids,
+    dedupe_trading_warnings,
+    ebay_time,
+    extract_trading_warnings,
+    format_seconds,
+    parse_ebay_time,
+    seconds_until,
+)
+from .seller_ops import empty_seller_ops
+
+__all__ = [
+    "ALL_OPTIONAL_SCOPES",
+    "ANALYTICS_BATCH_SIZE",
+    "API_WARNINGS_STATE_ATTR_MAX",
+    "BEST_OFFERS_CALL_NAME",
+    "BEST_OFFERS_ENTRIES_PER_PAGE",
+    "BEST_OFFERS_MAX_PAGES",
+    "CONF_ACCOUNT_PRIVILEGES_ENABLED",
+    "CONF_ANALYTICS_ENABLED",
+    "CONF_BUYING_ENABLED",
+    "CONF_FEEDBACK_ENABLED",
+    "CONF_FINANCES_ENABLED",
+    "CONF_FULFILLMENT_ENABLED",
+    "CONF_MESSAGES_ENABLED",
+    "CONF_SELLER_STANDARDS_ENABLED",
+    "CONF_SELLING_ENABLED",
+    "CORE_SCOPE",
+    "DEFAULT_SCOPE",
+    "EBAY_XML_NS",
+    "EbayApiClient",
+    "EbayApiError",
+    "EbayAuthError",
+    "EbayAuthTransientError",
+    "EbayEndpoints",
+    "EbayError",
+    "EbayParseError",
+    "EbayPartialFailure",
+    "GET_USER_CALL_NAME",
+    "MAX_PAGES",
+    "MODULE_SCOPES",
+    "PARTIAL_FAILURE_CATEGORIES_BY_SECTION",
+    "READ_ONLY_CALL_NAME",
+    "SCOPE_ACCOUNT_READONLY",
+    "SCOPE_ANALYTICS_READONLY",
+    "SCOPE_FEEDBACK",
+    "SCOPE_FINANCES",
+    "SCOPE_FULFILLMENT_READONLY",
+    "SCOPE_MESSAGE",
+    "SCOPE_PAYMENT_DISPUTE",
+    "SECTION_ACCOUNT_PRIVILEGES",
+    "SECTION_ANALYTICS",
+    "SECTION_BUYING",
+    "SECTION_FEEDBACK",
+    "SECTION_FINANCES",
+    "SECTION_FULFILLMENT",
+    "SECTION_MESSAGES",
+    "SECTION_SELLER_STANDARDS",
+    "SECTION_SELLING",
+    "SELLER_LIST_CALL_NAME",
+    "SELLING_CALL_NAME",
+    "SOLD_UNSOLD_DURATION_DAYS",
+    "SOLD_UNSOLD_REFRESH_HOURS",
+    "TOKEN_REFRESH_MARGIN",
+    "TRUNCATED_KEYS_BY_SECTION",
+    "_EMPTY_TRUNCATED_COLLECTIONS",
+    "_copy_seller_ops",
+    "_dict_by_item_id",
+    "_duration_ms",
+    "_error_text_blob",
+    "_is_eligibility_or_permission_error",
+    "_is_unsupported_error",
+    "_parse_optional_datetime",
+    "_parse_section_dt_map",
+    "_payload_shell",
+    "_safe_ebay_error_payload",
+    "_safe_exception_context",
+    "_seller_ops_summary_keys",
+    "_should_fetch_sold_unsold",
+    "_stamp_section_attempt",
+    "_to_bool",
+    "_to_float",
+    "_to_int",
+    "_total_pages",
+    "active_offers_by_item_id",
+    "analytics_views_by_item_id",
+    "build_api_failure",
+    "build_consent_url",
+    "build_get_best_offers_xml",
+    "build_get_my_ebay_buying_xml",
+    "build_get_my_ebay_selling_classification_xml",
+    "build_get_my_ebay_selling_list_xml",
+    "build_get_my_ebay_selling_xml",
+    "build_get_seller_list_xml",
+    "build_get_user_xml",
+    "build_partial_failure_detail",
+    "chunk_item_ids",
+    "classify_rest_status",
+    "dedupe_trading_warnings",
+    "ebay_time",
+    "enabled_sections_for_options",
+    "endpoint_key_from_url",
+    "endpoints_for",
+    "extract_authorization_code",
+    "extract_oauth_callback_params",
+    "extract_trading_warnings",
+    "format_seconds",
+    "has_core_scope",
+    "join_scopes",
+    "map_rest_failure_category",
+    "merge_partial_failure_details",
+    "missing_scopes_for_options",
+    "pagination_total_pages",
+    "parse_buying_item",
+    "parse_container",
+    "parse_ebay_time",
+    "parse_scope_set",
+    "parse_selling_container",
+    "parse_selling_item",
+    "parse_selling_list_item_ids",
+    "parse_sold_unsold_classification",
+    "resolve_granted_scopes",
+    "sanitize_ebay_rest_errors",
+    "scopes_for_options",
+    "seconds_until",
+    "seller_list_views_by_item_id",
+    "summarize_payload",
+]
 
 _LOGGER = logging.getLogger(__name__)
 
-READ_ONLY_CALL_NAME = "GetMyeBayBuying"
-SELLING_CALL_NAME = "GetMyeBaySelling"
-SELLER_LIST_CALL_NAME = "GetSellerList"
-BEST_OFFERS_CALL_NAME = "GetBestOffers"
-GET_USER_CALL_NAME = "GetUser"
-BEST_OFFERS_ENTRIES_PER_PAGE = 200
-BEST_OFFERS_MAX_PAGES = 25
 
-CORE_SCOPE = "https://api.ebay.com/oauth/api_scope"
-SCOPE_ANALYTICS_READONLY = (
-    "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly"
-)
-SCOPE_FULFILLMENT_READONLY = (
-    "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
-)
-SCOPE_PAYMENT_DISPUTE = "https://api.ebay.com/oauth/api_scope/sell.payment.dispute"
-SCOPE_FEEDBACK = "https://api.ebay.com/oauth/api_scope/commerce.feedback"
-SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
-SCOPE_ACCOUNT_READONLY = "https://api.ebay.com/oauth/api_scope/sell.account.readonly"
-SCOPE_FINANCES = "https://api.ebay.com/oauth/api_scope/sell.finances"
-
-MODULE_SCOPES: dict[str, tuple[str, ...]] = {
-    CONF_ANALYTICS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
-    CONF_SELLER_STANDARDS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
-    CONF_FULFILLMENT_ENABLED: (SCOPE_FULFILLMENT_READONLY, SCOPE_PAYMENT_DISPUTE),
-    CONF_FEEDBACK_ENABLED: (SCOPE_FEEDBACK,),
-    CONF_MESSAGES_ENABLED: (SCOPE_MESSAGE,),
-    CONF_ACCOUNT_PRIVILEGES_ENABLED: (SCOPE_ACCOUNT_READONLY,),
-    CONF_FINANCES_ENABLED: (SCOPE_FINANCES,),
-}
-
-ALL_OPTIONAL_SCOPES = (
-    SCOPE_ANALYTICS_READONLY,
-    SCOPE_FULFILLMENT_READONLY,
-    SCOPE_PAYMENT_DISPUTE,
-    SCOPE_FEEDBACK,
-    SCOPE_MESSAGE,
-    SCOPE_ACCOUNT_READONLY,
-    SCOPE_FINANCES,
-)
-
-
-def parse_scope_set(scopes: str | None) -> set[str]:
-    """Parse a space-delimited OAuth scope string into a set."""
-    if not scopes:
-        return set()
-    return {scope for scope in scopes.split() if scope}
-
-
-def join_scopes(scopes: list[str] | tuple[str, ...] | set[str]) -> str:
-    """Join scopes into a stable space-delimited string."""
-    if isinstance(scopes, set):
-        ordered = sorted(scopes)
-    else:
-        ordered = list(dict.fromkeys(scopes))
-    return " ".join(ordered)
-
-
-def scopes_for_options(options: dict[str, Any]) -> str:
-    """Return the OAuth scope string required by enabled feature options."""
-    scopes: list[str] = [CORE_SCOPE]
-    for option_key, option_scopes in MODULE_SCOPES.items():
-        if not options.get(option_key):
-            continue
-        # Analytics is only useful/scheduled when Selling is also enabled.
-        if option_key == CONF_ANALYTICS_ENABLED and not options.get(
-            CONF_SELLING_ENABLED
-        ):
-            continue
-        scopes.extend(option_scopes)
-    return join_scopes(scopes)
-
-
-def missing_scopes_for_options(
-    granted: str | set[str] | None, options: dict[str, Any]
-) -> dict[str, list[str]]:
-    """Return enabled modules whose required scopes are not all granted."""
-    granted_set = granted if isinstance(granted, set) else parse_scope_set(granted)
-    missing: dict[str, list[str]] = {}
-    for option_key, option_scopes in MODULE_SCOPES.items():
-        if not options.get(option_key):
-            continue
-        if option_key == CONF_ANALYTICS_ENABLED and not options.get(
-            CONF_SELLING_ENABLED
-        ):
-            continue
-        absent = [scope for scope in option_scopes if scope not in granted_set]
-        if absent:
-            missing[option_key] = absent
-    return missing
-
-
-def resolve_granted_scopes(requested: str, token: dict[str, Any] | None = None) -> str:
-    """Prefer scopes returned by eBay; otherwise store the requested set."""
-    if token:
-        returned = token.get("scope")
-        if isinstance(returned, str) and returned.strip():
-            return join_scopes(parse_scope_set(returned))
-    return join_scopes(parse_scope_set(requested))
-
-
-def has_core_scope(scopes: str | None) -> bool:
-    """Return True when the stored grant includes the core Trading API scope."""
-    return CORE_SCOPE in parse_scope_set(scopes)
-
-
-# Full union retained for docs/tests; routine authorize uses CORE_SCOPE or
-# scopes_for_options().
-DEFAULT_SCOPE = join_scopes((CORE_SCOPE, *ALL_OPTIONAL_SCOPES))
-
-TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
-MAX_PAGES = 20
-ANALYTICS_BATCH_SIZE = 100
-_WARNING_MESSAGE_MAX_LEN = 240
-API_WARNINGS_STATE_ATTR_MAX = 10
-_PARTIAL_FAILURE_DETAILS_MAX = 20
-_PARTIAL_FAILURE_ERRORS_MAX = 5
-
-
-class EbayError(Exception):
-    """Base eBay integration error."""
-
-
-class EbayAuthError(EbayError):
-    """Authentication or authorization failed."""
-
-
-class EbayAuthTransientError(EbayError):
-    """Authentication refresh failed temporarily."""
-
-
-class EbayApiError(EbayError):
-    """eBay API returned an error."""
-
-
-class EbayPartialFailure(EbayError):
-    """Optional eBay API section failed."""
-
-    def __init__(
-        self,
-        category: str,
-        *,
-        details: dict[str, Any] | None = None,
-        failure: ApiFailure | None = None,
-    ) -> None:
-        super().__init__(category)
-        self.category = category
-        self.details = details
-        self.failure = failure
-
-
-class EbayParseError(EbayError):
-    """eBay response could not be parsed."""
-
-
-@dataclass
-class EbayEndpoints:
-    """Endpoint set for an eBay environment."""
-
-    trading: str
-    token: str
-    authorize: str
-    analytics: str
-    analytics_base: str
-    fulfillment: str
-    payment_disputes: str
-    feedback: str
-    messages: str
-    account: str
-    finances: str
-
-
-def endpoints_for(environment: str) -> EbayEndpoints:
-    """Return endpoint URLs for production or sandbox."""
-    if environment == ENV_SANDBOX:
-        return EbayEndpoints(
-            trading="https://api.sandbox.ebay.com/ws/api.dll",
-            token="https://api.sandbox.ebay.com/identity/v1/oauth2/token",
-            authorize="https://auth.sandbox.ebay.com/oauth2/authorize",
-            analytics="https://api.sandbox.ebay.com/sell/analytics/v1/traffic_report",
-            analytics_base="https://api.sandbox.ebay.com/sell/analytics/v1",
-            fulfillment="https://api.sandbox.ebay.com/sell/fulfillment/v1",
-            payment_disputes="https://apiz.sandbox.ebay.com/sell/fulfillment/v1",
-            feedback="https://api.sandbox.ebay.com/commerce/feedback/v1",
-            messages="https://api.sandbox.ebay.com/commerce/message/v1",
-            account="https://api.sandbox.ebay.com/sell/account/v1",
-            finances="https://apiz.sandbox.ebay.com/sell/finances/v1",
-        )
-    return EbayEndpoints(
-        trading="https://api.ebay.com/ws/api.dll",
-        token="https://api.ebay.com/identity/v1/oauth2/token",
-        authorize="https://auth.ebay.com/oauth2/authorize",
-        analytics="https://api.ebay.com/sell/analytics/v1/traffic_report",
-        analytics_base="https://api.ebay.com/sell/analytics/v1",
-        fulfillment="https://api.ebay.com/sell/fulfillment/v1",
-        payment_disputes="https://apiz.ebay.com/sell/fulfillment/v1",
-        feedback="https://api.ebay.com/commerce/feedback/v1",
-        messages="https://api.ebay.com/commerce/message/v1",
-        account="https://api.ebay.com/sell/account/v1",
-        # Finances uses the apiz host; some marketplaces also require digital
-        # request signing and are gated via marketplace.finances.
-        finances="https://apiz.ebay.com/sell/finances/v1",
-    )
-
-
-_ELIGIBILITY_OR_PERMISSION_MARKERS = (
-    "not eligible",
-    "not permitted",
-    "not authorized",
-    "access denied",
-    "insufficient permission",
-    "does not have permission",
-    "not allowed to access",
-    "unavailable for this account",
-    "account is not",
-)
-
-_UNSUPPORTED_MARKERS = (
-    "not eligible",
-    "unavailable for this account",
-    "not available for this marketplace",
-    "not supported",
-)
-
-
-def _safe_ebay_error_payload(payload: Any) -> dict[str, Any] | None:
-    """Return a dict error payload when present."""
-    return payload if isinstance(payload, dict) else None
-
-
-def endpoint_key_from_url(url: str) -> str:
-    """Return the URL path without query string for diagnostics."""
-    parsed = urlparse(url)
-    path = parsed.path or "/"
-    return path
-
-
-def sanitize_ebay_rest_errors(
-    payload: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Extract sanitized errorId/message fields from an eBay REST error payload."""
-    if not payload:
-        return []
-    errors = payload.get("errors")
-    if not isinstance(errors, list):
-        return []
-    sanitized: list[dict[str, Any]] = []
-    for err in errors:
-        if not isinstance(err, dict):
-            continue
-        message = err.get("message")
-        long_message = err.get("longMessage")
-        entry = {
-            "error_id": err.get("errorId"),
-            "domain": err.get("domain") if isinstance(err.get("domain"), str) else None,
-            "category": err.get("category")
-            if isinstance(err.get("category"), str)
-            else None,
-            "message": _sanitize_warning_text(
-                str(message) if message is not None else None
-            ),
-            "long_message": _sanitize_warning_text(
-                str(long_message) if long_message is not None else None
-            ),
-        }
-        if (
-            entry["error_id"] is not None
-            or entry["message"]
-            or entry["long_message"]
-            or entry["domain"]
-            or entry["category"]
-        ):
-            sanitized.append(entry)
-        if len(sanitized) >= _PARTIAL_FAILURE_ERRORS_MAX:
-            break
-    return sanitized
-
-
-def classify_rest_status(
-    status: int,
-    error_payload: dict[str, Any] | None,
-    partial_category: str,
-) -> FailureClassification:
-    """Classify an HTTP status (+ optional eBay errors) for soft-fail handling."""
-    _ = partial_category  # reserved for category-specific overrides
-    if status == 429 or status >= 500:
-        return "transient"
-    if status == 400:
-        return "malformed_request"
-    if status == 403:
-        if _is_unsupported_error(error_payload):
-            return "unsupported"
-        if _is_eligibility_or_permission_error(error_payload):
-            return "permission"
-        return "permission"
-    if status == 404:
-        return "unknown"
-    return "unknown"
-
-
-def build_api_failure(
-    operation: str,
-    url: str,
-    status: int | None,
-    error_payload: dict[str, Any] | None,
-    mapped_category: str,
-    classification: FailureClassification,
-) -> ApiFailure:
-    """Build a diagnostics-safe ApiFailure from a REST response."""
-    errors = sanitize_ebay_rest_errors(error_payload)
-    first = errors[0] if errors else {}
-    message = first.get("message") or first.get("long_message")
-    return ApiFailure(
-        operation=operation,
-        endpoint_key=endpoint_key_from_url(url),
-        http_status=status,
-        ebay_error_id=first.get("error_id"),
-        ebay_domain=first.get("domain"),
-        ebay_category=first.get("category"),
-        message=message if isinstance(message, str) else None,
-        classification=classification,
-        mapped_category=mapped_category,
-    )
-
-
-def build_partial_failure_detail(
-    *,
-    mapped_category: str | None = None,
-    request_category: str | None = None,
-    http_status: int | None = None,
-    errors: list[dict[str, Any]] | None = None,
-    source: str | None = None,
-    reason: str | None = None,
-    failure: ApiFailure | None = None,
-) -> dict[str, Any]:
-    """Build a diagnostics-safe soft-failure detail record."""
-    if failure is not None:
-        return failure.to_dict()
-    detail: dict[str, Any] = {
-        "mapped_category": mapped_category,
-        "request_category": request_category,
-        "http_status": http_status,
-        "errors": list(errors or []),
-    }
-    if source:
-        detail["source"] = source
-    if reason:
-        detail["reason"] = reason
-    return detail
-
-
-def merge_partial_failure_details(
-    previous: list[dict[str, Any]] | None,
-    new_details: list[dict[str, Any]],
-    active_categories: list[str] | set[str],
-) -> list[dict[str, Any]]:
-    """Retain details for active failure categories, preferring newest per category."""
-    active = set(active_categories)
-    by_category: dict[str, dict[str, Any]] = {}
-    for detail in list(previous or []) + list(new_details):
-        if not isinstance(detail, dict):
-            continue
-        category = detail.get("mapped_category")
-        if not isinstance(category, str) or category not in active:
-            continue
-        by_category[category] = detail
-    ordered_keys = (
-        list(active_categories)
-        if isinstance(active_categories, list)
-        else sorted(active)
-    )
-    ordered = [
-        by_category[category] for category in ordered_keys if category in by_category
-    ]
-    return ordered[:_PARTIAL_FAILURE_DETAILS_MAX]
-
-
-def _error_text_blob(payload: dict[str, Any] | None) -> str:
-    """Lowercased concatenation of eBay error text fields."""
-    if not payload:
-        return ""
-    errors = payload.get("errors")
-    if not isinstance(errors, list):
-        return ""
-    parts: list[str] = []
-    for err in errors:
-        if not isinstance(err, dict):
-            continue
-        parts.extend(
-            str(err.get(key) or "")
-            for key in ("message", "longMessage", "domain", "errorId")
-        )
-    return " ".join(parts).lower()
-
-
-def _is_unsupported_error(payload: dict[str, Any] | None) -> bool:
-    """Return True when eBay errors indicate marketplace/API unsupported."""
-    blob = _error_text_blob(payload)
-    return any(marker in blob for marker in _UNSUPPORTED_MARKERS)
-
-
-def _is_eligibility_or_permission_error(payload: dict[str, Any] | None) -> bool:
-    """Return True when eBay error details indicate eligibility/permission denial."""
-    if not payload:
-        return False
-    errors = payload.get("errors")
-    if not isinstance(errors, list):
-        return False
-    for err in errors:
-        if not isinstance(err, dict):
-            continue
-        category = str(err.get("category") or "").upper()
-        if category in {"AUTH", "AUTHENTICATION", "AUTHORIZATION"}:
-            return True
-        blob = " ".join(
-            str(err.get(key) or "")
-            for key in ("message", "longMessage", "domain", "errorId")
-        ).lower()
-        if any(marker in blob for marker in _ELIGIBILITY_OR_PERMISSION_MARKERS):
-            return True
-    return False
-
-
-def map_rest_failure_category(
-    category: str,
-    status: int,
-    error_payload: dict[str, Any] | None = None,
-    *,
-    classification: FailureClassification | None = None,
-) -> str:
-    """Map HTTP status + safe eBay errors to a repair-friendly failure category.
-
-    Feedback 400s are commonly invalid requests (for example a missing user_id),
-    not account unavailability. Reserve the plain ``feedback`` category for
-    explicit eligibility/permission denials so Repairs wording stays accurate.
-
-    ``classification`` is accepted for callers that already classified the
-    response; mapped repair categories remain stable for streak continuity.
-    """
-    _ = classification  # reserved; mapped categories stay independent of class
-    if category != "feedback":
-        return category
-    if status == 400:
-        return "feedback_invalid_request"
-    if status == 403:
-        if _is_eligibility_or_permission_error(error_payload):
-            return "feedback"
-        return "feedback_forbidden"
-    if status == 404:
-        return "feedback_not_found"
-    return category
-
-
-def build_consent_url(
-    environment: str,
-    client_id: str,
-    runame: str,
-    state: str,
-    scope: str = CORE_SCOPE,
-) -> str:
-    """Build an eBay OAuth consent URL."""
-    endpoints = endpoints_for(environment)
-    return f"{endpoints.authorize}?" + urlencode(
-        {
-            "client_id": client_id,
-            "redirect_uri": runame,
-            "response_type": "code",
-            "scope": scope,
-            "state": state,
-        }
-    )
-
-
-def extract_authorization_code(value: str) -> str:
-    """Extract an OAuth code from a pasted code or final callback URL."""
-    value = value.strip()
-    params = extract_oauth_callback_params(value)
-    code = params.get("code", [None])[0]
-    if code:
-        return code
-    return value
-
-
-def extract_oauth_callback_params(value: str) -> dict[str, list[str]]:
-    """Extract OAuth query parameters from a pasted callback URL."""
-    parsed = urlparse(value.strip())
-    if parsed.query:
-        query = parse_qs(parsed.query)
-        code = query.get("code", [None])[0]
-        if code:
-            return query
-    return {}
-
-
-def _basic_auth_header(client_id: str, client_secret: str) -> str:
-    basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    return f"Basic {basic}"
-
-
-def _text(parent: ET.Element | None, path: str) -> str | None:
-    if parent is None:
-        return None
-    value = parent.findtext(path, namespaces=NS)
-    return value.strip() if value else None
-
-
-def _first_text(parent: ET.Element | None, paths: list[str]) -> str | None:
-    for path in paths:
-        value = _text(parent, path)
-        if value:
-            return value
-    return None
-
-
-def _to_int(value: Any) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _to_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    lowered = str(value).strip().lower()
-    if lowered in {"true", "1", "yes"}:
-        return True
-    if lowered in {"false", "0", "no"}:
-        return False
-    return None
-
-
-def _total_pages(root: ET.Element, container_name: str | None = None) -> int:
-    """Parse PaginationResult.TotalNumberOfPages, capped for safety."""
-    return min(_reported_total_pages(root, container_name), MAX_PAGES)
-
-
-def _reported_total_pages(root: ET.Element, container_name: str | None = None) -> int:
-    """Parse PaginationResult.TotalNumberOfPages without applying local caps."""
-    parent = root.find(f"e:{container_name}", namespaces=NS) if container_name else root
-    total = _to_int(_text(parent, "e:PaginationResult/e:TotalNumberOfPages"))
-    if total is None or total < 1:
-        return 1
-    return total
-
-
-def _auth_like_error(root: ET.Element) -> bool:
-    """Return whether a Trading API XML failure looks token-related."""
-    for error in root.findall("e:Errors", namespaces=NS):
-        code = _text(error, "e:ErrorCode")
-        fields = [
-            code,
-            _text(error, "e:ShortMessage"),
-            _text(error, "e:LongMessage"),
-            _text(error, "e:SeverityCode"),
-        ]
-        haystack = " ".join(value for value in fields if value).lower()
-        if code in {"931", "932", "16110", "17470"}:
-            return True
-        if any(
-            marker in haystack
-            for marker in (
-                "auth",
-                "token",
-                "oauth",
-                "credential",
-                "access denied",
-                "not authorized",
-            )
-        ):
-            return True
-    return False
-
-
-def _sanitize_warning_text(value: str | None) -> str | None:
-    """Truncate and redact credential-like substrings from Trading API warnings."""
-    if not value:
-        return None
-    sanitized = value
-    for marker in ("Bearer ", "token=", "refresh_token", "access_token"):
-        if marker.lower() in sanitized.lower():
-            sanitized = "[redacted]"
-            break
-    if len(sanitized) > _WARNING_MESSAGE_MAX_LEN:
-        sanitized = f"{sanitized[:_WARNING_MESSAGE_MAX_LEN]}…"
-    return sanitized
-
-
-def extract_trading_warnings(root: ET.Element) -> list[dict[str, str | None]]:
-    """Return sanitized Trading API warning entries from an Ack=Warning response."""
-    warnings: list[dict[str, str | None]] = []
-    for error in root.findall("e:Errors", namespaces=NS):
-        severity = (_text(error, "e:SeverityCode") or "").lower()
-        if severity and severity != "warning":
-            continue
-        warnings.append(
-            {
-                "code": _text(error, "e:ErrorCode"),
-                "severity": _text(error, "e:SeverityCode"),
-                "short_message": _sanitize_warning_text(_text(error, "e:ShortMessage")),
-                "long_message": _sanitize_warning_text(_text(error, "e:LongMessage")),
-            }
-        )
-    return warnings
-
-
-def dedupe_trading_warnings(
-    warnings: list[dict[str, str | None]],
-) -> list[dict[str, str | None]]:
-    """Deduplicate Trading API warnings by code and message text."""
-    deduped: list[dict[str, str | None]] = []
-    seen: set[tuple[str | None, str | None, str | None]] = set()
-    for warning in warnings:
-        key = (
-            warning.get("code"),
-            warning.get("short_message"),
-            warning.get("long_message"),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(warning)
-    return deduped
-
-
-def chunk_item_ids(
-    item_ids: list[str], batch_size: int = ANALYTICS_BATCH_SIZE
-) -> list[list[str]]:
-    """Split item IDs into bounded Analytics request batches."""
-    if batch_size < 1:
-        raise ValueError("batch_size must be >= 1")
-    return [
-        item_ids[index : index + batch_size]
-        for index in range(0, len(item_ids), batch_size)
-    ]
-
-
-def _duration_ms(start: float) -> float:
-    """Return elapsed monotonic time in milliseconds."""
-    return (time.monotonic() - start) * 1000
-
-
-def _safe_exception_context(exc: BaseException) -> str:
-    """Return safe exception class and message context for debug logs."""
-    detail = str(exc)
-    if not detail:
-        return type(exc).__name__
-    return f"{type(exc).__name__}: {detail}"
-
-
-def _page_number_from_xml(xml_body: str) -> int | None:
-    """Extract a Trading API page number from generated XML without logging XML."""
-    try:
-        root = ET.fromstring(xml_body)
-    except ET.ParseError:
-        return None
-    return _to_int(_text(root, ".//e:PageNumber"))
-
-
-def _money(item: ET.Element, path: str) -> tuple[float | None, str | None]:
-    node = item.find(path, namespaces=NS)
-    if node is None or node.text is None:
-        return None, None
-    return _to_float(node.text), node.attrib.get("currencyID")
-
-
-def ebay_time(value: datetime) -> str:
-    """Format a datetime for eBay Trading API XML."""
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def parse_ebay_time(value: str | None) -> datetime | None:
-    """Parse an eBay timestamp."""
-    if not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def seconds_until(value: datetime | str | None) -> int | None:
-    """Return seconds until a datetime, never below zero."""
-    end_time = parse_ebay_time(value) if isinstance(value, str) else value
-    if not end_time:
-        return None
-    return max(0, int((end_time - datetime.now(timezone.utc)).total_seconds()))
-
-
-def format_seconds(seconds: int | None) -> str | None:
-    """Return a human readable duration."""
-    if seconds is None:
-        return None
-    if seconds <= 0:
-        return "ended"
-    days, rem = divmod(seconds, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, _ = divmod(rem, 60)
-    if days:
-        return f"{days}d {hours}h {minutes}m"
-    if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
-
-
-def _base_item(item: ET.Element, kind: str) -> dict[str, Any]:
-    end_time_text = _first_text(item, ["e:ListingDetails/e:EndTime", "e:EndTime"])
-    end_time = parse_ebay_time(end_time_text)
-    seconds_left = seconds_until(end_time)
-    price, currency = _money(item, "e:SellingStatus/e:CurrentPrice")
-    if price is None:
-        price, currency = _money(item, "e:StartPrice")
-
-    return {
-        "kind": kind,
-        "item_id": _text(item, "e:ItemID"),
-        "title": _text(item, "e:Title"),
-        "listing_type": _text(item, "e:ListingType"),
-        "end_time": end_time,
-        "seconds_left": seconds_left,
-        "time_left": format_seconds(seconds_left),
-        "current_price": price,
-        "currency": currency,
-        "bid_count": _to_int(_text(item, "e:SellingStatus/e:BidCount")),
-        "watchers": None,
-        "views": None,
-        "analytics_views_30d": None,
-        "offers": None,
-        "questions": None,
-        "quantity": None,
-        "quantity_available": None,
-        "quantity_sold": None,
-        "max_bid": None,
-        "winning": None,
-        "url": _first_text(
-            item,
-            [
-                "e:ListingDetails/e:ViewItemURL",
-                "e:ListingDetails/e:ViewItemURLForNaturalSearch",
-                "e:ViewItemURL",
-            ],
-        ),
-        "image": _first_text(item, ["e:PictureDetails/e:GalleryURL", "e:GalleryURL"]),
-    }
-
-
-def parse_buying_item(item: ET.Element, kind: str) -> dict[str, Any]:
-    """Parse a WatchList or BidList item."""
-    data = _base_item(item, kind)
-    if kind == "bidding":
-        max_bid, _ = _money(item, "e:BiddingDetails/e:MaxBid")
-        data["max_bid"] = max_bid
-        data["winning"] = _to_bool(_text(item, "e:BiddingDetails/e:Winning"))
-    return data
-
-
-def parse_selling_item(item: ET.Element) -> dict[str, Any]:
-    """Parse an active selling item."""
-    data = _base_item(item, "selling")
-    data.update(
-        {
-            "quantity": _to_int(_text(item, "e:Quantity")),
-            "quantity_available": _to_int(_text(item, "e:QuantityAvailable")),
-            "quantity_sold": _to_int(_text(item, "e:SellingStatus/e:QuantitySold")),
-            "views": _to_int(_text(item, "e:HitCount")),
-            "watchers": _to_int(_text(item, "e:WatchCount")),
-            "questions": _to_int(_text(item, "e:QuestionCount")),
-            "offers": _to_int(_text(item, "e:BestOfferDetails/e:BestOfferCount")),
-        }
-    )
-    return data
-
-
-def parse_container(
-    root: ET.Element, container_name: str, kind: str
-) -> list[dict[str, Any]]:
-    """Parse a buying response container."""
-    container = root.find(f"e:{container_name}", namespaces=NS)
-    if container is None:
-        return []
-    return [
-        parse_buying_item(item, kind)
-        for item in container.findall("e:ItemArray/e:Item", namespaces=NS)
-        if _text(item, "e:ItemID")
-    ]
-
-
-def parse_selling_container(root: ET.Element) -> list[dict[str, Any]]:
-    """Parse the active selling response container."""
-    container = root.find("e:ActiveList", namespaces=NS)
-    if container is None:
-        return []
-    return [
-        parse_selling_item(item)
-        for item in container.findall("e:ItemArray/e:Item", namespaces=NS)
-        if _text(item, "e:ItemID")
-    ]
-
-
-def seller_list_views_by_item_id(root: ET.Element) -> dict[str, int]:
-    """Parse GetSellerList hit counts."""
-    views: dict[str, int] = {}
-    for item in root.findall("e:ItemArray/e:Item", namespaces=NS):
-        item_id = _text(item, "e:ItemID")
-        hit_count = _to_int(_text(item, "e:HitCount"))
-        if item_id and hit_count is not None:
-            views[item_id] = hit_count
-    return views
-
-
-def analytics_views_by_item_id(payload: dict[str, Any]) -> dict[str, int]:
-    """Parse Sell Analytics traffic report views."""
-    views: dict[str, int] = {}
-    for record in payload.get("records", []):
-        dimension_values = record.get("dimensionValues") or []
-        metric_values = record.get("metricValues") or []
-        if not dimension_values or not metric_values:
-            continue
-        item_id = str(dimension_values[0].get("value") or "")
-        value = _to_int(metric_values[0].get("value"))
-        applicable = metric_values[0].get("applicable", True)
-        if item_id and applicable and value is not None:
-            views[item_id] = value
-    return views
-
-
-def active_offers_by_item_id(root: ET.Element) -> dict[str, int]:
-    """Parse active best offers by item id."""
-    offers: dict[str, int] = {}
-    for item_offers in root.findall(
-        "e:ItemBestOffersArray/e:ItemBestOffers", namespaces=NS
-    ):
-        role = _text(item_offers, "e:Role")
-        if role and role != "Seller":
-            continue
-        item_id = _text(item_offers, "e:Item/e:ItemID")
-        if not item_id:
-            continue
-        count = 0
-        for offer in item_offers.findall("e:BestOfferArray/e:BestOffer", namespaces=NS):
-            status = _text(offer, "e:Status")
-            if status in {None, "Active", "Countered", "Pending"}:
-                count += 1
-        offers[item_id] = offers.get(item_id, 0) + count
-    return offers
-
-
-def pagination_total_pages(root: ET.Element) -> int:
-    """Parse Trading API PaginationResult total pages."""
-    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages"))
-    return max(1, total_pages or 1)
-
-
-def build_get_my_ebay_buying_xml(entries_per_page: int = 100, page: int = 1) -> str:
-    """Build GetMyeBayBuying XML."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBayBuyingRequest xmlns="{EBAY_XML_NS}">
-  <Version>{COMPATIBILITY_LEVEL}</Version>
-  <WatchList>
-    <Include>true</Include>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-    <Sort>EndTime</Sort>
-  </WatchList>
-  <BidList>
-    <Include>true</Include>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-    <Sort>EndTime</Sort>
-  </BidList>
-</GetMyeBayBuyingRequest>
-"""
-
-
-def build_get_my_ebay_selling_xml(entries_per_page: int = 100, page: int = 1) -> str:
-    """Build GetMyeBaySelling XML."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
-  <DetailLevel>ReturnAll</DetailLevel>
-  <ActiveList>
-    <Include>true</Include>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-    <Sort>EndTime</Sort>
-  </ActiveList>
-  <ScheduledList><Include>false</Include></ScheduledList>
-  <SoldList><Include>false</Include></SoldList>
-  <UnsoldList><Include>false</Include></UnsoldList>
-  <SellingSummary><Include>true</Include></SellingSummary>
-</GetMyeBaySellingRequest>
-"""
-
-
-SOLD_UNSOLD_DURATION_DAYS = 60
-SOLD_UNSOLD_REFRESH_HOURS = 6
-
-
-def _parse_optional_datetime(value: Any) -> datetime | None:
-    """Parse an optional datetime or ISO string."""
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
-
-
-def _should_fetch_sold_unsold(
-    previous_selling: dict[str, Any],
-    current_selling: dict[str, Any],
-    last_fetched: datetime | None,
-    *,
-    now: datetime | None = None,
-) -> bool:
-    """Return whether SoldList/UnsoldList classification should be refreshed."""
-    if set(previous_selling) - set(current_selling):
-        return True
-    if last_fetched is None:
-        return True
-    stamp = now or datetime.now(timezone.utc)
-    return stamp - last_fetched >= timedelta(hours=SOLD_UNSOLD_REFRESH_HOURS)
-
-
-def build_get_my_ebay_selling_list_xml(
-    list_name: str,
-    *,
-    entries_per_page: int = 100,
-    page: int = 1,
-    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
-) -> str:
-    """Build GetMyeBaySelling XML for one SoldList or UnsoldList page."""
-    if list_name not in {"SoldList", "UnsoldList"}:
-        raise ValueError(f"Unsupported selling list: {list_name}")
-    sold_block = (
-        f"""  <SoldList>
-    <Include>true</Include>
-    <DurationInDays>{duration_in_days}</DurationInDays>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-  </SoldList>"""
-        if list_name == "SoldList"
-        else "  <SoldList><Include>false</Include></SoldList>"
-    )
-    unsold_block = (
-        f"""  <UnsoldList>
-    <Include>true</Include>
-    <DurationInDays>{duration_in_days}</DurationInDays>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-  </UnsoldList>"""
-        if list_name == "UnsoldList"
-        else "  <UnsoldList><Include>false</Include></UnsoldList>"
-    )
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
-  <DetailLevel>ReturnAll</DetailLevel>
-  <ActiveList><Include>false</Include></ActiveList>
-  <ScheduledList><Include>false</Include></ScheduledList>
-{sold_block}
-{unsold_block}
-</GetMyeBaySellingRequest>
-"""
-
-
-def build_get_my_ebay_selling_classification_xml(
-    entries_per_page: int = 100,
-    page: int = 1,
-    *,
-    duration_in_days: int = SOLD_UNSOLD_DURATION_DAYS,
-) -> str:
-    """Build a combined sold/unsold lookup request (single page of each list)."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetMyeBaySellingRequest xmlns="{EBAY_XML_NS}">
-  <DetailLevel>ReturnAll</DetailLevel>
-  <ActiveList><Include>false</Include></ActiveList>
-  <ScheduledList><Include>false</Include></ScheduledList>
-  <SoldList>
-    <Include>true</Include>
-    <DurationInDays>{duration_in_days}</DurationInDays>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-  </SoldList>
-  <UnsoldList>
-    <Include>true</Include>
-    <DurationInDays>{duration_in_days}</DurationInDays>
-    <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-  </UnsoldList>
-</GetMyeBaySellingRequest>
-"""
-
-
-def parse_sold_unsold_classification(root: ET.Element) -> dict[str, str]:
-    """Parse sold/unsold ItemIDs from a GetMyeBaySelling response.
-
-    Unsold is applied first, then sold, so SoldList wins if an ItemID appears in both.
-    """
-    classified: dict[str, str] = {}
-    for container_name, status in (("UnsoldList", "unsold"), ("SoldList", "sold")):
-        container = root.find(f"e:{container_name}", namespaces=NS)
-        if container is None:
-            continue
-        for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
-            item_id = _text(item, "e:ItemID")
-            if item_id:
-                classified[item_id] = status
-    return classified
-
-
-def parse_selling_list_item_ids(root: ET.Element, list_name: str) -> list[str]:
-    """Return ItemIDs from one SoldList or UnsoldList container."""
-    container = root.find(f"e:{list_name}", namespaces=NS)
-    if container is None:
-        return []
-    item_ids: list[str] = []
-    for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
-        item_id = _text(item, "e:ItemID")
-        if item_id:
-            item_ids.append(item_id)
-    return item_ids
-
-
-def build_get_seller_list_xml(entries_per_page: int = 200, page: int = 1) -> str:
-    """Build GetSellerList XML for active listings."""
-    now = datetime.now(timezone.utc)
-    end = now + timedelta(days=120)
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetSellerListRequest xmlns="{EBAY_XML_NS}">
-  <GranularityLevel>Fine</GranularityLevel>
-  <EndTimeFrom>{ebay_time(now)}</EndTimeFrom>
-  <EndTimeTo>{ebay_time(end)}</EndTimeTo>
-  <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-</GetSellerListRequest>
-"""
-
-
-def build_get_best_offers_xml(
-    entries_per_page: int = BEST_OFFERS_ENTRIES_PER_PAGE,
-    page: int = 1,
-) -> str:
-    """Build GetBestOffers XML."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetBestOffersRequest xmlns="{EBAY_XML_NS}">
-  <DetailLevel>ReturnAll</DetailLevel>
-  <BestOfferStatus>Active</BestOfferStatus>
-  <Pagination><EntriesPerPage>{entries_per_page}</EntriesPerPage><PageNumber>{page}</PageNumber></Pagination>
-</GetBestOffersRequest>
-"""
-
-
-def build_get_user_xml() -> str:
-    """Build GetUser XML for the OAuth-authenticated account."""
-    return f"""<?xml version="1.0" encoding="utf-8"?>
-<GetUserRequest xmlns="{EBAY_XML_NS}">
-  <DetailLevel>ReturnSummary</DetailLevel>
-</GetUserRequest>
-"""
-
-
-def _dict_by_item_id(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    return {str(item["item_id"]): item for item in items if item.get("item_id")}
-
-
-def summarize_payload(
-    watched: dict[str, dict[str, Any]],
-    bidding: dict[str, dict[str, Any]],
-    selling: dict[str, dict[str, Any]],
-    ending_soon_threshold_seconds: int,
-) -> dict[str, Any]:
-    """Build bounded summary metrics and attributes."""
-
-    def under_threshold(item: dict[str, Any]) -> bool:
-        seconds_left = item.get("seconds_left")
-        return (
-            seconds_left is not None
-            and 0 < seconds_left <= ending_soon_threshold_seconds
-        )
-
-    selling_items = list(selling.values())
-    watched_items = list(watched.values())
-    items_with_bids = [
-        item for item in selling_items if (item.get("bid_count") or 0) > 0
-    ]
-    items_with_offers = [
-        item for item in selling_items if (item.get("offers") or 0) > 0
-    ]
-    items_with_questions = [
-        item for item in selling_items if (item.get("questions") or 0) > 0
-    ]
-    selling_ending = [item for item in selling_items if under_threshold(item)]
-    watched_ending = [item for item in watched_items if under_threshold(item)]
-
-    def small(item: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "item_id": item.get("item_id"),
-            "title": item.get("title"),
-            "price": item.get("current_price"),
-            "currency": item.get("currency"),
-            "end_time": item.get("end_time").isoformat()
-            if item.get("end_time")
-            else None,
-            "seconds_left": item.get("seconds_left"),
-            "url": item.get("url"),
-        }
-
-    highest_watchers = max(
-        selling_items, key=lambda item: item.get("watchers") or -1, default=None
-    )
-    highest_views = max(
-        selling_items, key=lambda item: item.get("views") or -1, default=None
-    )
-    return {
-        "active_selling_items": len(selling),
-        "watched_items": len(watched),
-        "bidding_items": len(bidding),
-        "selling_total_bids": sum(item.get("bid_count") or 0 for item in selling_items),
-        "selling_total_offers": sum(item.get("offers") or 0 for item in selling_items),
-        "active_listings_quantity_sold": sum(
-            item.get("quantity_sold") or 0 for item in selling_items
-        ),
-        "selling_total_watchers": sum(
-            item.get("watchers") or 0 for item in selling_items
-        ),
-        "selling_total_views": sum(item.get("views") or 0 for item in selling_items),
-        "watched_ending_soon": len(watched_ending),
-        "selling_ending_soon": len(selling_ending),
-        "items_ending_soon": [
-            small(item) for item in (watched_ending + selling_ending)[:10]
-        ],
-        "items_with_offers": [small(item) for item in items_with_offers[:10]],
-        "items_with_bids": [small(item) for item in items_with_bids[:10]],
-        "items_with_questions": [small(item) for item in items_with_questions[:10]],
-        "highest_watcher_count_item": small(highest_watchers)
-        if highest_watchers
-        else None,
-        "highest_view_count_item": small(highest_views) if highest_views else None,
-    }
-
-
-class EbayApiClient:
+class EbayApiClient(
+    RestClientMixin,
+    TradingClientMixin,
+    AnalyticsClientMixin,
+    FulfillmentClientMixin,
+    SellerStandardsClientMixin,
+    FeedbackClientMixin,
+    MessagesClientMixin,
+    AccountClientMixin,
+    FinancesClientMixin,
+):
     """Async read-only eBay API client."""
 
     def __init__(
@@ -1263,1035 +306,6 @@ class EbayApiClient:
         self._partial_failure_details: list[dict[str, Any]] = []
         self._last_api_failure: ApiFailure | None = None
         self._accept_language = accept_language_for_site(site_id)
-
-    def _record_partial_failure_detail(self, detail: dict[str, Any] | None) -> None:
-        """Store a sanitized soft-failure detail for diagnostics."""
-        if not detail:
-            return
-        self._partial_failure_details.append(detail)
-        if len(self._partial_failure_details) > _PARTIAL_FAILURE_DETAILS_MAX:
-            self._partial_failure_details = self._partial_failure_details[
-                -_PARTIAL_FAILURE_DETAILS_MAX:
-            ]
-
-    def _raise_partial_failure(
-        self,
-        category: str,
-        *,
-        details: dict[str, Any] | None = None,
-        failure: ApiFailure | None = None,
-    ) -> NoReturn:
-        """Record optional details and raise EbayPartialFailure."""
-        if failure is not None:
-            self._last_api_failure = failure
-            if details is None:
-                details = failure.to_dict()
-        self._record_partial_failure_detail(details)
-        raise EbayPartialFailure(category, details=details, failure=failure)
-
-    async def async_exchange_authorization_code(self, code: str) -> dict[str, Any]:
-        """Exchange an authorization code for OAuth tokens."""
-        try:
-            payload = await self._token_request(
-                {
-                    "grant_type": "authorization_code",
-                    "code": extract_authorization_code(code),
-                    "redirect_uri": self.runame,
-                }
-            )
-        except OAuth2TokenRequestError as exc:
-            raise EbayAuthError("OAuth authorization code exchange failed") from exc
-        if not payload.get("access_token") or not payload.get("refresh_token"):
-            raise EbayAuthError(
-                "OAuth response did not include access and refresh tokens"
-            )
-        self._store_access_token(payload)
-        self.refresh_token = payload["refresh_token"]
-        return payload
-
-    async def async_get_access_token(self) -> str:
-        """Return a fresh access token."""
-        if self._oauth_session is not None:
-            try:
-                await self._oauth_session.async_ensure_token_valid()
-            except OAuth2TokenRequestReauthError as exc:
-                raise EbayAuthError("OAuth token refresh failed") from exc
-            except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
-                raise EbayAuthTransientError(
-                    "OAuth token refresh failed temporarily"
-                ) from exc
-            access_token = self._oauth_session.token.get("access_token")
-            if not access_token:
-                raise EbayAuthError("OAuth token data does not include access token")
-            return access_token
-        if self._access_token and not self._access_token_expiring():
-            return self._access_token
-        if not self.refresh_token:
-            raise EbayAuthError("Missing eBay refresh token")
-        try:
-            payload = await self._token_request(
-                {
-                    "grant_type": "refresh_token",
-                    "refresh_token": self.refresh_token,
-                }
-            )
-        except OAuth2TokenRequestReauthError as exc:
-            raise EbayAuthError("OAuth token refresh failed") from exc
-        except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
-            raise EbayAuthTransientError(
-                "OAuth token refresh failed temporarily"
-            ) from exc
-        access_token = payload.get("access_token")
-        if not access_token:
-            raise EbayAuthError("OAuth refresh response did not include access token")
-        self._store_access_token(payload)
-        self.refresh_token = payload.get("refresh_token", self.refresh_token)
-        return access_token
-
-    def _access_token_expiring(self) -> bool:
-        """Return whether the cached access token is close to expiry."""
-        if self._access_token_expires_at is None:
-            return True
-        return (
-            datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN
-            >= self._access_token_expires_at
-        )
-
-    def _store_access_token(self, payload: dict[str, Any]) -> None:
-        """Cache an access token and its expiry."""
-        self._access_token = payload["access_token"]
-        expires_in = _to_int(payload.get("expires_in"))
-        if expires_in is None:
-            self._access_token_expires_at = datetime.now(timezone.utc)
-            return
-        self._access_token_expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=expires_in
-        )
-
-    def _clear_access_token(self) -> None:
-        """Clear cached access token state."""
-        self._access_token = None
-        self._access_token_expires_at = None
-        # User id is account-scoped; clear so a reauth cannot reuse a stale handle.
-        self._feedback_user_id = None
-
-    async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
-        headers = {
-            "Authorization": _basic_auth_header(self.client_id, self._client_secret),
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        try:
-            async with self._session.post(
-                self._endpoints.token,
-                headers=headers,
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                try:
-                    payload = await response.json(content_type=None)
-                except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                    raise oauth_token_request_error(
-                        f"eBay OAuth response was not valid JSON; HTTP {response.status}",
-                        status=response.status,
-                        token_url=self._endpoints.token,
-                    ) from exc
-                if response.status >= 400:
-                    error_code = (
-                        payload.get("error") if isinstance(payload, dict) else None
-                    )
-                    raise oauth_token_error(
-                        response.status,
-                        error_code=error_code,
-                        token_url=self._endpoints.token,
-                    )
-                return payload
-        except OAuth2TokenRequestError:
-            raise
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            raise oauth_token_transient_error(
-                "eBay OAuth token request failed temporarily",
-                token_url=self._endpoints.token,
-            ) from exc
-
-    async def async_call_trading_api(self, call_name: str, xml_body: str) -> ET.Element:
-        """Call a read-only Trading API operation."""
-        for attempt in range(2):
-            try:
-                return await self._async_call_trading_api_once(call_name, xml_body)
-            except EbayAuthError:
-                self._clear_access_token()
-                if attempt == 0:
-                    continue
-                raise
-        raise EbayAuthError("eBay Trading API auth failed")
-
-    async def _async_call_trading_api_once(
-        self, call_name: str, xml_body: str
-    ) -> ET.Element:
-        """Call a Trading API operation once."""
-        access_token = await self.async_get_access_token()
-        page = _page_number_from_xml(xml_body)
-        headers = {
-            "Content-Type": "text/xml;charset=UTF-8",
-            "X-EBAY-API-COMPATIBILITY-LEVEL": COMPATIBILITY_LEVEL,
-            "X-EBAY-API-CALL-NAME": call_name,
-            "X-EBAY-API-SITEID": self.site_id,
-            "X-EBAY-API-IAF-TOKEN": access_token,
-        }
-        start = time.monotonic()
-        try:
-            async with self._session.post(
-                self._endpoints.trading,
-                headers=headers,
-                data=xml_body.encode("utf-8"),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                body = await response.text()
-                if response.status in {401, 403}:
-                    _LOGGER.debug(
-                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
-                        call_name,
-                        page,
-                        response.status,
-                        _duration_ms(start),
-                    )
-                    raise EbayAuthError(
-                        f"eBay Trading API auth failed with HTTP {response.status}"
-                    )
-                if response.status >= 400:
-                    _LOGGER.debug(
-                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
-                        call_name,
-                        page,
-                        response.status,
-                        _duration_ms(start),
-                    )
-                    raise EbayApiError(
-                        f"eBay Trading API failed with HTTP {response.status}"
-                    )
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            raise EbayApiError("eBay Trading API request failed") from exc
-        try:
-            root = ET.fromstring(body)
-        except ET.ParseError as exc:
-            _LOGGER.debug(
-                "Trading API parse failed call=%s page=%s duration_ms=%.1f",
-                call_name,
-                page,
-                _duration_ms(start),
-            )
-            raise EbayParseError("Could not parse eBay Trading API XML") from exc
-        ack = _text(root, "e:Ack")
-        if ack not in {"Success", "Warning"}:
-            _LOGGER.debug(
-                "Trading API call failed call=%s page=%s ack=%s duration_ms=%.1f",
-                call_name,
-                page,
-                ack,
-                _duration_ms(start),
-            )
-            if _auth_like_error(root):
-                raise EbayAuthError(f"eBay Trading API returned Ack={ack!r}")
-            raise EbayApiError(f"eBay Trading API returned Ack={ack!r}")
-        if ack == "Warning":
-            self._api_warnings.extend(extract_trading_warnings(root))
-        _LOGGER.debug(
-            "Trading API call completed call=%s page=%s status=%s ack=%s duration_ms=%.1f",
-            call_name,
-            page,
-            response.status,
-            ack,
-            _duration_ms(start),
-        )
-        return root
-
-    async def async_get_traffic_report(self, item_ids: list[str]) -> dict[str, Any]:
-        """Fetch optional Sell Analytics traffic report for one ID batch."""
-        if not item_ids:
-            return {}
-        for attempt in range(2):
-            try:
-                return await self._async_get_traffic_report_once(item_ids)
-            except EbayAuthError:
-                self._clear_access_token()
-                if attempt == 0:
-                    continue
-                raise
-        raise EbayAuthError("eBay Sell Analytics auth failed")
-
-    async def _async_get_traffic_report_once(
-        self, item_ids: list[str]
-    ) -> dict[str, Any]:
-        """Fetch one Sell Analytics traffic report without auth retry."""
-        access_token = await self.async_get_access_token()
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=30)
-        listing_ids = "{" + "|".join(item_ids) + "}"
-        request_start = time.monotonic()
-        try:
-            async with self._session.get(
-                self._endpoints.analytics,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
-                params={
-                    "dimension": "LISTING",
-                    "filter": f"listing_ids:{listing_ids},date_range:[{start:%Y%m%d}..{now:%Y%m%d}]",
-                    "metric": "LISTING_VIEWS_TOTAL",
-                    "sort": "LISTING_VIEWS_TOTAL",
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 401:
-                    _LOGGER.debug(
-                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
-                        response.status,
-                        len(item_ids),
-                        _duration_ms(request_start),
-                    )
-                    raise EbayAuthError(
-                        f"eBay Sell Analytics auth failed with HTTP {response.status}"
-                    )
-                if response.status in {400, 403}:
-                    _LOGGER.debug(
-                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
-                        response.status,
-                        len(item_ids),
-                        _duration_ms(request_start),
-                    )
-                    raise EbayPartialFailure("analytics_views")
-                if response.status >= 400:
-                    _LOGGER.debug(
-                        "Sell Analytics call failed status=%s item_count=%s duration_ms=%.1f",
-                        response.status,
-                        len(item_ids),
-                        _duration_ms(request_start),
-                    )
-                    raise EbayApiError(
-                        f"eBay Sell Analytics failed with HTTP {response.status}"
-                    )
-                try:
-                    payload = await response.json(content_type=None)
-                except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                    _LOGGER.debug(
-                        "Sell Analytics parse failed status=%s item_count=%s duration_ms=%.1f",
-                        response.status,
-                        len(item_ids),
-                        _duration_ms(request_start),
-                    )
-                    raise EbayParseError(
-                        "Could not parse eBay Sell Analytics JSON"
-                    ) from exc
-                _LOGGER.debug(
-                    "Sell Analytics call completed status=%s item_count=%s duration_ms=%.1f",
-                    response.status,
-                    len(item_ids),
-                    _duration_ms(request_start),
-                )
-                return payload
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            raise EbayPartialFailure("analytics_views") from exc
-
-    async def async_fetch_analytics_views(
-        self, item_ids: list[str]
-    ) -> tuple[dict[str, int], bool]:
-        """Fetch 30-day Analytics views in batches; merge successes on partial failure."""
-        if not item_ids:
-            return {}, False
-        merged: dict[str, int] = {}
-        partial_failure = False
-        batches = chunk_item_ids(item_ids)
-        for batch_number, batch in enumerate(batches, start=1):
-            _LOGGER.debug(
-                "Fetching Sell Analytics batch batch=%s item_count=%s",
-                batch_number,
-                len(batch),
-            )
-            try:
-                payload = await self.async_get_traffic_report(batch)
-            except EbayAuthError:
-                raise
-            except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-                _LOGGER.debug(
-                    "Sell Analytics batch failed batch=%s item_count=%s error=%s",
-                    batch_number,
-                    len(batch),
-                    _safe_exception_context(exc),
-                )
-                partial_failure = True
-                continue
-            batch_views = analytics_views_by_item_id(payload)
-            merged.update(batch_views)
-            _LOGGER.debug(
-                "Sell Analytics batch completed batch=%s item_count=%s view_count=%s",
-                batch_number,
-                len(batch),
-                len(batch_views),
-            )
-        return merged, partial_failure
-
-    async def _fetch_buying_pages(
-        self,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], bool, bool]:
-        """Fetch all configured buying pages up to MAX_PAGES."""
-        watched_items: list[dict[str, Any]] = []
-        bidding_items: list[dict[str, Any]] = []
-        page = 1
-        total_pages = 1
-        watched_truncated = False
-        bidding_truncated = False
-        while page <= total_pages:
-            root = await self.async_call_trading_api(
-                READ_ONLY_CALL_NAME, build_get_my_ebay_buying_xml(page=page)
-            )
-            watched_page = parse_container(root, "WatchList", "watched")
-            bidding_page = parse_container(root, "BidList", "bidding")
-            watched_items.extend(watched_page)
-            bidding_items.extend(bidding_page)
-            watch_pages = _reported_total_pages(root, "WatchList")
-            bid_pages = _reported_total_pages(root, "BidList")
-            watched_truncated = watched_truncated or watch_pages > MAX_PAGES
-            bidding_truncated = bidding_truncated or bid_pages > MAX_PAGES
-            total_pages = max(
-                total_pages,
-                min(watch_pages, MAX_PAGES),
-                min(bid_pages, MAX_PAGES),
-            )
-            _LOGGER.debug(
-                "Fetched buying page page=%s watched_count=%s bidding_count=%s total_pages=%s watched_truncated=%s bidding_truncated=%s",
-                page,
-                len(watched_page),
-                len(bidding_page),
-                total_pages,
-                watched_truncated,
-                bidding_truncated,
-            )
-            page += 1
-        return (
-            _dict_by_item_id(watched_items),
-            _dict_by_item_id(bidding_items),
-            watched_truncated,
-            bidding_truncated,
-        )
-
-    async def _fetch_selling_pages(self) -> tuple[dict[str, dict[str, Any]], bool]:
-        """Fetch active selling pages up to MAX_PAGES."""
-        selling_items: list[dict[str, Any]] = []
-        page = 1
-        total_pages = 1
-        truncated = False
-        while page <= total_pages:
-            root = await self.async_call_trading_api(
-                SELLING_CALL_NAME, build_get_my_ebay_selling_xml(page=page)
-            )
-            selling_page = parse_selling_container(root)
-            selling_items.extend(selling_page)
-            active_pages = _reported_total_pages(root, "ActiveList")
-            truncated = truncated or active_pages > MAX_PAGES
-            total_pages = max(total_pages, min(active_pages, MAX_PAGES))
-            _LOGGER.debug(
-                "Fetched selling page page=%s selling_count=%s total_pages=%s truncated=%s",
-                page,
-                len(selling_page),
-                total_pages,
-                truncated,
-            )
-            page += 1
-        return _dict_by_item_id(selling_items), truncated
-
-    async def _fetch_selling_list_pages(self, list_name: str) -> tuple[list[str], bool]:
-        """Fetch one SoldList or UnsoldList across pages up to MAX_PAGES."""
-        item_ids: list[str] = []
-        page = 1
-        total_pages = 1
-        truncated = False
-        while page <= total_pages:
-            root = await self.async_call_trading_api(
-                SELLING_CALL_NAME,
-                build_get_my_ebay_selling_list_xml(list_name, page=page),
-            )
-            page_ids = parse_selling_list_item_ids(root, list_name)
-            item_ids.extend(page_ids)
-            reported_pages = _reported_total_pages(root, list_name)
-            truncated = truncated or reported_pages > MAX_PAGES
-            total_pages = max(total_pages, min(reported_pages, MAX_PAGES))
-            _LOGGER.debug(
-                "Fetched %s page page=%s item_count=%s total_pages=%s truncated=%s",
-                list_name,
-                page,
-                len(page_ids),
-                total_pages,
-                truncated,
-            )
-            page += 1
-        return item_ids, truncated
-
-    async def async_fetch_sold_unsold_classification(
-        self,
-    ) -> tuple[dict[str, str], int, int, bool]:
-        """Fetch SoldList/UnsoldList classification and counts.
-
-        Returns (classification, sold_count, unsold_count, truncated).
-        """
-        unsold_ids, unsold_truncated = await self._fetch_selling_list_pages(
-            "UnsoldList"
-        )
-        sold_ids, sold_truncated = await self._fetch_selling_list_pages("SoldList")
-        classified: dict[str, str] = {item_id: "unsold" for item_id in unsold_ids}
-        for item_id in sold_ids:
-            classified[item_id] = "sold"
-        return (
-            classified,
-            len(set(sold_ids)),
-            len(set(unsold_ids)),
-            sold_truncated or unsold_truncated,
-        )
-
-    async def _fetch_seller_list_views(self) -> tuple[dict[str, int], bool]:
-        """Fetch GetSellerList view counts across pages up to MAX_PAGES."""
-        views: dict[str, int] = {}
-        page = 1
-        total_pages = 1
-        truncated = False
-        while page <= total_pages:
-            root = await self.async_call_trading_api(
-                SELLER_LIST_CALL_NAME, build_get_seller_list_xml(page=page)
-            )
-            page_views = seller_list_views_by_item_id(root)
-            views.update(page_views)
-            seller_list_pages = _reported_total_pages(root)
-            truncated = truncated or seller_list_pages > MAX_PAGES
-            total_pages = max(total_pages, min(seller_list_pages, MAX_PAGES))
-            _LOGGER.debug(
-                "Fetched seller-list views page=%s view_count=%s total_pages=%s truncated=%s",
-                page,
-                len(page_views),
-                total_pages,
-                truncated,
-            )
-            page += 1
-        return views, truncated
-
-    async def _async_rest_get(
-        self,
-        url: str,
-        *,
-        params: dict[str, Any] | list[tuple[str, str]] | None = None,
-        partial_category: str,
-        allow_404: bool = False,
-        operation: str | None = None,
-        accept_language: str | None = None,
-    ) -> dict[str, Any]:
-        """GET a JSON REST resource with auth retry."""
-        for attempt in range(2):
-            try:
-                return await self._async_rest_get_once(
-                    url,
-                    params=params,
-                    partial_category=partial_category,
-                    allow_404=allow_404,
-                    operation=operation,
-                    accept_language=accept_language,
-                )
-            except EbayAuthError:
-                self._clear_access_token()
-                if attempt == 0:
-                    continue
-                raise
-        raise EbayAuthError(f"eBay REST auth failed for {partial_category}")
-
-    async def _async_rest_get_once(
-        self,
-        url: str,
-        *,
-        params: dict[str, Any] | list[tuple[str, str]] | None = None,
-        partial_category: str,
-        allow_404: bool = False,
-        operation: str | None = None,
-        accept_language: str | None = None,
-    ) -> dict[str, Any]:
-        """GET a JSON REST resource without auth retry."""
-        op = operation or f"{partial_category}.get"
-        language = (
-            accept_language if accept_language is not None else self._accept_language
-        )
-        access_token = await self.async_get_access_token()
-        request_start = time.monotonic()
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        if language:
-            headers["Accept-Language"] = language
-        try:
-            async with self._session.get(
-                url,
-                headers=headers,
-                params=params or {},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 401:
-                    raise EbayAuthError(
-                        f"eBay REST auth failed with HTTP {response.status}"
-                    )
-                if response.status == 204:
-                    return {}
-                if allow_404 and response.status == 404:
-                    return {}
-
-                if response.status >= 400:
-                    error_payload: dict[str, Any] | None = None
-                    try:
-                        error_payload = _safe_ebay_error_payload(
-                            await response.json(content_type=None)
-                        )
-                    except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                        error_payload = None
-
-                    if response.status == 429:
-                        retry_after = response.headers.get("Retry-After")
-                        sleep_s = 0
-                        if retry_after is not None:
-                            try:
-                                sleep_s = min(int(retry_after), 5)
-                            except (TypeError, ValueError):
-                                sleep_s = 0
-                        if sleep_s > 0:
-                            await asyncio.sleep(sleep_s)
-
-                    classification = classify_rest_status(
-                        response.status, error_payload, partial_category
-                    )
-                    mapped = map_rest_failure_category(
-                        partial_category,
-                        response.status,
-                        error_payload,
-                        classification=classification,
-                    )
-                    failure = build_api_failure(
-                        op,
-                        url,
-                        response.status,
-                        error_payload,
-                        mapped,
-                        classification,
-                    )
-                    _LOGGER.debug(
-                        "REST GET soft-failed category=%s mapped=%s status=%s "
-                        "classification=%s operation=%s duration_ms=%.1f",
-                        partial_category,
-                        mapped,
-                        response.status,
-                        classification,
-                        op,
-                        _duration_ms(request_start),
-                    )
-                    self._raise_partial_failure(mapped, failure=failure)
-
-                try:
-                    text = await response.text()
-                except (aiohttp.ClientError, UnicodeDecodeError) as exc:
-                    raise EbayParseError(
-                        f"Could not read eBay REST body for {partial_category}"
-                    ) from exc
-                if not text.strip():
-                    _LOGGER.debug(
-                        "REST GET completed category=%s status=%s empty_body=true "
-                        "duration_ms=%.1f",
-                        partial_category,
-                        response.status,
-                        _duration_ms(request_start),
-                    )
-                    return {}
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError as exc:
-                    raise EbayParseError(
-                        f"Could not parse eBay REST JSON for {partial_category}"
-                    ) from exc
-                _LOGGER.debug(
-                    "REST GET completed category=%s status=%s duration_ms=%.1f",
-                    partial_category,
-                    response.status,
-                    _duration_ms(request_start),
-                )
-                return payload if isinstance(payload, dict) else {}
-        except EbayAuthError:
-            raise
-        except EbayPartialFailure:
-            raise
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            failure = build_api_failure(
-                op,
-                url,
-                None,
-                None,
-                partial_category,
-                "transient",
-            )
-            _LOGGER.debug(
-                "REST GET transport soft-failed category=%s operation=%s "
-                "error=%s duration_ms=%.1f",
-                partial_category,
-                op,
-                type(exc).__name__,
-                _duration_ms(request_start),
-            )
-            self._raise_partial_failure(partial_category, failure=failure)
-
-    async def async_get_feedback_user_id(self) -> str:
-        """Return the authenticated account username for Feedback API user_id."""
-        if self._feedback_user_id:
-            return self._feedback_user_id
-        try:
-            root = await self.async_call_trading_api(
-                GET_USER_CALL_NAME, build_get_user_xml()
-            )
-        except EbayAuthError:
-            raise
-        except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
-            failure = ApiFailure(
-                operation="trading.get_user",
-                endpoint_key=GET_USER_CALL_NAME,
-                http_status=None,
-                ebay_error_id=None,
-                ebay_domain=None,
-                ebay_category=None,
-                message=_sanitize_warning_text(str(exc)[:_WARNING_MESSAGE_MAX_LEN]),
-                classification=(
-                    "transient"
-                    if isinstance(exc, (aiohttp.ClientError, TimeoutError))
-                    else "unknown"
-                ),
-                mapped_category="feedback_user_lookup",
-            )
-            self._raise_partial_failure("feedback_user_lookup", failure=failure)
-        # Feedback requires the public eBay username; Trading UserID is that value.
-        user_id = _text(root, "e:User/e:UserID")
-        if not user_id:
-            failure = ApiFailure(
-                operation="trading.get_user",
-                endpoint_key=GET_USER_CALL_NAME,
-                http_status=None,
-                ebay_error_id=None,
-                ebay_domain=None,
-                ebay_category=None,
-                message="missing_user_id",
-                classification="malformed_request",
-                mapped_category="feedback_user_lookup",
-            )
-            self._raise_partial_failure("feedback_user_lookup", failure=failure)
-        self._feedback_user_id = user_id
-        return self._feedback_user_id
-
-    async def async_fetch_orders(
-        self,
-    ) -> tuple[dict[str, Any], bool]:
-        """Fetch open and recent orders; return summary and truncation flag."""
-        now = datetime.now(timezone.utc)
-        start = now - timedelta(days=ORDERS_LOOKBACK_DAYS)
-        filters = [
-            encode_fulfillment_status_filter(["NOT_STARTED", "IN_PROGRESS"]),
-            encode_creation_date_filter(start, now),
-        ]
-        merged: dict[str, dict[str, Any]] = {}
-        truncated = False
-        for filter_value in filters:
-            offset = 0
-            page = 0
-            while page < ORDERS_MAX_PAGES:
-                page += 1
-                payload = await self._async_rest_get(
-                    f"{self._endpoints.fulfillment}/order",
-                    params={
-                        "filter": filter_value,
-                        "limit": str(ORDERS_PAGE_LIMIT),
-                        "offset": str(offset),
-                    },
-                    partial_category="orders",
-                )
-                orders = payload.get("orders") or []
-                for raw in orders:
-                    normalized = normalize_order(raw, now=now)
-                    if normalized.get("order_id"):
-                        merged[normalized["order_id"]] = normalized
-                total = payload.get("total")
-                offset += ORDERS_PAGE_LIMIT
-                if not orders:
-                    break
-                if total is not None:
-                    try:
-                        if offset >= int(total):
-                            break
-                    except (TypeError, ValueError):
-                        pass
-                elif len(orders) < ORDERS_PAGE_LIMIT:
-                    break
-            else:
-                truncated = True
-        return summarize_orders(list(merged.values())), truncated
-
-    async def async_fetch_payment_disputes(self) -> tuple[dict[str, Any], bool]:
-        """Fetch open payment dispute summaries."""
-        merged: dict[str, dict[str, Any]] = {}
-        truncated = False
-        offset = 0
-        for page in range(DISPUTES_MAX_PAGES):
-            payload = await self._async_rest_get(
-                f"{self._endpoints.payment_disputes}/payment_dispute_summary",
-                params=[
-                    ("limit", str(DISPUTES_PAGE_LIMIT)),
-                    ("offset", str(offset)),
-                    ("payment_dispute_status", "OPEN"),
-                    ("payment_dispute_status", "ACTION_NEEDED"),
-                ],
-                partial_category="payment_disputes",
-            )
-            summaries = payload.get("paymentDisputeSummaries") or []
-            for raw in summaries:
-                normalized = normalize_dispute(raw)
-                if normalized.get("dispute_id"):
-                    status = str(normalized.get("status") or "").upper()
-                    if status in {"OPEN", "ACTION_NEEDED", "WAITING_SELLER"}:
-                        merged[normalized["dispute_id"]] = normalized
-            offset += DISPUTES_PAGE_LIMIT
-            total = payload.get("total")
-            if not summaries:
-                break
-            if total is not None:
-                try:
-                    if offset >= int(total):
-                        break
-                except (TypeError, ValueError):
-                    pass
-            elif len(summaries) < DISPUTES_PAGE_LIMIT:
-                break
-            if page == DISPUTES_MAX_PAGES - 1:
-                truncated = True
-        return summarize_disputes(list(merged.values())), truncated
-
-    async def async_fetch_seller_standards(self) -> dict[str, Any]:
-        """Fetch seller standards profile plus INR/INAD customer-service metrics."""
-        standards = empty_seller_ops()["standards"]
-        profiles = await self._async_rest_get(
-            f"{self._endpoints.analytics_base}/seller_standards_profile",
-            partial_category="seller_standards",
-            allow_404=True,
-        )
-        parsed = parse_seller_standards_profiles(profiles)
-        standards.update(parsed)
-
-        marketplace = marketplace_id_for_site(self.site_id)
-        if marketplace is None or not capability_supported(
-            self.site_id, "customer_service_metrics"
-        ):
-            _LOGGER.debug(
-                "Skipping seller standards marketplace metrics for site_id=%s",
-                self.site_id,
-            )
-            return standards
-        for metric_type, rating_key, flag_key in (
-            (
-                "ITEM_NOT_RECEIVED",
-                "item_not_received_rating",
-                "item_not_received_above_benchmark",
-            ),
-            (
-                "ITEM_NOT_AS_DESCRIBED",
-                "item_not_as_described_rating",
-                "item_not_as_described_above_benchmark",
-            ),
-        ):
-            try:
-                metric_payload = await self._async_rest_get(
-                    (
-                        f"{self._endpoints.analytics_base}/customer_service_metric/"
-                        f"{metric_type}/CURRENT"
-                    ),
-                    params={"evaluation_marketplace_id": marketplace},
-                    partial_category="seller_standards",
-                    allow_404=True,
-                )
-            except EbayPartialFailure:
-                continue
-            metric = parse_customer_service_metric(metric_payload)
-            standards[rating_key] = metric.get("rating")
-            standards[flag_key] = bool(metric.get("above_peer_benchmark"))
-            if metric.get("above_peer_benchmark"):
-                standards["at_risk"] = True
-        return standards
-
-    async def async_fetch_feedback(self) -> dict[str, Any]:
-        """Fetch feedback summary, recent ids for events, and awaiting count.
-
-        Rating-summary distribution remains authoritative for recent_* counts.
-        Item pages are paginated only to collect bounded feedback ids for
-        event detection; item page counts never overwrite summary totals.
-        """
-        feedback = empty_seller_ops()["feedback"]
-        ebay_user_id = await self.async_get_feedback_user_id()
-        try:
-            summary_payload = await self._async_rest_get(
-                f"{self._endpoints.feedback}/feedback_rating_summary",
-                params={
-                    "user_id": ebay_user_id,
-                    "filter": "ratingType:OVERALL_EXPERIENCE,lookbackPeriodInDays:30",
-                },
-                partial_category="feedback",
-                allow_404=True,
-            )
-            feedback.update(parse_feedback_summary(summary_payload))
-        except EbayPartialFailure:
-            raise
-
-        try:
-            recent_ids: list[str] = []
-            negative_ids: list[str] = []
-            items_truncated = False
-            offset = 0
-            for page in range(FEEDBACK_ITEMS_MAX_PAGES):
-                items_payload = await self._async_rest_get(
-                    f"{self._endpoints.feedback}/feedback",
-                    params={
-                        "user_id": ebay_user_id,
-                        "feedback_type": "FEEDBACK_RECEIVED",
-                        "filter": "period:30,role:SELLER",
-                        "limit": str(FEEDBACK_ITEMS_PAGE_LIMIT),
-                        "offset": str(offset),
-                    },
-                    partial_category="feedback",
-                    allow_404=True,
-                )
-                parsed = parse_feedback_items(items_payload)
-                recent_ids.extend(parsed["ids"])
-                negative_ids.extend(parsed["negative_ids"])
-                items = (
-                    items_payload.get("feedbackEntries")
-                    or items_payload.get("feedbackItems")
-                    or items_payload.get("feedback")
-                    or []
-                )
-                offset += FEEDBACK_ITEMS_PAGE_LIMIT
-                total = items_payload.get("total")
-                if not items:
-                    break
-                if total is not None:
-                    try:
-                        if offset >= int(total):
-                            break
-                    except (TypeError, ValueError):
-                        pass
-                elif len(items) < FEEDBACK_ITEMS_PAGE_LIMIT:
-                    break
-                if page == FEEDBACK_ITEMS_MAX_PAGES - 1:
-                    items_truncated = True
-            if len(recent_ids) > FEEDBACK_RECENT_IDS_MAX:
-                items_truncated = True
-            bounded_ids = recent_ids[:FEEDBACK_RECENT_IDS_MAX]
-            bounded_id_set = set(bounded_ids)
-            feedback["recent_feedback_ids"] = bounded_ids
-            feedback["recent_negative_feedback_ids"] = [
-                feedback_id
-                for feedback_id in negative_ids
-                if feedback_id in bounded_id_set
-            ][:FEEDBACK_RECENT_IDS_MAX]
-            feedback["items_truncated"] = items_truncated
-        except EbayPartialFailure:
-            pass
-
-        try:
-            # Awaiting feedback is scoped to the OAuth user; no user_id param.
-            awaiting_payload = await self._async_rest_get(
-                f"{self._endpoints.feedback}/awaiting_feedback",
-                params={"limit": "50", "offset": "0"},
-                partial_category="feedback",
-                allow_404=True,
-            )
-            feedback["awaiting_count"] = parse_awaiting_feedback_count(awaiting_payload)
-        except EbayPartialFailure:
-            pass
-        return feedback
-
-    async def async_fetch_messages(self) -> tuple[dict[str, Any], bool]:
-        """Fetch member conversation metadata aggregates."""
-        merged: dict[str, dict[str, Any]] = {}
-        truncated = False
-        now = datetime.now(timezone.utc)
-        offset = 0
-        for page in range(CONVERSATIONS_MAX_PAGES):
-            payload = await self._async_rest_get(
-                f"{self._endpoints.messages}/conversation",
-                params={
-                    "conversation_type": "FROM_MEMBERS",
-                    "limit": str(CONVERSATIONS_PAGE_LIMIT),
-                    "offset": str(offset),
-                },
-                partial_category="messages",
-            )
-            conversations = payload.get("conversations") or []
-            for raw in conversations:
-                normalized = normalize_conversation(raw)
-                if normalized.get("conversation_id"):
-                    merged[normalized["conversation_id"]] = normalized
-            offset += CONVERSATIONS_PAGE_LIMIT
-            total = payload.get("total")
-            if not conversations:
-                break
-            if total is not None:
-                try:
-                    if offset >= int(total):
-                        break
-                except (TypeError, ValueError):
-                    pass
-            elif len(conversations) < CONVERSATIONS_PAGE_LIMIT:
-                break
-            if page == CONVERSATIONS_MAX_PAGES - 1:
-                truncated = True
-        return summarize_messages(list(merged.values()), now=now), truncated
-
-    async def async_fetch_account_privileges(self) -> dict[str, Any]:
-        """Fetch Sell Account privileges (selling limits / registration)."""
-        privileges = empty_seller_ops()["account_privileges"]
-        payload = await self._async_rest_get(
-            f"{self._endpoints.account}/privilege",
-            partial_category="account_privileges",
-            allow_404=True,
-        )
-        privileges.update(parse_account_privileges(payload))
-        return privileges
-
-    async def async_fetch_finances(self) -> dict[str, Any]:
-        """Fetch seller funds summary plus a stub last-payout record.
-
-        Some marketplaces require digital request signing for Finances; those
-        are capability-gated before this method is called.
-        """
-        finances = empty_seller_ops()["finances"]
-        try:
-            funds_payload = await self._async_rest_get(
-                f"{self._endpoints.finances}/seller_funds_summary",
-                partial_category="finances",
-                allow_404=True,
-            )
-            finances.update(parse_seller_funds_summary(funds_payload))
-        except EbayPartialFailure:
-            raise
-
-        try:
-            payout_payload = await self._async_rest_get(
-                f"{self._endpoints.finances}/payout",
-                params={"limit": "1"},
-                partial_category="finances",
-                allow_404=True,
-            )
-            finances.update(parse_last_payout(payout_payload))
-        except EbayPartialFailure:
-            # Funds summary alone is still useful when payout listing fails.
-            pass
-        return finances
 
     async def async_fetch_data(
         self,
