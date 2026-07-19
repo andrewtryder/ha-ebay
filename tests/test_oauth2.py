@@ -6,6 +6,7 @@ import base64
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -1034,12 +1035,13 @@ def test_options_flow_menu_sections_and_save() -> None:
             {
                 "entity_mode": "detailed",
                 "per_item_cap": 50,
-                "pinned_item_ids": "1",
+                "pinned_item_ids": ["1"],
             }
         )
     )
     assert entities["type"] == "menu"
     assert flow._draft["entity_mode"] == "detailed"
+    assert flow._draft["pinned_item_ids"] == ["1"]
 
     selling = asyncio.run(
         flow.async_step_selling({"selling_enabled": True, "analytics_enabled": False})
@@ -1065,8 +1067,8 @@ def test_options_flow_disables_analytics_when_selling_off() -> None:
         "ending_soon_threshold": 60,
         "entity_mode": "balanced",
         "per_item_cap": 25,
-        "pinned_item_ids": "",
-        "pinned_item_price_targets": "",
+        "pinned_item_ids": [],
+        "pinned_item_price_targets": [],
         "watched_price_change_min_percent": 0,
         "watched_price_drop_threshold": "",
         "watched_price_drop_currency": "",
@@ -1268,7 +1270,8 @@ def test_reauth_cancel_discards_pending_options(
     assert "options" not in updates[0]
 
 
-def test_options_flow_buying_alerts_rejects_unpinned_price_target() -> None:
+def test_options_flow_buying_alerts_continues_to_price_targets() -> None:
+    """Buying alerts saves globals then opens the price-targets menu."""
     from custom_components.ebay.config_flow import EbayOptionsFlow
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
 
@@ -1293,12 +1296,117 @@ def test_options_flow_buying_alerts_rejects_unpinned_price_target() -> None:
                 "watched_price_change_min_percent": 0,
                 "watched_price_drop_threshold": "",
                 "watched_price_drop_currency": "",
-                "pinned_item_price_targets": "999=10 USD",
             }
         )
     )
-    assert result["type"] == "form"
-    assert result["errors"]["pinned_item_price_targets"] == "target_not_pinned"
+    assert result["type"] == "menu"
+    assert result["step_id"] == "price_targets"
+    assert "price_target_add" in result["menu_options"]
+    assert "price_targets_done" in result["menu_options"]
+
+
+def test_options_flow_price_target_add_and_remove() -> None:
+    """Structured price targets can be added and removed for pinned IDs."""
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {"pinned_item_ids": ["abc"]},
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+            "runtime_data": SimpleNamespace(
+                data={
+                    "watched": {"abc": {"item_id": "abc", "title": "Pinned Camera"}},
+                    "bidding": {},
+                    "selling": {},
+                }
+            ),
+        },
+    )()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    asyncio.run(flow.async_step_init())
+    assert flow._draft["pinned_item_ids"] == ["abc"]
+
+    add_form = asyncio.run(flow.async_step_price_target_add())
+    assert add_form["type"] == "form"
+    assert add_form["step_id"] == "price_target_add"
+
+    rejected = asyncio.run(
+        flow.async_step_price_target_add(
+            {"item_id": "not-pinned", "amount": 10, "currency": "USD"}
+        )
+    )
+    assert rejected["type"] == "form"
+    assert rejected["errors"]["item_id"] == "target_not_pinned"
+
+    added = asyncio.run(
+        flow.async_step_price_target_add(
+            {"item_id": "abc", "amount": 25.5, "currency": "usd"}
+        )
+    )
+    assert added["type"] == "menu"
+    assert added["step_id"] == "price_targets"
+    assert flow._draft["pinned_item_price_targets"] == [
+        {"item_id": "abc", "amount": "25.5", "currency": "USD"}
+    ]
+    assert "price_target_remove" in added["menu_options"]
+
+    removed = asyncio.run(flow.async_step_price_target_remove({"item_id": "abc"}))
+    assert removed["type"] == "menu"
+    assert flow._draft["pinned_item_price_targets"] == []
+
+
+def test_options_flow_entities_multi_select_and_prune_targets() -> None:
+    """Pinned multi-select coerces IDs and drops targets for removed pins."""
+    from custom_components.ebay.config_flow import EbayOptionsFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "options": {
+                "pinned_item_ids": "keep,drop",
+                "pinned_item_price_targets": "keep=10 USD\ndrop=5 EUR",
+            },
+            "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
+            "runtime_data": SimpleNamespace(
+                data={
+                    "watched": {
+                        "keep": {"item_id": "keep", "title": "Keep Me"},
+                        "drop": {"item_id": "drop", "title": "Drop Me"},
+                    },
+                    "bidding": {},
+                    "selling": {},
+                }
+            ),
+        },
+    )()
+    flow = EbayOptionsFlow(entry)
+    flow.hass = _Hass()
+    asyncio.run(flow.async_step_init())
+    assert flow._draft["pinned_item_ids"] == ["drop", "keep"]
+    assert len(flow._draft["pinned_item_price_targets"]) == 2
+
+    result = asyncio.run(
+        flow.async_step_entities(
+            {
+                "entity_mode": "balanced",
+                "per_item_cap": 25,
+                "pinned_item_ids": ["keep", "typed-id"],
+            }
+        )
+    )
+    assert result["type"] == "menu"
+    assert flow._draft["pinned_item_ids"] == ["keep", "typed-id"]
+    assert flow._draft["pinned_item_price_targets"] == [
+        {"item_id": "keep", "amount": "10", "currency": "USD"}
+    ]
 
 
 def test_options_flow_save_rejects_inconsistent_price_targets() -> None:

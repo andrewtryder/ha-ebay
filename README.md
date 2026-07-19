@@ -90,10 +90,13 @@ operations, Entities, Diagnostics). They include:
 
 - Poll interval and ending-soon threshold
 - Minimal, balanced, or detailed per-item entity mode
-- Per-item cap and pinned item IDs
+- Per-item cap and pinned item IDs (multi-select from known listings, or type an ID)
 - Watched-price percentage and currency-specific drop thresholds
-- Optional per-item price targets
+- Optional per-item price-drop targets (add/remove for pinned listings)
 - Buying, selling, analytics, and seller-operations feature toggles
+
+Prefer per-item **end time** sensors on dashboards; **seconds left** sensors exist for
+automations but are disabled by default.
 
 Buying, selling, and active orders refresh on the configured poll interval. Messages refresh at
 twice that interval; feedback and analytics refresh hourly; seller standards (including evaluation

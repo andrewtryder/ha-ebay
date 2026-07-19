@@ -235,6 +235,8 @@ def test_item_sensor_uses_title_name_monetary_and_end_time() -> None:
 
     assert seconds.device_class is None
     assert seconds.native_unit_of_measurement == "s"
+    assert seconds.entity_registry_enabled_default is False
+    assert ending.entity_registry_enabled_default is not False
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["watched"]
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["selling"]
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["bidding"]

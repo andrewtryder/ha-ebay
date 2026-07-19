@@ -1150,6 +1150,9 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         self.field = field
         self._static_unit = unit
         self._attr_unique_id = f"{entry.entry_id}_{kind}_{item_id}_{suffix}"
+        # Prefer end_time TIMESTAMP sensors on dashboards; keep seconds_left available.
+        if suffix == "seconds_left":
+            self._attr_entity_registry_enabled_default = False
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",

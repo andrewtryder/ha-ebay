@@ -949,7 +949,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return (amount, currency, source) for the active drop threshold."""
         try:
             targets = parse_price_targets(
-                str(self.options.get(CONF_PINNED_ITEM_PRICE_TARGETS, "") or "")
+                self.options.get(CONF_PINNED_ITEM_PRICE_TARGETS, [])
             )
         except ValueError:
             targets = {}

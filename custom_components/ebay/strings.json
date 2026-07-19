@@ -96,22 +96,55 @@
       },
       "buying_alerts": {
         "title": "Buying and alerts",
-        "description": "These settings apply mainly when Buying is enabled. Price-drop targets also need matching pinned item IDs under Entities.",
+        "description": "These settings apply mainly when Buying is enabled. After saving this step you can manage per-item price-drop targets. Targets require matching pinned item IDs under Entities.",
         "data": {
           "buying_enabled": "Enable buying and watch data",
           "ending_soon_threshold": "Ending-soon threshold in minutes",
           "watched_price_change_min_percent": "Minimum watched price change percent",
           "watched_price_drop_threshold": "Global watched price-drop threshold",
-          "watched_price_drop_currency": "Global watched price-drop currency",
-          "pinned_item_price_targets": "Pinned item price-drop targets"
+          "watched_price_drop_currency": "Global watched price-drop currency"
         },
         "data_description": {
           "buying_enabled": "Fetches watchlist and bidding items from eBay. Disable to stop buying API calls and related entities.",
           "ending_soon_threshold": "How soon before an item ends it counts as ending soon for sensors, calendars, and events. Most useful when Buying is enabled.",
           "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change. Requires Buying.",
           "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency. Requires Buying.",
-          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD). Requires Buying.",
-          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY (example: 123456789012=25.00 USD). Each item_id must also be listed under Entities → Pinned item IDs. Do not put price targets in the pinned IDs field. Per-item targets override the global threshold. Requires Buying."
+          "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD). Requires Buying."
+        }
+      },
+      "price_targets": {
+        "title": "Price-drop targets",
+        "description": "Current targets: {price_targets_summary}. Add targets for pinned listings, or choose Done to return to the options menu.",
+        "menu_options": {
+          "price_target_add": "Add or update target",
+          "price_target_remove": "Remove a target",
+          "price_targets_done": "Done"
+        },
+        "menu_option_descriptions": {
+          "price_target_add": "Set a price-drop amount and currency for one pinned item ID.",
+          "price_target_remove": "Delete one existing per-item target.",
+          "price_targets_done": "Return to the options menu."
+        }
+      },
+      "price_target_add": {
+        "title": "Add price-drop target",
+        "description": "Choose a pinned item ID, then set the target amount and currency. Per-item targets override the global threshold. Requires Buying.",
+        "data": {
+          "item_id": "Pinned item",
+          "amount": "Target amount",
+          "currency": "Currency"
+        },
+        "data_description": {
+          "item_id": "Must already be listed under Entities → Pinned item IDs.",
+          "amount": "Nonnegative amount in the selected currency.",
+          "currency": "Common currencies are listed; you can also type another ISO code."
+        }
+      },
+      "price_target_remove": {
+        "title": "Remove price-drop target",
+        "description": "Select one target to delete.",
+        "data": {
+          "item_id": "Target to remove"
         }
       },
       "selling": {
@@ -157,7 +190,7 @@
         "data_description": {
           "entity_mode": "minimal creates no per-item entities; balanced selects a capped set; detailed allows more listings within the cap. Summary sensors are unaffected.",
           "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
-          "pinned_item_ids": "One eBay item ID per line, or comma-separated. Use letters, digits, underscore, or hyphen only (typically numeric listing IDs). These IDs stay in the per-item selection when entity mode is not minimal. Also required for per-item price-drop targets under Buying and alerts. Do not enter amount=CURRENCY lines here."
+          "pinned_item_ids": "Select known listings from the last poll, or type an eBay item ID that is not listed yet. Use letters, digits, underscore, or hyphen only. Pinned IDs stay in the per-item selection when entity mode is not minimal, and are required for per-item price-drop targets under Buying and alerts."
         }
       },
       "diagnostics": {
@@ -172,10 +205,10 @@
     "error": {
       "invalid": "Enter a valid nonnegative number.",
       "required": "This field is required.",
-      "invalid_price_target": "Each line must be item_id=amount CURRENCY with a nonnegative amount (example: 123456789012=25.00 USD).",
+      "invalid_price_target": "Enter a nonnegative amount and a currency code for a pinned item.",
       "duplicate_price_target": "Each pinned item ID may appear only once in price targets.",
-      "target_not_pinned": "Price target item IDs must also be listed in pinned item IDs.",
-      "invalid_pinned_item_ids": "Pinned item IDs must be comma- or newline-separated eBay IDs (letters, digits, underscore, or hyphen only). Do not use item_id=amount CURRENCY syntax here."
+      "target_not_pinned": "Price target item IDs must also be listed in pinned item IDs under Entities.",
+      "invalid_pinned_item_ids": "Pinned item IDs must be eBay IDs (letters, digits, underscore, or hyphen only)."
     }
   },
   "entity": {

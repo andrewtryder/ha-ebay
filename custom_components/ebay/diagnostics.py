@@ -30,7 +30,7 @@ from .const import (
 )
 from .coordinator import EbayDataUpdateCoordinator
 from .models import ApiFailure
-from .options_parse import pinned_ids
+from .options_parse import parse_price_targets, pinned_ids
 from .sections import SECTION_SPECS
 
 TO_REDACT = {
@@ -45,6 +45,14 @@ TO_REDACT = {
     "refresh_token",
     "token",
 }
+
+
+def _price_targets_count(value: Any) -> int:
+    """Count price targets without raising on legacy/invalid drafts."""
+    try:
+        return len(parse_price_targets(value))
+    except ValueError:
+        return 0
 
 
 async def async_get_config_entry_diagnostics(
@@ -69,17 +77,9 @@ async def async_get_config_entry_diagnostics(
         "ending_soon_threshold": options.get(CONF_ENDING_SOON_THRESHOLD),
         "entity_mode": options.get(CONF_ENTITY_MODE),
         "per_item_cap": options.get(CONF_PER_ITEM_CAP),
-        "pinned_item_ids_count": len(
-            pinned_ids(str(options.get(CONF_PINNED_ITEM_IDS, "")))
-        ),
-        "pinned_item_price_targets_count": len(
-            [
-                line
-                for line in str(
-                    options.get(CONF_PINNED_ITEM_PRICE_TARGETS, "")
-                ).splitlines()
-                if line.strip()
-            ]
+        "pinned_item_ids_count": len(pinned_ids(options.get(CONF_PINNED_ITEM_IDS, []))),
+        "pinned_item_price_targets_count": _price_targets_count(
+            options.get(CONF_PINNED_ITEM_PRICE_TARGETS, [])
         ),
         "watched_price_change_min_percent": options.get(
             CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT
