@@ -6,29 +6,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
-SITE_ID_TO_MARKETPLACE = {
-    "0": "EBAY_US",
-    "2": "EBAY_CA",
-    "3": "EBAY_GB",
-    "15": "EBAY_AU",
-    "16": "EBAY_AT",
-    "23": "EBAY_BE",
-    "71": "EBAY_FR",
-    "77": "EBAY_DE",
-    "101": "EBAY_IT",
-    "123": "EBAY_BE",
-    "146": "EBAY_NL",
-    "186": "EBAY_ES",
-    "193": "EBAY_CH",
-    "201": "EBAY_HK",
-    "203": "EBAY_IN",
-    "205": "EBAY_IE",
-    "207": "EBAY_MY",
-    "210": "EBAY_CAFR",
-    "211": "EBAY_PH",
-    "212": "EBAY_PL",
-    "216": "EBAY_SG",
-}
+from .marketplace import (
+    SITE_ID_TO_MARKETPLACE as SITE_ID_TO_MARKETPLACE,
+    is_known_site_id as is_known_site_id,
+    marketplace_id_for_site as marketplace_id_for_site,
+)
 
 SHIPMENT_DUE_SOON_HOURS = 24
 ORDERS_LOOKBACK_DAYS = 30
@@ -39,20 +21,9 @@ DISPUTES_MAX_PAGES = 5
 CONVERSATIONS_PAGE_LIMIT = 25
 CONVERSATIONS_MAX_PAGES = 5
 FEEDBACK_RECENT_LOOKBACK_DAYS = 30
-
-
-def is_known_site_id(site_id: str) -> bool:
-    """Return True when Site ID maps to a known Sell Analytics marketplace."""
-    return str(site_id) in SITE_ID_TO_MARKETPLACE
-
-
-def marketplace_id_for_site(site_id: str) -> str | None:
-    """Map Trading Site ID to Sell Analytics marketplace ID.
-
-    Returns None when the Site ID is unknown so callers can soft-fail instead of
-    silently querying the wrong marketplace.
-    """
-    return SITE_ID_TO_MARKETPLACE.get(str(site_id))
+FEEDBACK_ITEMS_PAGE_LIMIT = 50
+FEEDBACK_ITEMS_MAX_PAGES = 4
+FEEDBACK_RECENT_IDS_MAX = 200
 
 
 def empty_seller_ops() -> dict[str, Any]:
@@ -91,12 +62,33 @@ def empty_seller_ops() -> dict[str, Any]:
             "recent_neutral": None,
             "recent_negative": None,
             "awaiting_count": None,
+            "recent_feedback_ids": None,
+            "recent_negative_feedback_ids": None,
+            "items_truncated": False,
         },
         "messages": {
             "unread_count": None,
             "buyer_question_count": None,
             "oldest_unanswered_hours": None,
             "by_id": {},
+        },
+        "account_privileges": {
+            "seller_registration_completed": None,
+            "amount_remaining": None,
+            "amount_used": None,
+            "amount_currency": None,
+            "quantity_remaining": None,
+            "quantity_used": None,
+            "near_limit": None,
+        },
+        "finances": {
+            "available_funds": None,
+            "pending_funds": None,
+            "total_funds": None,
+            "funds_currency": None,
+            "last_payout_amount": None,
+            "last_payout_status": None,
+            "last_payout_date": None,
         },
     }
 
@@ -595,8 +587,22 @@ def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def parse_feedback_items(payload: dict[str, Any]) -> dict[str, int]:
-    """Count recent feedback by comment type without retaining comments/usernames."""
+def _feedback_item_id(item: dict[str, Any]) -> str | None:
+    """Return a stable feedback entry id when present."""
+    raw = (
+        item.get("feedbackId")
+        or item.get("feedbackEntryId")
+        or item.get("feedback_id")
+        or item.get("id")
+    )
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def parse_feedback_items(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse feedback ids and comment-type counts without retaining PII."""
     items = (
         payload.get("feedbackEntries")
         or payload.get("feedbackItems")
@@ -604,6 +610,8 @@ def parse_feedback_items(payload: dict[str, Any]) -> dict[str, int]:
         or []
     )
     counts = {"recent_positive": 0, "recent_neutral": 0, "recent_negative": 0}
+    ids: list[str] = []
+    negative_ids: list[str] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -613,13 +621,22 @@ def parse_feedback_items(payload: dict[str, Any]) -> dict[str, int]:
             or item.get("rating")
             or ""
         ).upper()
+        feedback_id = _feedback_item_id(item)
+        if feedback_id:
+            ids.append(feedback_id)
         if comment_type in {"POSITIVE", "FEEDBACK_POSITIVE"}:
             counts["recent_positive"] += 1
         elif comment_type in {"NEUTRAL", "FEEDBACK_NEUTRAL"}:
             counts["recent_neutral"] += 1
         elif comment_type in {"NEGATIVE", "FEEDBACK_NEGATIVE"}:
             counts["recent_negative"] += 1
-    return counts
+            if feedback_id:
+                negative_ids.append(feedback_id)
+    return {
+        **counts,
+        "ids": ids,
+        "negative_ids": negative_ids,
+    }
 
 
 def parse_awaiting_feedback_count(payload: dict[str, Any]) -> int:
@@ -729,4 +746,133 @@ def orders_for_summary_attrs(orders_section: dict[str, Any]) -> dict[str, Any]:
     return {
         **{k: v for k, v in orders_section.items() if k != "by_id"},
         "order_ids": sorted((orders_section.get("by_id") or {})),
+    }
+
+
+# Heuristic thresholds when privilege payloads only expose remaining capacity.
+NEAR_LIMIT_QUANTITY_REMAINING = 10
+NEAR_LIMIT_AMOUNT_REMAINING = 100.0
+
+
+def _parse_money_amount(value: Any) -> tuple[float | None, str | None]:
+    """Extract (amount, currency) from an eBay Amount object or scalar."""
+    if isinstance(value, dict):
+        return _coerce_float(value.get("value")), (
+            str(value["currency"]) if value.get("currency") else None
+        )
+    return _coerce_float(value), None
+
+
+def parse_account_privileges(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse Sell Account getPrivileges into a defensive summary.
+
+    Documented shape uses ``sellingLimit`` with remaining ``amount`` /
+    ``quantity``. Some responses may nest ``sellingLimits`` or include used
+    counters; accept both without requiring a perfect field map.
+    """
+    selling_limit = payload.get("sellingLimit") or payload.get("sellingLimits") or {}
+    if isinstance(selling_limit, list):
+        selling_limit = selling_limit[0] if selling_limit else {}
+    if not isinstance(selling_limit, dict):
+        selling_limit = {}
+
+    amount_remaining, amount_currency = _parse_money_amount(
+        selling_limit.get("amount")
+        or selling_limit.get("amountRemaining")
+        or selling_limit.get("remainingAmount")
+    )
+    amount_used, used_currency = _parse_money_amount(
+        selling_limit.get("amountUsed") or selling_limit.get("usedAmount")
+    )
+    if amount_currency is None:
+        amount_currency = used_currency
+
+    quantity_remaining = _coerce_int(
+        selling_limit.get("quantity")
+        or selling_limit.get("quantityRemaining")
+        or selling_limit.get("remainingQuantity")
+    )
+    quantity_used = _coerce_int(
+        selling_limit.get("quantityUsed") or selling_limit.get("usedQuantity")
+    )
+
+    registered = payload.get("sellerRegistrationCompleted")
+    if registered is None:
+        registered = payload.get("seller_registration_completed")
+    if registered is not None:
+        registered = bool(registered)
+
+    near_limit = None
+    if quantity_remaining is not None or amount_remaining is not None:
+        near_limit = False
+        if (
+            quantity_remaining is not None
+            and quantity_remaining <= NEAR_LIMIT_QUANTITY_REMAINING
+        ):
+            near_limit = True
+        if (
+            amount_remaining is not None
+            and amount_remaining <= NEAR_LIMIT_AMOUNT_REMAINING
+        ):
+            near_limit = True
+
+    return {
+        "seller_registration_completed": registered,
+        "amount_remaining": amount_remaining,
+        "amount_used": amount_used,
+        "amount_currency": amount_currency,
+        "quantity_remaining": quantity_remaining,
+        "quantity_used": quantity_used,
+        "near_limit": near_limit,
+    }
+
+
+def parse_seller_funds_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse Sell Finances seller_funds_summary into available/pending totals."""
+    available, currency = _parse_money_amount(
+        payload.get("availableFunds") or payload.get("available_funds")
+    )
+    pending, pending_currency = _parse_money_amount(
+        payload.get("processingFunds")
+        or payload.get("pendingFunds")
+        or payload.get("fundsOnHold")
+        or payload.get("processing_funds")
+    )
+    total, total_currency = _parse_money_amount(
+        payload.get("totalFunds") or payload.get("total_funds")
+    )
+    funds_currency = currency or pending_currency or total_currency
+    return {
+        "available_funds": available,
+        "pending_funds": pending,
+        "total_funds": total,
+        "funds_currency": funds_currency,
+    }
+
+
+def parse_last_payout(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse the newest payout from a Sell Finances payout list response."""
+    payouts = payload.get("payouts") or payload.get("payout") or []
+    if isinstance(payouts, dict):
+        payouts = [payouts]
+    if not isinstance(payouts, list) or not payouts:
+        return {
+            "last_payout_amount": None,
+            "last_payout_status": None,
+            "last_payout_date": None,
+        }
+    raw = payouts[0] if isinstance(payouts[0], dict) else {}
+    amount, _currency = _parse_money_amount(
+        raw.get("amount") or raw.get("payoutAmount")
+    )
+    status = raw.get("payoutStatus") or raw.get("status")
+    stamp = _parse_ebay_datetime(
+        raw.get("payoutDate")
+        or raw.get("lastAttemptedPayoutDate")
+        or raw.get("creationDate")
+    )
+    return {
+        "last_payout_amount": amount,
+        "last_payout_status": str(status) if status else None,
+        "last_payout_date": stamp.isoformat() if stamp else None,
     }

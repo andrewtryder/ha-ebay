@@ -14,14 +14,18 @@ CONF_REFRESH_TOKEN = "refresh_token"
 CONF_RUNAME = "runame"
 CONF_SITE_ID = "site_id"
 
+CONF_ACCOUNT_PRIVILEGES_ENABLED = "account_privileges_enabled"
 CONF_ANALYTICS_ENABLED = "analytics_enabled"
 CONF_BUYING_ENABLED = "buying_enabled"
 CONF_ENDING_SOON_THRESHOLD = "ending_soon_threshold"
 CONF_ENTITY_MODE = "entity_mode"
 CONF_FEEDBACK_ENABLED = "feedback_enabled"
+CONF_FINANCES_ENABLED = "finances_enabled"
 CONF_FULFILLMENT_ENABLED = "fulfillment_enabled"
 CONF_MESSAGES_ENABLED = "messages_enabled"
 CONF_OAUTH_SCOPES = "oauth_scopes"
+CONF_PENDING_OPTIONS = "pending_options"
+CONF_ITEM_ENTITY_GRACE_DAYS = "item_entity_grace_days"
 CONF_PER_ITEM_CAP = "per_item_cap"
 CONF_PINNED_ITEM_IDS = "pinned_item_ids"
 CONF_PINNED_ITEM_PRICE_TARGETS = "pinned_item_price_targets"
@@ -50,6 +54,7 @@ DEFAULT_ENDING_SOON_THRESHOLD = 60
 DEFAULT_ENTITY_MODE = ENTITY_MODE_BALANCED
 DEFAULT_PER_ITEM_CAP = 25
 ALLOWED_PER_ITEM_CAPS = [25, 50, 100, 250]
+DEFAULT_ITEM_ENTITY_GRACE_DAYS = 7
 DEFAULT_SITE_ID = "0"
 DEFAULT_WATCHED_PRICE_CHANGE_MIN_PERCENT = 0
 RECENT_EVENTS_MAX = 20
@@ -62,6 +67,7 @@ DEFAULT_OPTIONS = {
     CONF_ENDING_SOON_THRESHOLD: DEFAULT_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE: DEFAULT_ENTITY_MODE,
     CONF_PER_ITEM_CAP: DEFAULT_PER_ITEM_CAP,
+    CONF_ITEM_ENTITY_GRACE_DAYS: DEFAULT_ITEM_ENTITY_GRACE_DAYS,
     CONF_PINNED_ITEM_IDS: "",
     CONF_PINNED_ITEM_PRICE_TARGETS: "",
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: DEFAULT_WATCHED_PRICE_CHANGE_MIN_PERCENT,
@@ -74,6 +80,8 @@ DEFAULT_OPTIONS = {
     CONF_SELLER_STANDARDS_ENABLED: False,
     CONF_FEEDBACK_ENABLED: False,
     CONF_MESSAGES_ENABLED: False,
+    CONF_ACCOUNT_PRIVILEGES_ENABLED: False,
+    CONF_FINANCES_ENABLED: False,
 }
 
 PLATFORMS = ["sensor", "binary_sensor", "event", "calendar", "button"]
@@ -160,6 +168,8 @@ SECTION_MESSAGES = "messages"
 SECTION_FEEDBACK = "feedback"
 SECTION_ANALYTICS = "analytics"
 SECTION_SELLER_STANDARDS = "seller_standards"
+SECTION_ACCOUNT_PRIVILEGES = "account_privileges"
+SECTION_FINANCES = "finances"
 
 ALL_SECTIONS = (
     SECTION_BUYING,
@@ -169,16 +179,22 @@ ALL_SECTIONS = (
     SECTION_FEEDBACK,
     SECTION_ANALYTICS,
     SECTION_SELLER_STANDARDS,
+    SECTION_ACCOUNT_PRIVILEGES,
+    SECTION_FINANCES,
 )
 
 SECTION_FEEDBACK_INTERVAL_MINUTES = 60
 SECTION_ANALYTICS_INTERVAL_MINUTES = 60
 SECTION_SELLER_STANDARDS_INTERVAL_MINUTES = 1440
+SECTION_ACCOUNT_PRIVILEGES_INTERVAL_MINUTES = 360
+SECTION_FINANCES_INTERVAL_MINUTES = 60
 
 # Soft-fail retry cadence (minutes). Missing-scope failures do not use these.
 SECTION_FEEDBACK_RETRY_MINUTES = 60
 SECTION_SELLER_STANDARDS_RETRY_MINUTES = 60
 SECTION_ANALYTICS_RETRY_MINUTES = 60
+SECTION_ACCOUNT_PRIVILEGES_RETRY_MINUTES = 60
+SECTION_FINANCES_RETRY_MINUTES = 60
 
 # Soft-fail / truncation conditions must be seen this many consecutive section
 # attempts before a Repairs issue is created.
@@ -209,6 +225,7 @@ PARTIAL_FAILURE_SECTION = {
     "active_offers": SECTION_SELLING,
     "analytics_views": SECTION_ANALYTICS,
     "analytics_views_missing_scope": SECTION_ANALYTICS,
+    "analytics_views_unsupported": SECTION_ANALYTICS,
     "orders": SECTION_FULFILLMENT,
     "orders_truncated": SECTION_FULFILLMENT,
     "orders_missing_scope": SECTION_FULFILLMENT,
@@ -226,6 +243,12 @@ PARTIAL_FAILURE_SECTION = {
     "messages": SECTION_MESSAGES,
     "messages_truncated": SECTION_MESSAGES,
     "messages_missing_scope": SECTION_MESSAGES,
+    "account_privileges": SECTION_ACCOUNT_PRIVILEGES,
+    "account_privileges_missing_scope": SECTION_ACCOUNT_PRIVILEGES,
+    "account_privileges_unsupported": SECTION_ACCOUNT_PRIVILEGES,
+    "finances": SECTION_FINANCES,
+    "finances_missing_scope": SECTION_FINANCES,
+    "finances_unsupported": SECTION_FINANCES,
 }
 
 MISSING_SCOPE_PARTIAL_FAILURES = frozenset(
@@ -236,31 +259,34 @@ MISSING_SCOPE_PARTIAL_FAILURES = frozenset(
         "seller_standards_missing_scope",
         "feedback_missing_scope",
         "messages_missing_scope",
+        "account_privileges_missing_scope",
+        "finances_missing_scope",
     }
 )
 
 
 def section_interval_minutes(section: str, poll_interval: int) -> int:
     """Return the refresh interval in minutes for a payload section."""
+    # Lazy import avoids a circular dependency (sections → api → const).
+    from .sections import MESSAGES_POLL_MULTIPLIER, SECTION_SPECS
+
+    poll = max(poll_interval, 1)
     if section == SECTION_MESSAGES:
-        return max(poll_interval, 1) * 2
-    if section == SECTION_FEEDBACK:
-        return SECTION_FEEDBACK_INTERVAL_MINUTES
-    if section == SECTION_ANALYTICS:
-        return SECTION_ANALYTICS_INTERVAL_MINUTES
-    if section == SECTION_SELLER_STANDARDS:
-        return SECTION_SELLER_STANDARDS_INTERVAL_MINUTES
-    return max(poll_interval, 1)
+        return poll * MESSAGES_POLL_MULTIPLIER
+    spec = SECTION_SPECS.get(section)
+    if spec is not None and spec.interval_minutes is not None:
+        return spec.interval_minutes
+    return poll
 
 
 def section_retry_minutes(section: str, poll_interval: int) -> int:
     """Return the soft-fail retry delay in minutes for a payload section."""
-    if section == SECTION_FEEDBACK:
-        return SECTION_FEEDBACK_RETRY_MINUTES
-    if section == SECTION_SELLER_STANDARDS:
-        return SECTION_SELLER_STANDARDS_RETRY_MINUTES
-    if section == SECTION_ANALYTICS:
-        return SECTION_ANALYTICS_RETRY_MINUTES
+    from .sections import MESSAGES_POLL_MULTIPLIER, SECTION_SPECS
+
+    poll = max(poll_interval, 1)
     if section == SECTION_MESSAGES:
-        return max(poll_interval, 1) * 2
-    return max(poll_interval, 1)
+        return poll * MESSAGES_POLL_MULTIPLIER
+    spec = SECTION_SPECS.get(section)
+    if spec is not None and spec.retry_minutes is not None:
+        return spec.retry_minutes
+    return poll

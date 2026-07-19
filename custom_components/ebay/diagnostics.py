@@ -11,24 +11,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    CONF_ANALYTICS_ENABLED,
-    CONF_BUYING_ENABLED,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
     CONF_ENVIRONMENT,
-    CONF_FEEDBACK_ENABLED,
-    CONF_FULFILLMENT_ENABLED,
-    CONF_MESSAGES_ENABLED,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
-    CONF_SELLING_ENABLED,
-    CONF_SELLER_STANDARDS_ENABLED,
     CONF_SITE_ID,
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
     CONF_WATCHED_PRICE_DROP_CURRENCY,
@@ -36,7 +29,9 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import EbayDataUpdateCoordinator
+from .models import ApiFailure
 from .options_parse import pinned_ids
+from .sections import SECTION_SPECS
 
 TO_REDACT = {
     CONF_CLIENT_ID,
@@ -66,13 +61,8 @@ async def async_get_config_entry_diagnostics(
         "environment": entry.data.get(CONF_ENVIRONMENT),
         "site_id": entry.data.get(CONF_SITE_ID),
         "enabled_features": {
-            "buying": options.get(CONF_BUYING_ENABLED),
-            "selling": options.get(CONF_SELLING_ENABLED),
-            "analytics": options.get(CONF_ANALYTICS_ENABLED),
-            "fulfillment": options.get(CONF_FULFILLMENT_ENABLED),
-            "seller_standards": options.get(CONF_SELLER_STANDARDS_ENABLED),
-            "feedback": options.get(CONF_FEEDBACK_ENABLED),
-            "messages": options.get(CONF_MESSAGES_ENABLED),
+            key: options.get(spec.option_key) if spec.option_key else None
+            for key, spec in SECTION_SPECS.items()
         },
         "poll_interval": options.get(CONF_POLL_INTERVAL),
         "section_last_fetched_ages_minutes": _section_ages_minutes(data),
@@ -126,6 +116,7 @@ async def async_get_config_entry_diagnostics(
         "last_error_category": coordinator.last_error_category,
         "partial_failure_categories": data.get("partial_failures", []),
         "partial_failure_details": data.get("partial_failure_details", []),
+        "last_api_failure": _last_api_failure_diagnostics(data),
         "missing_scope_features": data.get("missing_scope_features")
         or summary.get("missing_scope_features", []),
         "missing_scopes": data.get("missing_scopes")
@@ -135,6 +126,14 @@ async def async_get_config_entry_diagnostics(
         "scheduled_ending_soon_timer_count": coordinator.scheduled_ending_soon_count,
         "redacted": sorted(TO_REDACT),
     }
+
+
+def _last_api_failure_diagnostics(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the diagnostics shape for the last structured API failure."""
+    failure = ApiFailure.from_dict(data.get("last_api_failure"))
+    if failure is None:
+        return None
+    return failure.to_diagnostics()
 
 
 def _section_ages_minutes(data: dict[str, Any]) -> dict[str, float | None]:
@@ -164,6 +163,8 @@ def _safe_seller_ops_summary(seller_ops: dict[str, Any]) -> dict[str, Any]:
     standards = seller_ops.get("standards") or {}
     feedback = seller_ops.get("feedback") or {}
     messages = seller_ops.get("messages") or {}
+    privileges = seller_ops.get("account_privileges") or {}
+    finances = seller_ops.get("finances") or {}
     return {
         "orders": {
             "awaiting_shipment": orders.get("awaiting_shipment"),
@@ -198,6 +199,20 @@ def _safe_seller_ops_summary(seller_ops: dict[str, Any]) -> dict[str, Any]:
             "buyer_question_count": messages.get("buyer_question_count"),
             "oldest_unanswered_hours": messages.get("oldest_unanswered_hours"),
             "conversation_count": len(messages.get("by_id") or {}),
+        },
+        "account_privileges": {
+            "seller_registration_completed": privileges.get(
+                "seller_registration_completed"
+            ),
+            "amount_remaining": privileges.get("amount_remaining"),
+            "quantity_remaining": privileges.get("quantity_remaining"),
+            "near_limit": privileges.get("near_limit"),
+        },
+        "finances": {
+            "available_funds": finances.get("available_funds"),
+            "pending_funds": finances.get("pending_funds"),
+            "last_payout_amount": finances.get("last_payout_amount"),
+            "last_payout_status": finances.get("last_payout_status"),
         },
     }
 

@@ -543,8 +543,76 @@ def test_known_site_id_helpers() -> None:
 
     assert is_known_site_id("0") is True
     assert marketplace_id_for_site("0") == "EBAY_US"
+    assert marketplace_id_for_site("210") == "EBAY_CA"
     assert is_known_site_id("999") is False
     assert marketplace_id_for_site("999") is None
+
+
+def test_transient_failures_do_not_increment_repair_streaks(
+    issue_registry: _FakeIssueRegistry,
+) -> None:
+    """429/5xx-style transient classifications must not create persistent repairs."""
+    from custom_components.ebay.repairs import is_transient_failure_category
+
+    entry = _entry()
+    coordinator = _coordinator()
+    payload = {
+        "missing_scope_features": [],
+        "missing_scopes": {},
+        "partial_failures": ["orders", "analytics_views"],
+        "truncated_collections": {},
+        "last_api_failure": {
+            "operation": "orders.get",
+            "endpoint_key": "/sell/fulfillment/v1/order",
+            "http_status": 503,
+            "ebay_error_id": None,
+            "ebay_domain": None,
+            "ebay_category": None,
+            "message": None,
+            "classification": "transient",
+            "mapped_category": "orders",
+        },
+        "partial_failure_details": [
+            {
+                "operation": "orders.get",
+                "endpoint_key": "/sell/fulfillment/v1/order",
+                "http_status": 503,
+                "classification": "transient",
+                "mapped_category": "orders",
+            },
+            {
+                "operation": "analytics_views.get",
+                "endpoint_key": "/sell/analytics/v1/traffic_report",
+                "http_status": 429,
+                "classification": "transient",
+                "mapped_category": "analytics_views",
+            },
+        ],
+    }
+    assert is_transient_failure_category(payload, "orders") is True
+    assert is_transient_failure_category(payload, "analytics_views") is True
+
+    for _ in range(REPAIR_STREAK_THRESHOLD):
+        asyncio.run(
+            async_sync_repair_issues(
+                Mock(),
+                entry,
+                coordinator,
+                payload,
+                refreshed_sections={"fulfillment", "analytics"},
+            )
+        )
+
+    assert coordinator._repair_streaks.get("seller_ops_unavailable:orders", 0) == 0
+    assert coordinator._repair_streaks.get("partial_failure:analytics_views", 0) == 0
+    assert (
+        DOMAIN,
+        issue_id_for(entry.entry_id, "seller_ops_unavailable_orders"),
+    ) not in issue_registry.issues
+    assert (
+        DOMAIN,
+        issue_id_for(entry.entry_id, "partial_failure_analytics_views"),
+    ) not in issue_registry.issues
 
 
 def test_repair_streaks_store_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:

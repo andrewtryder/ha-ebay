@@ -122,8 +122,13 @@ def test_parse_feedback_summary_and_items() -> None:
     counts = parse_feedback_items(
         {
             "feedbackEntries": [
-                {"commentType": "POSITIVE", "commentText": "secret", "user": "buyer"},
-                {"commentType": "NEGATIVE"},
+                {
+                    "feedbackId": "fb-1",
+                    "commentType": "POSITIVE",
+                    "commentText": "secret",
+                    "user": "buyer",
+                },
+                {"feedbackId": "fb-2", "commentType": "NEGATIVE"},
             ]
         }
     )
@@ -131,6 +136,8 @@ def test_parse_feedback_summary_and_items() -> None:
         "recent_positive": 1,
         "recent_neutral": 0,
         "recent_negative": 1,
+        "ids": ["fb-1", "fb-2"],
+        "negative_ids": ["fb-2"],
     }
 
 
@@ -195,3 +202,64 @@ def test_normalize_conversation_no_body() -> None:
     assert summary["unread_count"] == 1
     assert summary["buyer_question_count"] == 1
     assert summary["oldest_unanswered_hours"] == 2.0
+
+
+def test_parse_account_privileges_remaining_and_near_limit() -> None:
+    from custom_components.ebay.seller_ops import parse_account_privileges
+
+    parsed = parse_account_privileges(
+        {
+            "sellerRegistrationCompleted": True,
+            "sellingLimit": {
+                "amount": {"value": "50.00", "currency": "USD"},
+                "quantity": 5,
+            },
+        }
+    )
+    assert parsed["seller_registration_completed"] is True
+    assert parsed["amount_remaining"] == 50.0
+    assert parsed["amount_currency"] == "USD"
+    assert parsed["quantity_remaining"] == 5
+    assert parsed["near_limit"] is True
+
+
+def test_parse_account_privileges_defensive_empty() -> None:
+    from custom_components.ebay.seller_ops import parse_account_privileges
+
+    parsed = parse_account_privileges({})
+    assert parsed["seller_registration_completed"] is None
+    assert parsed["amount_remaining"] is None
+    assert parsed["near_limit"] is None
+
+
+def test_parse_finances_funds_and_last_payout() -> None:
+    from custom_components.ebay.seller_ops import (
+        parse_last_payout,
+        parse_seller_funds_summary,
+    )
+
+    funds = parse_seller_funds_summary(
+        {
+            "availableFunds": {"value": "120.5", "currency": "USD"},
+            "processingFunds": {"value": "10", "currency": "USD"},
+            "totalFunds": {"value": "130.5", "currency": "USD"},
+        }
+    )
+    assert funds["available_funds"] == 120.5
+    assert funds["pending_funds"] == 10.0
+    assert funds["funds_currency"] == "USD"
+
+    payout = parse_last_payout(
+        {
+            "payouts": [
+                {
+                    "payoutStatus": "SUCCEEDED",
+                    "amount": {"value": "99.99", "currency": "USD"},
+                    "payoutDate": "2026-07-01T12:00:00.000Z",
+                }
+            ]
+        }
+    )
+    assert payout["last_payout_amount"] == 99.99
+    assert payout["last_payout_status"] == "SUCCEEDED"
+    assert payout["last_payout_date"] is not None
