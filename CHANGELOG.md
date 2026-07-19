@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0](https://github.com/andrewtryder/ha-ebay/compare/v0.7.0...v0.8.0) (2026-07-19)
+
+
+### Features
+
+* expand finances payout and funds monitoring ([#70](https://github.com/andrewtryder/ha-ebay/issues/70)) ([67097f4](https://github.com/andrewtryder/ha-ebay/commit/67097f48238c030625cef2ac3b903fe57bb3c313))
+* expose account privilege used listing limits ([#69](https://github.com/andrewtryder/ha-ebay/issues/69)) ([99d8b22](https://github.com/andrewtryder/ha-ebay/commit/99d8b22dd38b0c3c182a38a6d480d2714ccd7793))
+* structured pin and price-target options UI ([#72](https://github.com/andrewtryder/ha-ebay/issues/72)) ([11c6d7a](https://github.com/andrewtryder/ha-ebay/commit/11c6d7a85fdd2c862eac314721f232f83345a664))
+
 ## [0.7.0](https://github.com/andrewtryder/ha-ebay/compare/v0.6.4...v0.7.0) (2026-07-19)
 
 
