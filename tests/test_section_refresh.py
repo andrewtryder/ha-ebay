@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
+
 from custom_components.ebay.api import EbayApiClient, EbayError
 from custom_components.ebay.const import (
     SECTION_FEEDBACK,
@@ -177,3 +179,66 @@ def test_seller_standards_soft_fail_does_not_stamp_success() -> None:
     assert SECTION_SELLER_STANDARDS in payload["section_last_attempt"]
     assert SECTION_SELLER_STANDARDS not in payload["section_last_success"]
     assert SECTION_SELLER_STANDARDS not in payload["section_last_fetched"]
+
+
+def test_disabled_section_skipped_even_when_requested() -> None:
+    """Option-disabled sections are not fetched even if listed in sections."""
+    client = _client()
+    client.async_fetch_messages = AsyncMock(
+        side_effect=AssertionError("messages should not be fetched")
+    )
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_sections(
+            {SECTION_MESSAGES},
+            previous=None,
+            buying_enabled=False,
+            selling_enabled=False,
+            analytics_enabled=False,
+            messages_enabled=False,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes="https://api.ebay.com/oauth/api_scope",
+        )
+
+    payload = asyncio.run(run())
+    client.async_fetch_messages.assert_not_called()
+    assert (payload.get("seller_ops") or {}).get("messages", {}).get(
+        "unread_count"
+    ) in (
+        None,
+        0,
+    )
+    assert SECTION_MESSAGES not in (payload.get("section_last_success") or {})
+
+
+def test_finances_capability_miss_records_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Marketplace capability gates come from SectionSpec and record failures."""
+    from custom_components.ebay import section_fetch
+    from custom_components.ebay.const import SECTION_FINANCES
+
+    monkeypatch.setattr(section_fetch, "capability_supported", lambda *_a, **_k: False)
+    client = _client()
+    client.async_fetch_finances = AsyncMock(
+        side_effect=AssertionError("finances should not be fetched")
+    )
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_sections(
+            {SECTION_FINANCES},
+            previous=None,
+            buying_enabled=False,
+            selling_enabled=False,
+            analytics_enabled=False,
+            finances_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=(
+                "https://api.ebay.com/oauth/api_scope "
+                "https://api.ebay.com/oauth/api_scope/sell.finances"
+            ),
+        )
+
+    payload = asyncio.run(run())
+    assert "finances_unsupported" in payload["partial_failures"]
+    client.async_fetch_finances.assert_not_called()
