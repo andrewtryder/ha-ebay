@@ -32,10 +32,14 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     coordinator.last_refresh_duration_seconds = None
     coordinator.last_refresh_result = "unknown"
     coordinator.selected_item_keys = set()
+    coordinator.inactive_item_sensors = {}
+    coordinator._item_entity_cleanup = None
     coordinator._event_callbacks = {}
     coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._fired_ending_soon_dirty = False
+    coordinator._ending_soon_fired_save_task = None
     coordinator._price_drop_below_active = set()
     from collections import deque
 
@@ -50,6 +54,7 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     coordinator._recent_history_ending_soon = set()
     coordinator._manual_refresh_last_requested = None
     coordinator._force_full_refresh = False
+    coordinator._force_sections = None
     coordinator._repair_streaks = {}
     return coordinator
 
