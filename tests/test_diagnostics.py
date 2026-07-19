@@ -6,6 +6,8 @@ import asyncio
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
+
 from custom_components.ebay.const import (
     CONF_ANALYTICS_ENABLED,
     CONF_CLIENT_ID,
@@ -171,17 +173,43 @@ def test_diagnostics_with_coordinator_data() -> None:
 
 
 def test_section_ages_handles_invalid_and_non_datetime_values() -> None:
+    from datetime import datetime, timezone
+
     from custom_components.ebay.diagnostics import _section_ages_minutes
 
+    now = datetime.now(timezone.utc)
     ages = _section_ages_minutes(
         {
             "section_last_fetched": {
                 "buying": "not-a-timestamp",
                 "selling": 12345,
                 "feedback": None,
+                "analytics": now,
             }
         }
     )
     assert ages["buying"] is None
     assert ages["selling"] is None
     assert ages["feedback"] is None
+    assert ages["analytics"] == 0.0
+
+
+def test_manifest_version_handles_read_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.ebay import diagnostics as diagnostics_mod
+
+    class _Boom:
+        def with_name(self, name: str) -> "_Boom":
+            return self
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            raise OSError("boom")
+
+    monkeypatch.setattr(diagnostics_mod, "Path", lambda *a, **k: _Boom())
+    assert diagnostics_mod._manifest_version() is None
+
+    class _BadJson(_Boom):
+        def read_text(self, encoding: str = "utf-8") -> str:
+            return "{not-json"
+
+    monkeypatch.setattr(diagnostics_mod, "Path", lambda *a, **k: _BadJson())
+    assert diagnostics_mod._manifest_version() is None

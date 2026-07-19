@@ -739,6 +739,91 @@ def test_merge_partial_failure_details_keeps_active_newest() -> None:
     assert merged[0]["errors"][0]["error_id"] == 2
 
 
+def test_build_and_merge_partial_failure_detail_helpers() -> None:
+    from custom_components.ebay.api import (
+        build_partial_failure_detail,
+        merge_partial_failure_details,
+        _copy_seller_ops,
+        _error_text_blob,
+        _is_unsupported_error,
+        _parse_optional_datetime,
+        _parse_section_dt_map,
+        _to_bool,
+        _to_float,
+        _to_int,
+        format_seconds,
+        parse_ebay_time,
+        seconds_until,
+    )
+    from custom_components.ebay.models import ApiFailure
+    from custom_components.ebay.seller_ops import empty_seller_ops
+
+    failure = ApiFailure(
+        operation="op",
+        endpoint_key="ep",
+        http_status=503,
+        ebay_error_id=1,
+        ebay_domain="API",
+        ebay_category="REQUEST",
+        message="down",
+        classification="transient",
+        mapped_category="orders",
+    )
+    assert build_partial_failure_detail(failure=failure)["operation"] == "op"
+    detail = build_partial_failure_detail(
+        mapped_category="orders",
+        request_category="orders",
+        http_status=500,
+        source="rest",
+        reason="timeout",
+    )
+    assert detail["source"] == "rest"
+    assert detail["reason"] == "timeout"
+
+    merged = merge_partial_failure_details(
+        previous=["skip", {"mapped_category": "orders", "http_status": 500}],
+        new_details=[{"mapped_category": "orders", "http_status": 503}],
+        active_categories={"orders"},
+    )
+    assert merged[0]["http_status"] == 503
+
+    assert _error_text_blob(None) == ""
+    assert _error_text_blob({"errors": "x"}) == ""
+    assert _error_text_blob({"errors": ["x", {"message": "Unsupported marketplace"}]})
+    assert _is_unsupported_error(
+        {"errors": [{"message": "This marketplace is not supported"}]}
+    )
+
+    assert _to_int("nope") is None
+    assert _to_float("nope") is None
+    assert _to_bool("maybe") is None
+    assert format_seconds(None) is None
+    assert format_seconds(0) == "ended"
+    assert format_seconds(90) == "1m"
+    assert format_seconds(3700) == "1h 1m"
+    assert format_seconds(90000) == "1d 1h 0m"
+    assert parse_ebay_time(None) is None
+    assert parse_ebay_time("bad") is None
+    assert seconds_until(None) is None
+    assert _parse_optional_datetime(datetime.now(timezone.utc)) is not None
+    assert _parse_optional_datetime("bad") is None
+    assert _parse_optional_datetime(12) is None
+
+    copied = _copy_seller_ops({"orders": "bad", "disputes": {"open_count": 1}})
+    assert copied["orders"] == empty_seller_ops()["orders"]
+    assert copied["disputes"]["open_count"] == 1
+
+    parsed = _parse_section_dt_map(
+        {
+            "buying": "2026-07-18T12:00:00+00:00",
+            "selling": "bad",
+            "feedback": 12,
+        }
+    )
+    assert "buying" in parsed
+    assert "selling" not in parsed
+
+
 def test_feedback_http_400_maps_to_invalid_request() -> None:
     client = _client(
         [

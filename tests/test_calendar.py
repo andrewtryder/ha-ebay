@@ -353,6 +353,58 @@ def test_event_property_returns_next_upcoming() -> None:
     assert entity.event.summary == "Next"
 
 
+def test_calendar_unavailable_when_coordinator_failed() -> None:
+    description = next(item for item in CALENDARS if item.key == "watched_items")
+    coordinator = _coordinator({})
+    coordinator.last_update_success = False
+    entity = EbayListingCalendar(coordinator, Mock(entry_id="entry-1"), description)
+    assert entity.available is False
+
+
+def test_calendar_handles_naive_end_time_and_price_without_currency() -> None:
+    now = datetime.now(timezone.utc)
+    data = {
+        "watched": {
+            "w1": {
+                "item_id": "w1",
+                "title": "Naive",
+                "end_time": datetime(2026, 7, 18, 15, 0),
+                "current_price": 12.5,
+            }
+        },
+        "bidding": {
+            "b1": {
+                "item_id": "b1",
+                "title": "Bid",
+                "end_time": now + timedelta(hours=2),
+                "current_price": 9,
+                "winning": True,
+            }
+        },
+    }
+    watched = next(item for item in CALENDARS if item.key == "watched_items")
+    bidding = next(item for item in CALENDARS if item.key == "bidding_items")
+    # Force a window that includes the naive UTC-assumed end time.
+    watched_entity = EbayListingCalendar(
+        _coordinator(data), Mock(entry_id="entry-1"), watched
+    )
+    events = watched_entity._build_events(
+        start_date=datetime(2026, 7, 18, 14, 0, tzinfo=timezone.utc),
+        end_date=datetime(2026, 7, 18, 16, 0, tzinfo=timezone.utc),
+        include_past_in_window=True,
+    )
+    assert len(events) == 1
+    assert "Price: 12.5" in (events[0].description or "")
+
+    bidding_entity = EbayListingCalendar(
+        _coordinator(data), Mock(entry_id="entry-1"), bidding
+    )
+    bid_events = bidding_entity._build_events(
+        start_date=now, end_date=now + timedelta(days=1), include_past_in_window=True
+    )
+    assert "Winning: True" in (bid_events[0].description or "")
+
+
 @pytest.mark.usefixtures("enable_custom_integrations")
 async def test_calendar_platform_registers_entities(
     hass: HomeAssistant,

@@ -43,6 +43,9 @@ from .inactive_item_store import async_save_inactive_item_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
+# Updates are driven by the shared DataUpdateCoordinator.
+PARALLEL_UPDATES = 0
+
 ENUM_UNKNOWN = "UNKNOWN"
 
 SELLER_LEVEL_OPTIONS = [

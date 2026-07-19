@@ -11,6 +11,7 @@ from custom_components.ebay.binary_sensor import (
     async_setup_entry,
 )
 from custom_components.ebay.const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_FEEDBACK_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
@@ -207,3 +208,34 @@ def test_summary_count_handles_invalid_values() -> None:
     overdue = _entity_by_key(added[0], "orders_overdue")
     assert overdue.is_on is True
     assert overdue.extra_state_attributes is None
+
+
+def test_account_privilege_bool_binary_sensors() -> None:
+    coordinator = Mock()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_ACCOUNT_PRIVILEGES_ENABLED: True}
+    coordinator.data = {
+        "summary": {
+            "selling_registered": True,
+            "selling_near_limit": False,
+        },
+        "partial_failures": [],
+        "truncated_collections": {},
+    }
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    added: list = []
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
+    entities = added[0]
+    registered = _entity_by_key(entities, "selling_registered")
+    near_limit = _entity_by_key(entities, "selling_near_limit")
+    assert registered.is_on is True
+    assert near_limit.is_on is False
+
+    coordinator.data = {
+        "summary": {},
+        "partial_failures": [],
+        "truncated_collections": {},
+    }
+    assert registered.is_on is None
+    assert near_limit.is_on is None

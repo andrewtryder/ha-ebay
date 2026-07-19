@@ -20,6 +20,9 @@ from .const import (
 )
 from .coordinator import EbayDataUpdateCoordinator
 
+# Updates are driven by the shared DataUpdateCoordinator.
+PARALLEL_UPDATES = 0
+
 
 @dataclass(frozen=True, kw_only=True)
 class EbayEventEntityDescription(EventEntityDescription):

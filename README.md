@@ -102,6 +102,75 @@ dates) refresh daily. A manual refresh fetches every enabled section immediately
 The integration suppresses transition events during the initial startup/reload baseline and when
 API collections are incomplete or truncated.
 
+## Data updates
+
+The integration polls eBay over the cloud (no local discovery). Cadence by section:
+
+| Section | Cadence |
+|---------|---------|
+| Buying, selling, active orders | Configured poll interval (default 15 minutes) |
+| Messages | Twice the poll interval |
+| Feedback, analytics | Hourly |
+| Seller standards | Daily |
+
+Use **button.ebay_refresh** for a full refresh of every enabled section, or the
+section refresh buttons (Buying, Selling, Feedback, Seller operations, Analytics)
+to refresh only that subset. Manual refresh is rate-limited; presses during cooldown
+or while a refresh is already running raise an error in the UI.
+
+## Supported functions
+
+Read-only monitoring of one linked eBay account:
+
+- Watched items, bids, and selling listings (counts, calendars, optional per-item sensors)
+- Ending-soon timers and watched-price / threshold events
+- Optional seller operations: orders, fulfillment, disputes, standards, feedback, messages
+- Optional account privileges and finances (payout) summaries when enabled and scoped
+- Optional Sell Analytics traffic views when the marketplace and scopes support them
+- Manual refresh, inactive-item cleanup, diagnostics download, and Settings → Repairs issues
+
+Mutation APIs (bidding, listing edits, messaging, shipping actions) are not used.
+
+## Use cases
+
+- Notify when you are outbid or a watched item ends soon
+- Track active listings and overdue shipments for a small seller account
+- Surface seller-standards or feedback risk before an evaluation period closes
+- Build dashboards for watched inventory and recent selling activity
+
+Import-ready blueprints cover several of these flows; see
+**[docs/blueprints.md](docs/blueprints.md)**.
+
+## Examples
+
+1. **Outbid notification** — trigger on `event.ebay_bidding_activity` with event type
+   `outbid`, then send a mobile notification with the item title from the event data.
+2. **Ending soon** — use the watched ending-soon blueprint, or automate on
+   `event.ebay_watching_activity` / `item_ending_soon`.
+3. **Seller at risk** — enable seller standards, then use the seller-at-risk blueprint
+   or the related binary sensor / event when standards drop.
+
+## Known limitations
+
+- One eBay account per developer-app credential set
+- Read-only: no bids, purchases, listing changes, messages, or shipping actions
+- Marketplace capabilities differ (for example analytics/traffic report); unsupported
+  markets soft-fail without breaking the rest of the integration
+- Per-item sensors are capped; items outside the selection enter a grace period before
+  cleanup (or use the cleanup button to remove them immediately)
+- Recent activity on event entities is memory-only and resets on restart or reload
+- Optional features need matching OAuth scopes; enabling them triggers reauthorization
+
+## Removal
+
+1. Go to **Settings → Devices & services → eBay**.
+2. Open the integration entry → **Delete**.
+3. Optionally uninstall the integration in HACS and restart Home Assistant.
+
+Deleting the entry removes entities and stored tokens for that account. OAuth consent
+on eBay’s side is not automatically revoked; revoke the app in your eBay account
+settings if you want to withdraw authorization there as well.
+
 ## Read-only and Privacy
 
 The integration only reads eBay account data. It does not place bids, buy items, modify listings,
@@ -118,11 +187,15 @@ See **[PRIVACY.md](PRIVACY.md)** for the project privacy statement.
 - **Setup or callback problem:** follow the OAuth guide or use the manual authorization fallback.
 - **Production/Sandbox failure:** confirm the selected environment matches the credential keyset.
 - **Authentication failure:** reauthorize the integration (also shown under Settings → Repairs).
+- **Missing optional data (feedback, analytics, finances):** enable the feature in options and
+  complete reauthorization so the new scopes are granted.
+- **Refresh ignored / error on button press:** wait for the manual-refresh cooldown, or wait until
+  the in-flight refresh finishes, then try again.
 - **New entities or behavior missing after an update:** restart Home Assistant completely.
 - **Persistent problems:** check Settings → Repairs for actionable issues such as missing OAuth
   scopes, an invalid Site ID, repeated partial failures, or consistently truncated collections.
 - **Partial data:** enable the diagnostic entities and download integration diagnostics for
-  technical detail beyond Repairs.
+  technical detail beyond Repairs. Diagnostics may include a sanitized `last_api_failure`.
 
 Report reproducible problems through **[GitHub Issues](https://github.com/andrewtryder/ha-ebay/issues)**.
 Do not include client secrets, OAuth codes, access tokens, or refresh tokens.

@@ -14,7 +14,10 @@ from custom_components.ebay.const import (
     CONF_WATCHED_PRICE_DROP_THRESHOLD,
 )
 from custom_components.ebay.options_parse import (
+    parse_nonnegative_decimal,
     parse_price_targets,
+    pinned_ids,
+    to_decimal,
     validate_pinned_item_options,
     validate_price_options,
 )
@@ -104,3 +107,66 @@ def test_validate_pinned_item_options_rejects_malformed() -> None:
     assert errors[CONF_PINNED_ITEM_IDS] == "invalid_pinned_item_ids"
     errors = validate_pinned_item_options({CONF_PINNED_ITEM_IDS: "bad id!"})
     assert errors[CONF_PINNED_ITEM_IDS] == "invalid_pinned_item_ids"
+
+
+def test_parse_nonnegative_decimal_and_to_decimal() -> None:
+    assert parse_nonnegative_decimal(None) is None
+    assert parse_nonnegative_decimal("") is None
+    assert parse_nonnegative_decimal("  ") is None
+    assert parse_nonnegative_decimal("1.5") == Decimal("1.5")
+    with pytest.raises(ValueError, match="invalid"):
+        parse_nonnegative_decimal("nope")
+    with pytest.raises(ValueError, match="invalid"):
+        parse_nonnegative_decimal("-1")
+    assert to_decimal(None) is None
+    assert to_decimal("2.5") == Decimal("2.5")
+    assert to_decimal("not-a-number") is None
+
+
+def test_pinned_ids_and_blank_price_target_lines() -> None:
+    assert pinned_ids("1\n2, 3") == {"1", "2", "3"}
+    assert parse_price_targets("\n\n1=10 USD\n") == {"1": (Decimal("10"), "USD")}
+
+
+def test_parse_price_targets_rejects_malformed_parts() -> None:
+    with pytest.raises(ValueError, match="invalid_price_target"):
+        parse_price_targets("=10 USD")
+    with pytest.raises(ValueError, match="invalid_price_target"):
+        parse_price_targets("1=10")
+    with pytest.raises(ValueError, match="invalid_price_target"):
+        parse_price_targets("1=nope USD")
+
+
+def test_validate_price_options_more_error_paths() -> None:
+    data = {
+        CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: None,
+        CONF_WATCHED_PRICE_DROP_THRESHOLD: "",
+        CONF_WATCHED_PRICE_DROP_CURRENCY: "USD",
+        CONF_PINNED_ITEM_IDS: "",
+        CONF_PINNED_ITEM_PRICE_TARGETS: "",
+    }
+    errors = validate_price_options(data)
+    assert errors[CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT] == "invalid"
+    assert errors[CONF_WATCHED_PRICE_DROP_THRESHOLD] == "invalid"
+
+    data = {
+        CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: "nope",
+        CONF_WATCHED_PRICE_DROP_THRESHOLD: "nope",
+        CONF_WATCHED_PRICE_DROP_CURRENCY: "USD",
+        CONF_PINNED_ITEM_IDS: "1",
+        CONF_PINNED_ITEM_PRICE_TARGETS: "1=10",
+    }
+    errors = validate_price_options(data)
+    assert errors[CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT] == "invalid"
+    assert errors[CONF_WATCHED_PRICE_DROP_THRESHOLD] == "invalid"
+    assert errors[CONF_PINNED_ITEM_PRICE_TARGETS] == "invalid_price_target"
+
+    data = {
+        CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: 0,
+        CONF_WATCHED_PRICE_DROP_THRESHOLD: "",
+        CONF_WATCHED_PRICE_DROP_CURRENCY: "",
+        CONF_PINNED_ITEM_IDS: "1",
+        CONF_PINNED_ITEM_PRICE_TARGETS: "1=10 USD\n1=11 USD",
+    }
+    errors = validate_price_options(data)
+    assert errors[CONF_PINNED_ITEM_PRICE_TARGETS] == "duplicate_price_target"
