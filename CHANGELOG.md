@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.0](https://github.com/andrewtryder/ha-ebay/compare/v0.6.4...v0.7.0) (2026-07-19)
+
+
+### Features
+
+* persist ending-soon keys and ID-based feedback events ([#64](https://github.com/andrewtryder/ha-ebay/issues/64)) ([d3abc8a](https://github.com/andrewtryder/ha-ebay/commit/d3abc8afb9241e30b8cd2016df0791a328be1906))
+* structured API failures, REST status, and marketplace gates ([#60](https://github.com/andrewtryder/ha-ebay/issues/60)) ([5e934eb](https://github.com/andrewtryder/ha-ebay/commit/5e934eb658591305340730045661073521ba2251))
+* transactional reauth, entity grace, and seller UI polish ([#66](https://github.com/andrewtryder/ha-ebay/issues/66)) ([97bbcc4](https://github.com/andrewtryder/ha-ebay/commit/97bbcc473aa8f583cf668295744bfb1789ab29d1))
+
 ## [0.6.4](https://github.com/andrewtryder/ha-ebay/compare/v0.6.3...v0.6.4) (2026-07-18)
 
 
