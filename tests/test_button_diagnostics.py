@@ -14,7 +14,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.ebay.api import EbayApiError, EbayAuthError
-from custom_components.ebay.button import EbayRefreshButton, async_setup_entry
+from custom_components.ebay.button import (
+    EbayCleanupInactiveItemEntitiesButton,
+    EbayRefreshButton,
+    EbaySectionRefreshButton,
+    SECTION_REFRESH_BUTTONS,
+    async_setup_entry,
+)
 from custom_components.ebay.const import (
     DEFAULT_OPTIONS,
     MANUAL_REFRESH_COOLDOWN_SECONDS,
@@ -23,6 +29,11 @@ from custom_components.ebay.const import (
     REFRESH_RESULT_ERROR,
     REFRESH_RESULT_PARTIAL,
     REFRESH_RESULT_SUCCESS,
+    SECTION_BUYING,
+    SECTION_FULFILLMENT,
+    SECTION_SELLER_STANDARDS,
+    SECTION_ACCOUNT_PRIVILEGES,
+    SECTION_FINANCES,
 )
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 from custom_components.ebay.sensor import DIAGNOSTIC_SENSORS, EbayDiagnosticSensor
@@ -46,12 +57,12 @@ def _coordinator(api: Any | None = None) -> EbayDataUpdateCoordinator:
     coordinator.selected_item_keys = set()
     coordinator.inactive_item_sensors = {}
     coordinator._item_entity_cleanup = None
-    coordinator._fired_ending_soon_dirty = False
-    coordinator._ending_soon_fired_save_task = None
     coordinator._event_callbacks = {}
     coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._fired_ending_soon_dirty = False
+    coordinator._ending_soon_fired_save_task = None
     coordinator._price_drop_below_active = set()
     coordinator._recent_events = {
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
@@ -105,12 +116,104 @@ def test_button_setup_and_press_requests_refresh() -> None:
     asyncio.run(
         async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
     )
-    assert len(added[0]) == 1
-    button = added[0][0]
-    assert isinstance(button, EbayRefreshButton)
-    assert button.unique_id == "entry-1_refresh"
+    assert len(added[0]) == 2 + len(SECTION_REFRESH_BUTTONS)
+    refresh = next(
+        entity for entity in added[0] if isinstance(entity, EbayRefreshButton)
+    )
+    cleanup = next(
+        entity
+        for entity in added[0]
+        if isinstance(entity, EbayCleanupInactiveItemEntitiesButton)
+    )
+    section_buttons = [
+        entity for entity in added[0] if isinstance(entity, EbaySectionRefreshButton)
+    ]
+    assert refresh.unique_id == "entry-1_refresh"
+    assert cleanup.unique_id == "entry-1_cleanup_inactive_item_entities"
+    assert {button.unique_id for button in section_buttons} == {
+        f"entry-1_{description.key}" for description in SECTION_REFRESH_BUTTONS
+    }
+    asyncio.run(refresh.async_press())
+    coordinator.async_request_refresh.assert_awaited_once()
+    assert coordinator._force_full_refresh is True
+    assert coordinator._force_sections is None
+
+
+def test_section_refresh_button_forces_targeted_sections() -> None:
+    coordinator = _coordinator()
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    description = next(
+        button for button in SECTION_REFRESH_BUTTONS if button.key == "refresh_buying"
+    )
+    button = EbaySectionRefreshButton(coordinator, entry, description)
     asyncio.run(button.async_press())
     coordinator.async_request_refresh.assert_awaited_once()
+    assert coordinator._force_full_refresh is False
+    assert coordinator._force_sections == {SECTION_BUYING}
+
+
+def test_seller_operations_refresh_includes_ops_sections() -> None:
+    coordinator = _coordinator()
+    coordinator.options = {
+        **dict(DEFAULT_OPTIONS),
+        "fulfillment_enabled": True,
+        "seller_standards_enabled": True,
+        "account_privileges_enabled": True,
+        "finances_enabled": True,
+    }
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    description = next(
+        button
+        for button in SECTION_REFRESH_BUTTONS
+        if button.key == "refresh_seller_operations"
+    )
+    button = EbaySectionRefreshButton(coordinator, entry, description)
+    asyncio.run(button.async_press())
+    assert coordinator._force_sections == {
+        SECTION_FULFILLMENT,
+        SECTION_SELLER_STANDARDS,
+        SECTION_ACCOUNT_PRIVILEGES,
+        SECTION_FINANCES,
+    }
+
+
+def test_manual_section_refresh_passes_forced_sections_to_api() -> None:
+    now = datetime.now(timezone.utc)
+    previous = {
+        "selling": {},
+        "watched": {},
+        "bidding": {},
+        "summary": {},
+        "last_update": now,
+        "last_successful_update": now,
+        "partial_failures": [],
+        "truncated_collections": {},
+        "api_warnings": [],
+        "section_last_fetched": {
+            "buying": now,
+            "selling": now,
+        },
+        "section_last_success": {
+            "buying": now,
+            "selling": now,
+        },
+    }
+    payload = {
+        **previous,
+        "refreshed_sections": ["buying"],
+    }
+    api = Mock()
+    api.async_fetch_data = AsyncMock(return_value=payload)
+    coordinator = _coordinator(api)
+    coordinator.data = previous
+    coordinator._force_sections = {SECTION_BUYING}
+    coordinator._force_full_refresh = False
+
+    asyncio.run(coordinator._async_update_data())
+
+    kwargs = api.async_fetch_data.await_args.kwargs
+    assert set(kwargs["sections"]) == {SECTION_BUYING}
+    assert coordinator._force_sections is None
 
 
 def test_rapid_repeated_presses_are_rate_limited(
@@ -286,6 +389,10 @@ def test_diagnostic_and_button_available_after_failed_refresh() -> None:
 
     button = EbayRefreshButton(coordinator, Mock(entry_id="entry-1"))
     assert button.available is True
+    cleanup = EbayCleanupInactiveItemEntitiesButton(
+        coordinator, Mock(entry_id="entry-1")
+    )
+    assert cleanup.available is True
 
     coordinator.last_attempt_at = None
     coordinator.data = None
@@ -295,3 +402,9 @@ def test_diagnostic_and_button_available_after_failed_refresh() -> None:
         )
         assert entity.available is False
     assert EbayRefreshButton(coordinator, Mock(entry_id="entry-1")).available is False
+    assert (
+        EbayCleanupInactiveItemEntitiesButton(
+            coordinator, Mock(entry_id="entry-1")
+        ).available
+        is False
+    )

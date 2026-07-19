@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
@@ -24,17 +24,22 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import API_WARNINGS_STATE_ATTR_MAX, SOLD_UNSOLD_DURATION_DAYS
 from .const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
+    CONF_ITEM_ENTITY_GRACE_DAYS,
     CONF_MESSAGES_ENABLED,
     CONF_SELLING_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    DEFAULT_ITEM_ENTITY_GRACE_DAYS,
     DEFAULT_OPTIONS,
     DOMAIN,
     REFRESH_RESULT_UNKNOWN,
 )
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
+from .inactive_item_store import async_save_inactive_item_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -344,6 +349,53 @@ SUMMARY_SENSORS = [
         entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
+        key="listing_amount_remaining",
+        translation_key="listing_amount_remaining",
+        value_key="listing_amount_remaining",
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="listing_quantity_remaining",
+        translation_key="listing_quantity_remaining",
+        value_key="listing_quantity_remaining",
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="available_funds",
+        translation_key="available_funds",
+        value_key="available_funds",
+        feature=CONF_FINANCES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="pending_funds",
+        translation_key="pending_funds",
+        value_key="pending_funds",
+        feature=CONF_FINANCES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="last_payout_amount",
+        translation_key="last_payout_amount",
+        value_key="last_payout_amount",
+        feature=CONF_FINANCES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="last_payout_status",
+        translation_key="last_payout_status",
+        value_key="last_payout_status",
+        feature=CONF_FINANCES_ENABLED,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
         key="refresh_context",
         translation_key="refresh_context",
         value_key="last_successful_update",
@@ -495,6 +547,7 @@ ITEM_SENSOR_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
         ("offers", "offers", None),
         ("questions", "questions", None),
         ("seconds_left", "seconds_left", UnitOfTime.SECONDS),
+        ("end_time", "end_time", None),
         ("quantity_available", "quantity_available", None),
         ("quantity_sold", "quantity_sold", None),
     ],
@@ -502,13 +555,17 @@ ITEM_SENSOR_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
         ("price", "current_price", None),
         ("bids", "bid_count", None),
         ("seconds_left", "seconds_left", UnitOfTime.SECONDS),
+        ("end_time", "end_time", None),
     ],
     "bidding": [
         ("current_price", "current_price", None),
         ("max_bid", "max_bid", None),
         ("seconds_left", "seconds_left", UnitOfTime.SECONDS),
+        ("end_time", "end_time", None),
     ],
 }
+
+_MONETARY_ITEM_FIELDS = frozenset({"current_price", "max_bid"})
 
 
 async def async_setup_entry(
@@ -521,6 +578,21 @@ async def async_setup_entry(
     known_item_ids: set[str] = set()
     registry = _entity_registry(hass)
     platform = _current_entity_platform()
+
+    def _grace_period() -> timedelta:
+        raw = coordinator.options.get(
+            CONF_ITEM_ENTITY_GRACE_DAYS, DEFAULT_ITEM_ENTITY_GRACE_DAYS
+        )
+        try:
+            days = int(raw)
+        except (TypeError, ValueError):
+            days = DEFAULT_ITEM_ENTITY_GRACE_DAYS
+        return timedelta(days=max(days, 0))
+
+    async def _async_persist_inactive() -> None:
+        await async_save_inactive_item_sensors(
+            hass, entry.entry_id, coordinator.inactive_item_sensors
+        )
 
     async def _async_remove_item_sensor(unique_id: str) -> bool:
         if registry is None:
@@ -536,20 +608,43 @@ async def async_setup_entry(
                 pass
         return True
 
-    async def _async_remove_stale_item_sensors(selected_ids: set[str]) -> int:
-        stale_ids = (
-            known_item_ids
-            | (
-                _registered_item_sensor_unique_ids(registry, entry.entry_id)
-                if registry is not None
-                else set()
-            )
-        ) - selected_ids
+    async def _async_remove_stale_item_sensors(
+        selected_ids: set[str], *, force: bool = False
+    ) -> int:
+        """Remove inactive item sensors past grace, or all inactive when force."""
+        now = datetime.now(timezone.utc)
+        grace = _grace_period()
+        registered = (
+            _registered_item_sensor_unique_ids(registry, entry.entry_id)
+            if registry is not None
+            else set()
+        )
+        candidate_ids = (known_item_ids | registered) - selected_ids
+        inactive = coordinator.inactive_item_sensors
+        changed = False
+
+        for unique_id in list(inactive):
+            if unique_id in selected_ids:
+                inactive.pop(unique_id, None)
+                changed = True
+
         removed_count = 0
-        for unique_id in stale_ids:
+        for unique_id in candidate_ids:
+            if unique_id not in inactive:
+                inactive[unique_id] = now
+                changed = True
+            inactive_since = inactive[unique_id]
+            if not force and now - inactive_since < grace:
+                continue
             if await _async_remove_item_sensor(unique_id):
                 removed_count += 1
             known_item_ids.discard(unique_id)
+            if unique_id in inactive:
+                inactive.pop(unique_id, None)
+                changed = True
+
+        if changed:
+            await _async_persist_inactive()
         return removed_count
 
     def _new_item_sensors(selected: set[SelectedItemKey]) -> list[EbayItemSensor]:
@@ -567,10 +662,35 @@ async def async_setup_entry(
                 )
         return sensors
 
+    def _retained_inactive_item_sensors(selected_ids: set[str]) -> list[EbayItemSensor]:
+        """Re-create inactive registry sensors still within the grace period."""
+        if registry is None:
+            return []
+        now = datetime.now(timezone.utc)
+        grace = _grace_period()
+        sensors: list[EbayItemSensor] = []
+        for unique_id, inactive_since in list(
+            coordinator.inactive_item_sensors.items()
+        ):
+            if unique_id in selected_ids or unique_id in known_item_ids:
+                continue
+            if now - inactive_since >= grace:
+                continue
+            if registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None:
+                continue
+            parsed = _parse_item_sensor_unique_id(entry.entry_id, unique_id)
+            if parsed is None:
+                continue
+            kind, item_id, suffix, field, unit = parsed
+            known_item_ids.add(unique_id)
+            sensors.append(
+                EbayItemSensor(coordinator, entry, kind, item_id, suffix, field, unit)
+            )
+        return sensors
+
     selected = coordinator.refresh_selected_item_keys()
-    initial_removed = await _async_remove_stale_item_sensors(
-        _item_sensor_unique_ids(entry.entry_id, selected)
-    )
+    selected_ids = _item_sensor_unique_ids(entry.entry_id, selected)
+    initial_removed = await _async_remove_stale_item_sensors(selected_ids)
     entities: list[SensorEntity] = [
         EbaySummarySensor(coordinator, entry, description)
         for description in summary_sensors_for_options(coordinator.options)
@@ -580,39 +700,58 @@ async def async_setup_entry(
         for description in DIAGNOSTIC_SENSORS
     )
     initial_item_sensors = _new_item_sensors(selected)
+    retained_item_sensors = _retained_inactive_item_sensors(selected_ids)
     entities.extend(initial_item_sensors)
+    entities.extend(retained_item_sensors)
     _LOGGER.debug(
-        "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s removed_count=%s known_count=%s",
+        "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s "
+        "retained_count=%s removed_count=%s known_count=%s inactive_count=%s",
         entry.entry_id,
         len(selected),
         len(initial_item_sensors),
+        len(retained_item_sensors),
         initial_removed,
         len(known_item_ids),
+        len(coordinator.inactive_item_sensors),
     )
     async_add_entities(entities)
 
-    async def _async_reconcile_item_sensors() -> None:
+    async def _async_reconcile_item_sensors(*, force: bool = False) -> int:
         selected = coordinator.refresh_selected_item_keys()
+        selected_ids = _item_sensor_unique_ids(entry.entry_id, selected)
         removed_count = await _async_remove_stale_item_sensors(
-            _item_sensor_unique_ids(entry.entry_id, selected)
+            selected_ids, force=force
         )
         new_sensors = _new_item_sensors(selected)
+        retained_sensors = (
+            [] if force else _retained_inactive_item_sensors(selected_ids)
+        )
         _LOGGER.debug(
-            "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s removed_count=%s known_count=%s",
+            "Reconciled eBay item sensors entry_id=%s selected_count=%s added_count=%s "
+            "retained_count=%s removed_count=%s known_count=%s inactive_count=%s force=%s",
             entry.entry_id,
             len(selected),
             len(new_sensors),
+            len(retained_sensors),
             removed_count,
             len(known_item_ids),
+            len(coordinator.inactive_item_sensors),
+            force,
         )
-        if new_sensors:
-            async_add_entities(new_sensors)
+        to_add = new_sensors + retained_sensors
+        if to_add:
+            async_add_entities(to_add)
+        return removed_count
 
     @callback
     def _handle_coordinator_update() -> None:
         hass.async_create_task(_async_reconcile_item_sensors())
 
+    coordinator.register_item_entity_cleanup(
+        lambda *, force=False: _async_reconcile_item_sensors(force=force)
+    )
     entry.async_on_unload(coordinator.async_add_listener(_handle_coordinator_update))
+    entry.async_on_unload(lambda: coordinator.register_item_entity_cleanup(None))
 
 
 def _current_entity_platform() -> entity_platform.EntityPlatform | None:
@@ -660,21 +799,28 @@ def _registered_item_sensor_unique_ids(
 
 def _is_item_sensor_unique_id(entry_id: str, unique_id: str) -> bool:
     """Return whether a unique ID belongs to a generated per-item sensor."""
+    return _parse_item_sensor_unique_id(entry_id, unique_id) is not None
+
+
+def _parse_item_sensor_unique_id(
+    entry_id: str, unique_id: str
+) -> tuple[str, str, str, str, str | None] | None:
+    """Parse kind/item_id/suffix/field/unit from a per-item sensor unique ID."""
     if unique_id.removeprefix(f"{entry_id}_") in _FIXED_SENSOR_KEYS:
-        return False
+        return None
     for kind, fields in ITEM_SENSOR_FIELDS.items():
         prefix = f"{entry_id}_{kind}_"
         if not unique_id.startswith(prefix):
             continue
         remainder = unique_id[len(prefix) :]
-        for suffix, _, _ in fields:
+        for suffix, field, unit in fields:
             ending = f"_{suffix}"
             if remainder.endswith(ending):
                 item_id = remainder[: -len(ending)]
                 if item_id:
-                    return True
-        return False
-    return False
+                    return (kind, item_id, suffix, field, unit)
+        return None
+    return None
 
 
 class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
@@ -811,7 +957,7 @@ class EbayDiagnosticSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorE
 class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity):
     """Optional capped per-item sensor."""
 
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -826,10 +972,10 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         super().__init__(coordinator)
         self.kind = kind
         self.item_id = item_id
+        self.suffix = suffix
         self.field = field
-        self._attr_name = f"eBay {kind} {item_id} {suffix}"
+        self._static_unit = unit
         self._attr_unique_id = f"{entry.entry_id}_{kind}_{item_id}_{suffix}"
-        self._attr_native_unit_of_measurement = unit
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
@@ -846,6 +992,40 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         return (self.kind, self.item_id) in self.coordinator.selected_item_keys
 
     @property
+    def _is_monetary(self) -> bool:
+        return self.field in _MONETARY_ITEM_FIELDS
+
+    @property
+    def name(self) -> str:
+        """Return listing title plus field label for the entity name."""
+        item = self._item
+        title = item.get("title") if item else None
+        if not title:
+            title = f"Item {self.item_id}"
+        label = self.suffix.replace("_", " ").title()
+        return f"{title} {label}"
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        """Return TIMESTAMP or MONETARY when the field warrants it."""
+        if self.field == "end_time":
+            return SensorDeviceClass.TIMESTAMP
+        if self._is_monetary:
+            return SensorDeviceClass.MONETARY
+        return None
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return currency for monetary sensors when available."""
+        if self._is_monetary:
+            item = self._item
+            if item is None:
+                return None
+            currency = item.get("currency")
+            return str(currency) if currency else None
+        return self._static_unit
+
+    @property
     def available(self) -> bool:
         """Return whether item is currently inside the capped selection."""
         return super().available and self._item is not None
@@ -856,18 +1036,28 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         item = self._item
         if item is None:
             return None
-        return item.get(self.field)
+        value = item.get(self.field)
+        if self.field == "end_time":
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value)
+                except ValueError:
+                    return None
+            return None
+        return value
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return item context attributes."""
         item = self._item
         if item is None:
-            return {}
+            return {"item_id": self.item_id}
         end_time = item.get("end_time")
         return {
             "title": item.get("title"),
-            "item_id": item.get("item_id"),
+            "item_id": item.get("item_id") or self.item_id,
             "url": item.get("url"),
             "image": item.get("image"),
             "currency": item.get("currency"),

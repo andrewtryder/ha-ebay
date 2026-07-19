@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
+
+from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.ebay import sensor as sensor_module
 from custom_components.ebay.const import (
@@ -42,6 +44,8 @@ class _SelectionCoordinator:
         self.last_update_success = True
         self.ending_soon_threshold_seconds = 3600
         self.selected_item_keys: set[tuple[str, str]] = set()
+        self.inactive_item_sensors: dict[str, datetime] = {}
+        self._item_entity_cleanup: Callable[..., Any] | None = None
         self.refresh_selected_item_keys()
 
     def refresh_selected_item_keys(
@@ -61,6 +65,14 @@ class _SelectionCoordinator:
         )
         self.selected_item_keys = set(selected)
         return self.selected_item_keys
+
+    def register_item_entity_cleanup(self, cleanup: Callable[..., Any] | None) -> None:
+        self._item_entity_cleanup = cleanup
+
+    async def async_cleanup_inactive_item_entities(self, *, force: bool = True) -> int:
+        if self._item_entity_cleanup is None:
+            return 0
+        return await self._item_entity_cleanup(force=force)
 
     def async_add_listener(
         self, update_callback: Callable[[], None], context: Any | None = None
@@ -99,7 +111,7 @@ def test_item_sensors_are_added_after_late_coordinator_data() -> None:
 
     assert [len(batch) for batch in added] == [_FIXED_SENSORS]
     assert listener is not None
-    assert len(unloads) == 1
+    assert len(unloads) == 2
 
     coordinator.data = {
         "summary": {},
@@ -167,10 +179,71 @@ def test_item_sensor_availability_follows_current_cap_selection() -> None:
     assert sensor.native_value is None
 
 
-def test_setup_removes_stale_registered_item_sensors(
+def test_item_sensor_uses_title_name_monetary_and_end_time() -> None:
+    """Per-item sensors expose title names, monetary units, and end_time timestamps."""
+    end_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    coordinator = _SelectionCoordinator(
+        options={
+            **DEFAULT_OPTIONS,
+            "entity_mode": ENTITY_MODE_DETAILED,
+            "per_item_cap": 5,
+        },
+        data={
+            "summary": {},
+            "selling": {},
+            "watched": {
+                "001": {
+                    "item_id": "001",
+                    "title": "Vintage Camera",
+                    "current_price": 42.5,
+                    "currency": "USD",
+                    "end_time": end_time,
+                    "seconds_left": 3600,
+                },
+            },
+            "bidding": {},
+            "last_successful_update": datetime.now(timezone.utc),
+        },
+    )
+    entry = Mock(entry_id="entry-1")
+    price = EbayItemSensor(
+        coordinator, entry, "watched", "001", "price", "current_price", None
+    )
+    ending = EbayItemSensor(
+        coordinator, entry, "watched", "001", "end_time", "end_time", None
+    )
+    seconds = EbayItemSensor(
+        coordinator,
+        entry,
+        "watched",
+        "001",
+        "seconds_left",
+        "seconds_left",
+        "s",
+    )
+
+    assert price.name == "Vintage Camera Price"
+    assert price.has_entity_name is True
+    assert price.device_class == SensorDeviceClass.MONETARY
+    assert price.native_unit_of_measurement == "USD"
+    assert price.extra_state_attributes["item_id"] == "001"
+
+    assert ending.name == "Vintage Camera End Time"
+    assert ending.device_class == SensorDeviceClass.TIMESTAMP
+    assert ending.native_value == end_time
+    assert ending.native_unit_of_measurement is None
+
+    assert seconds.device_class is None
+    assert seconds.native_unit_of_measurement == "s"
+    assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["watched"]
+    assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["selling"]
+    assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["bidding"]
+
+
+def test_setup_retains_stale_registered_item_sensors_during_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Per-item registry entries outside the current selection should be removed."""
+    """Per-item registry entries outside selection stay during the grace period."""
 
     class RegistryEntries:
         def get_entries_for_config_entry_id(self, config_entry_id: str) -> list[Any]:
@@ -189,6 +262,11 @@ def test_setup_removes_stale_registered_item_sensors(
     monkeypatch.setattr(sensor_module, "_entity_registry", lambda hass: registry)
     monkeypatch.setattr(
         sensor_module, "_current_entity_platform", lambda: Mock(entities={})
+    )
+    monkeypatch.setattr(
+        sensor_module,
+        "async_save_inactive_item_sensors",
+        AsyncMock(),
     )
     entry = Mock(
         entry_id="entry-1",
@@ -215,10 +293,73 @@ def test_setup_removes_stale_registered_item_sensors(
         async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
     )
 
+    assert removed == []
+    item_ids = {
+        sensor.item_id for sensor in added[0] if isinstance(sensor, EbayItemSensor)
+    }
+    assert item_ids == {"001", "999"}
+    assert "entry-1_watched_999_price" in entry.runtime_data.inactive_item_sensors
+
+
+def test_setup_removes_stale_registered_item_sensors_past_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-item registry entries inactive longer than grace are removed on setup."""
+
+    class RegistryEntries:
+        def get_entries_for_config_entry_id(self, config_entry_id: str) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    domain="sensor",
+                    platform="ebay",
+                    unique_id=f"{config_entry_id}_watched_999_price",
+                )
+            ]
+
+    removed: list[str] = []
+    registry = Mock(entities=RegistryEntries())
+    registry.async_get_entity_id.return_value = "sensor.ebay_watched_999_price"
+    registry.async_remove.side_effect = removed.append
+    monkeypatch.setattr(sensor_module, "_entity_registry", lambda hass: registry)
+    monkeypatch.setattr(
+        sensor_module, "_current_entity_platform", lambda: Mock(entities={})
+    )
+    monkeypatch.setattr(
+        sensor_module,
+        "async_save_inactive_item_sensors",
+        AsyncMock(),
+    )
+    coordinator = _SelectionCoordinator(
+        options={
+            **DEFAULT_OPTIONS,
+            "entity_mode": ENTITY_MODE_DETAILED,
+            "per_item_cap": 1,
+        },
+        data={
+            "summary": {},
+            "selling": {},
+            "watched": {
+                "001": {"item_id": "001", "current_price": 10},
+            },
+            "bidding": {},
+            "last_successful_update": datetime.now(timezone.utc),
+        },
+    )
+    coordinator.inactive_item_sensors["entry-1_watched_999_price"] = datetime.now(
+        timezone.utc
+    ) - timedelta(days=8)
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    added: list[list[Any]] = []
+
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
+
     assert removed == ["sensor.ebay_watched_999_price"]
     assert {
         sensor.item_id for sensor in added[0] if isinstance(sensor, EbayItemSensor)
     } == {"001"}
+    assert "entry-1_watched_999_price" not in coordinator.inactive_item_sensors
 
 
 def test_selection_priorities_and_modes() -> None:
