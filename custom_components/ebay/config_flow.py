@@ -26,6 +26,7 @@ from .api import (
 )
 from .const import (
     ALLOWED_PER_ITEM_CAPS,
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_CLIENT_ID,
@@ -34,9 +35,11 @@ from .const import (
     CONF_ENTITY_MODE,
     CONF_ENVIRONMENT,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_OAUTH_SCOPES,
+    CONF_PENDING_OPTIONS,
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
@@ -56,7 +59,7 @@ from .const import (
     OAUTH_MODE_CALLBACK,
     OAUTH_MODE_MANUAL,
 )
-from .options_parse import validate_price_options
+from .options_parse import validate_pinned_item_options, validate_price_options
 from .oauth2 import (
     DEVELOPER_CONSOLE_URL,
     OAUTH_SETUP_GUIDE_URL,
@@ -175,14 +178,46 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             CONF_OAUTH_SCOPES: resolve_granted_scopes(self._requested_scopes, token),
         }
         if self.source == config_entries.SOURCE_REAUTH:
-            return self.async_update_reload_and_abort(
-                self._get_reauth_entry(), data=entry_data
-            )
+            return self._finish_reauth(entry_data)
         return self.async_create_entry(
             title="eBay",
             data=entry_data,
             options=DEFAULT_OPTIONS,
         )
+
+    def async_remove(self) -> None:
+        """Discard pending options when reauth is cancelled or fails."""
+        if self.source != config_entries.SOURCE_REAUTH:
+            return
+        try:
+            entry = self._get_reauth_entry()
+        except config_entries.UnknownEntry:
+            return
+        if CONF_PENDING_OPTIONS not in entry.data:
+            return
+        data = {
+            key: value
+            for key, value in entry.data.items()
+            if key != CONF_PENDING_OPTIONS
+        }
+        self.hass.config_entries.async_update_entry(entry, data=data)
+
+    def _finish_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Update the reauth entry, committing pending options when present."""
+        entry = self._get_reauth_entry()
+        pending = entry.data.get(CONF_PENDING_OPTIONS)
+        cleaned = {
+            key: value
+            for key, value in entry_data.items()
+            if key != CONF_PENDING_OPTIONS
+        }
+        if isinstance(pending, dict):
+            return self.async_update_reload_and_abort(
+                entry, data=cleaned, options=dict(pending)
+            )
+        return self.async_update_reload_and_abort(entry, data=cleaned)
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
@@ -240,9 +275,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     ),
                 }
                 if self.source == config_entries.SOURCE_REAUTH:
-                    return self.async_update_reload_and_abort(
-                        self._get_reauth_entry(), data=entry_data
-                    )
+                    return self._finish_reauth(entry_data)
                 return self.async_create_entry(
                     title="eBay",
                     data=entry_data,
@@ -312,7 +345,11 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         if self.source != config_entries.SOURCE_REAUTH:
             return CORE_SCOPE
         entry = self._get_reauth_entry()
-        options = {**DEFAULT_OPTIONS, **dict(getattr(entry, "options", {}) or {})}
+        pending = entry.data.get(CONF_PENDING_OPTIONS)
+        if isinstance(pending, dict):
+            options = {**DEFAULT_OPTIONS, **pending}
+        else:
+            options = {**DEFAULT_OPTIONS, **dict(getattr(entry, "options", {}) or {})}
         return scopes_for_options(options)
 
     @staticmethod
@@ -435,6 +472,8 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                     CONF_SELLER_STANDARDS_ENABLED,
                     CONF_FEEDBACK_ENABLED,
                     CONF_MESSAGES_ENABLED,
+                    CONF_ACCOUNT_PRIVILEGES_ENABLED,
+                    CONF_FINANCES_ENABLED,
                 ),
             },
         )
@@ -444,12 +483,20 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         """Edit per-item entity selection options."""
         draft = self._ensure_draft()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            draft.update(user_input)
-            return await self.async_step_init()
+            candidate = {**draft, **user_input}
+            errors = validate_pinned_item_options(candidate)
+            if not errors:
+                draft.update(user_input)
+                return await self.async_step_init()
+            draft_for_form = candidate
+        else:
+            draft_for_form = draft
         return self.async_show_form(
             step_id="entities",
-            data_schema=_schema_entities(draft),
+            data_schema=_schema_entities(draft_for_form),
+            errors=errors,
         )
 
     async def async_step_diagnostics(
@@ -470,6 +517,7 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         """Validate the draft and persist options."""
         draft = self._ensure_draft()
         errors = validate_price_options(draft)
+        errors.update(validate_pinned_item_options(draft))
         if errors:
             return self.async_show_form(
                 step_id="save",
@@ -482,6 +530,8 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                         CONF_SELLER_STANDARDS_ENABLED,
                         CONF_FEEDBACK_ENABLED,
                         CONF_MESSAGES_ENABLED,
+                        CONF_ACCOUNT_PRIVILEGES_ENABLED,
+                        CONF_FINANCES_ENABLED,
                     ),
                 },
             )
@@ -489,9 +539,10 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         if not draft.get(CONF_SELLING_ENABLED):
             draft[CONF_ANALYTICS_ENABLED] = False
 
-        result = self.async_create_entry(title="", data=dict(draft))
         granted = self._config_entry.data.get(CONF_OAUTH_SCOPES)
         if missing_scopes_for_options(granted, draft):
+            # Keep live options unchanged until reauth grants the new scopes.
+            self._store_pending_options(dict(draft))
             self.hass.async_create_task(
                 self.hass.config_entries.flow.async_init(
                     DOMAIN,
@@ -502,7 +553,29 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                     data=self._config_entry.data,
                 )
             )
-        return result
+            return self.async_create_entry(
+                title="", data=dict(self._config_entry.options)
+            )
+
+        self._clear_pending_options()
+        return self.async_create_entry(title="", data=dict(draft))
+
+    def _store_pending_options(self, draft: dict[str, Any]) -> None:
+        """Persist draft options until reauth succeeds."""
+        data = dict(self._config_entry.data)
+        data[CONF_PENDING_OPTIONS] = draft
+        self.hass.config_entries.async_update_entry(self._config_entry, data=data)
+
+    def _clear_pending_options(self) -> None:
+        """Drop any leftover pending options from entry data."""
+        if CONF_PENDING_OPTIONS not in self._config_entry.data:
+            return
+        data = {
+            key: value
+            for key, value in self._config_entry.data.items()
+            if key != CONF_PENDING_OPTIONS
+        }
+        self.hass.config_entries.async_update_entry(self._config_entry, data=data)
 
 
 def _schema_general(options: dict[str, Any]) -> vol.Schema:
@@ -578,6 +651,13 @@ def _schema_seller_operations(options: dict[str, Any]) -> vol.Schema:
             ): bool,
             vol.Required(
                 CONF_MESSAGES_ENABLED, default=options[CONF_MESSAGES_ENABLED]
+            ): bool,
+            vol.Required(
+                CONF_ACCOUNT_PRIVILEGES_ENABLED,
+                default=options[CONF_ACCOUNT_PRIVILEGES_ENABLED],
+            ): bool,
+            vol.Required(
+                CONF_FINANCES_ENABLED, default=options[CONF_FINANCES_ENABLED]
             ): bool,
         }
     )

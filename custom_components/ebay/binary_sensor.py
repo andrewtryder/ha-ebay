@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_FEEDBACK_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
@@ -62,6 +63,17 @@ def _seller_standard_at_risk_on(
             "standards"
         ) or {}
         value = standards.get("at_risk")
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _summary_bool_on(
+    coordinator: EbayDataUpdateCoordinator, value_key: str
+) -> bool | None:
+    """Return a summary boolean when present."""
+    summary = (coordinator.data or {}).get("summary") or {}
+    value = summary.get(value_key)
     if value is None:
         return None
     return bool(value)
@@ -153,6 +165,24 @@ BINARY_SENSORS: tuple[EbayBinarySensorDescription, ...] = (
         entity_registry_enabled_default=False,
         is_on_fn=lambda coordinator: _summary_count_on(
             coordinator, "recent_negative_feedback"
+        ),
+    ),
+    EbayBinarySensorDescription(
+        key="selling_registered",
+        translation_key="selling_registered",
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        entity_registry_enabled_default=False,
+        is_on_fn=lambda coordinator: _summary_bool_on(
+            coordinator, "selling_registered"
+        ),
+    ),
+    EbayBinarySensorDescription(
+        key="selling_near_limit",
+        translation_key="selling_near_limit",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        is_on_fn=lambda coordinator: _summary_bool_on(
+            coordinator, "selling_near_limit"
         ),
     ),
     EbayBinarySensorDescription(

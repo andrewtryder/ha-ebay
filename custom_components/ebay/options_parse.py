@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -13,12 +14,29 @@ from .const import (
     CONF_WATCHED_PRICE_DROP_THRESHOLD,
 )
 
+# eBay item IDs are typically numeric; allow common safe ID characters.
+_PINNED_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def pinned_ids(value: str) -> set[str]:
     """Parse comma- or newline-separated pinned item IDs."""
     return {
         part.strip() for part in value.replace("\n", ",").split(",") if part.strip()
     }
+
+
+def validate_pinned_item_ids(value: str) -> None:
+    """Validate pinned item ID tokens.
+
+    Raises ValueError with key ``invalid_pinned_item_ids`` when any non-empty
+    token is malformed (for example price-target syntax or punctuation).
+    """
+    for part in str(value or "").replace("\n", ",").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "=" in token or not _PINNED_ITEM_ID_RE.fullmatch(token):
+            raise ValueError("invalid_pinned_item_ids")
 
 
 def parse_nonnegative_decimal(value: Any) -> Decimal | None:
@@ -68,6 +86,16 @@ def parse_price_targets(value: str) -> dict[str, tuple[Decimal, str]]:
             raise ValueError("duplicate_price_target")
         targets[item_id] = (amount, currency)
     return targets
+
+
+def validate_pinned_item_options(user_input: dict[str, Any]) -> dict[str, str]:
+    """Return field errors for pinned item ID formatting."""
+    errors: dict[str, str] = {}
+    try:
+        validate_pinned_item_ids(str(user_input.get(CONF_PINNED_ITEM_IDS, "") or ""))
+    except ValueError as exc:
+        errors[CONF_PINNED_ITEM_IDS] = str(exc)
+    return errors
 
 
 def validate_price_options(user_input: dict[str, Any]) -> dict[str, str]:

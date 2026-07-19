@@ -15,6 +15,7 @@ from custom_components.ebay.const import (
 )
 from custom_components.ebay.options_parse import (
     parse_price_targets,
+    validate_pinned_item_options,
     validate_price_options,
 )
 
@@ -85,3 +86,21 @@ def test_validate_price_options_rejects_negative_percent() -> None:
     }
     errors = validate_price_options(data)
     assert errors[CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT] == "invalid"
+
+
+def test_validate_pinned_item_options_accepts_valid() -> None:
+    assert (
+        validate_pinned_item_options(
+            {CONF_PINNED_ITEM_IDS: "123456789012\n987654321098, abc-1_2"}
+        )
+        == {}
+    )
+
+
+def test_validate_pinned_item_options_rejects_malformed() -> None:
+    errors = validate_pinned_item_options(
+        {CONF_PINNED_ITEM_IDS: "123456789012=25.00 USD"}
+    )
+    assert errors[CONF_PINNED_ITEM_IDS] == "invalid_pinned_item_ids"
+    errors = validate_pinned_item_options({CONF_PINNED_ITEM_IDS: "bad id!"})
+    assert errors[CONF_PINNED_ITEM_IDS] == "invalid_pinned_item_ids"

@@ -1026,37 +1026,47 @@ def test_options_flow_disables_analytics_when_selling_off() -> None:
 
 
 def test_options_flow_starts_reauth_when_scopes_missing() -> None:
-    """Enabling a module without granted scopes starts reauthorization."""
+    """Enabling a module without granted scopes stores pending options and reauths."""
     from custom_components.ebay.config_flow import EbayOptionsFlow
-    from custom_components.ebay.const import CONF_OAUTH_SCOPES
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES, CONF_PENDING_OPTIONS
 
     entry = type(
         "Entry",
         (),
         {
             "entry_id": "entry-1",
-            "options": {},
+            "options": {"feedback_enabled": False},
             "data": {CONF_OAUTH_SCOPES: CORE_SCOPE},
         },
     )()
     flow = EbayOptionsFlow(entry)
     hass = _Hass()
     started: list[Any] = []
+    updates: list[dict[str, Any]] = []
 
     def _create_task(coro: Any) -> None:
         started.append(coro)
         coro.close()
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> bool:
+        updates.append(kwargs)
+        if "data" in kwargs:
+            target.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            target.options = dict(kwargs["options"])
+        return True
 
     hass.async_create_task = _create_task  # type: ignore[method-assign]
     hass.config_entries = type(
         "ConfigEntries",
         (),
         {
+            "async_update_entry": staticmethod(_async_update_entry),
             "flow": type(
                 "Flow",
                 (),
                 {"async_init": staticmethod(lambda *args, **kwargs: asyncio.sleep(0))},
-            )()
+            )(),
         },
     )()
     flow.hass = hass
@@ -1075,8 +1085,127 @@ def test_options_flow_starts_reauth_when_scopes_missing() -> None:
     result = asyncio.run(flow.async_step_save())
 
     assert result["type"] == "create_entry"
-    assert result["data"]["feedback_enabled"] is True
+    assert result["data"]["feedback_enabled"] is False
+    assert entry.options["feedback_enabled"] is False
+    assert entry.data[CONF_PENDING_OPTIONS]["feedback_enabled"] is True
     assert len(started) == 1
+    assert len(updates) == 1
+
+
+def test_reauth_success_commits_pending_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful reauth commits pending options and clears the pending draft."""
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES, CONF_PENDING_OPTIONS
+
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    pending = {
+        "feedback_enabled": True,
+        "fulfillment_enabled": False,
+        "poll_interval": 45,
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": {
+                **_flow_data(),
+                CONF_OAUTH_SCOPES: CORE_SCOPE,
+                CONF_PENDING_OPTIONS: pending,
+            },
+            "options": {"feedback_enabled": False},
+            "title": "eBay",
+        },
+    )()
+    flow._data = _flow_data(client_secret="new-secret")
+    flow._requested_scopes = CORE_SCOPE
+    updated: dict[str, Any] = {}
+
+    def _update(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        updated["entry"] = entry_arg
+        updated["data"] = kwargs["data"]
+        updated["options"] = kwargs.get("options")
+        if "data" in kwargs:
+            entry_arg.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            entry_arg.options = dict(kwargs["options"])
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_reload_and_abort", _update)
+
+    result = asyncio.run(
+        flow.async_oauth_create_entry(
+            {
+                "auth_implementation": "ebay:production:client-id",
+                "token": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                    "token_type": "Bearer",
+                },
+            }
+        )
+    )
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert updated["entry"] is entry
+    assert updated["options"] == pending
+    assert CONF_PENDING_OPTIONS not in updated["data"]
+    assert entry.options["feedback_enabled"] is True
+    assert CONF_PENDING_OPTIONS not in entry.data
+
+
+def test_reauth_cancel_discards_pending_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling reauth discards pending options without changing live options."""
+    from custom_components.ebay.const import CONF_PENDING_OPTIONS
+
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": {
+                **_flow_data(),
+                CONF_PENDING_OPTIONS: {"feedback_enabled": True},
+            },
+            "options": {"feedback_enabled": False},
+            "title": "eBay",
+        },
+    )()
+    updates: list[dict[str, Any]] = []
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> bool:
+        updates.append(kwargs)
+        if "data" in kwargs:
+            target.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            target.options = dict(kwargs["options"])
+        return True
+
+    flow.hass.config_entries = type(
+        "ConfigEntries",
+        (),
+        {"async_update_entry": staticmethod(_async_update_entry)},
+    )()
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+
+    flow.async_remove()
+
+    assert len(updates) == 1
+    assert CONF_PENDING_OPTIONS not in entry.data
+    assert entry.options["feedback_enabled"] is False
+    assert "options" not in updates[0]
 
 
 def test_options_flow_buying_alerts_rejects_unpinned_price_target() -> None:
