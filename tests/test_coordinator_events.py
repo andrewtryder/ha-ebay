@@ -29,6 +29,8 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._fired_ending_soon_dirty = False
+    coordinator._ending_soon_fired_save_task = None
     coordinator._price_drop_below_active = set()
     coordinator._recent_events = {
         "watching": deque(maxlen=RECENT_EVENTS_MAX),
@@ -76,6 +78,86 @@ def test_ending_soon_event_is_not_lost_before_callback_registers() -> None:
     assert events[0][0] == "watched_item_ending_soon"
     assert events[0][1]["item_id"] == "123"
     assert key in coordinator._fired_ending_soon
+
+
+def test_ending_soon_loaded_fired_keys_suppress_refire() -> None:
+    """Persisted fired keys must suppress ending-soon re-emit after restart."""
+    coordinator = _coordinator()
+    entry = coordinator.entry
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=30)
+    item = {
+        "item_id": "123",
+        "title": "Watched item",
+        "end_time": end_time,
+        "seconds_left": 30 * 60,
+    }
+    payload: dict[str, Any] = {
+        "watched": {"123": item},
+        "bidding": {},
+        "selling": {},
+        "summary": {},
+    }
+    key = (
+        entry.entry_id,
+        "watching",
+        item["item_id"],
+        coordinator.ending_soon_threshold_seconds,
+        _normalized_end_time(end_time),
+    )
+    # Simulate load from Home Assistant Store after restart.
+    coordinator._fired_ending_soon = {key}
+
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
+    coordinator._rebuild_ending_soon_timers(payload)
+
+    assert events == []
+    assert key in coordinator._fired_ending_soon
+
+
+def test_ending_soon_loaded_fired_keys_suppress_scheduled_callback() -> None:
+    """Loaded fired keys must skip scheduled callback emits as well."""
+    coordinator = _coordinator()
+    entry = coordinator.entry
+    scheduled_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(
+        minutes=30
+    )
+    end_time = scheduled_at + timedelta(
+        seconds=coordinator.ending_soon_threshold_seconds
+    )
+    item = {
+        "item_id": "123",
+        "title": "Watched item",
+        "end_time": end_time,
+        "seconds_left": coordinator.ending_soon_threshold_seconds,
+    }
+    coordinator.data = {
+        "watched": {"123": item},
+        "bidding": {},
+        "selling": {},
+        "summary": {},
+    }
+    key = (
+        entry.entry_id,
+        "watching",
+        "123",
+        coordinator.ending_soon_threshold_seconds,
+        _normalized_end_time(end_time),
+    )
+    coordinator._fired_ending_soon = {key}
+    events: list[tuple[str, dict[str, Any]]] = []
+    coordinator._event_callbacks["watching"] = lambda *args: events.append(args)
+
+    callback = coordinator._scheduled_callback(
+        "watching",
+        "watched_item_ending_soon",
+        "123",
+        _normalized_end_time(end_time),
+        key,
+    )
+    callback(scheduled_at)
+
+    assert events == []
 
 
 def test_ending_soon_callback_uses_latest_item_data(
@@ -1194,6 +1276,9 @@ def test_seller_ops_order_and_message_events() -> None:
             "recent_positive": 1,
             "recent_neutral": 0,
             "recent_negative": 0,
+            "recent_feedback_ids": ["fb-old"],
+            "recent_negative_feedback_ids": [],
+            "items_truncated": False,
         },
         "messages": {"by_id": {}},
     }
@@ -1220,6 +1305,9 @@ def test_seller_ops_order_and_message_events() -> None:
             "recent_positive": 1,
             "recent_neutral": 0,
             "recent_negative": 1,
+            "recent_feedback_ids": ["fb-old", "fb-neg"],
+            "recent_negative_feedback_ids": ["fb-neg"],
+            "items_truncated": False,
         },
         "messages": {
             "by_id": {
@@ -1249,6 +1337,100 @@ def test_seller_ops_order_and_message_events() -> None:
     assert "negative_feedback_received" in events
     assert "feedback_rating_changed" in events
     assert "new_buyer_question" in events
+
+
+def test_seller_ops_feedback_events_use_ids_not_rising_totals() -> None:
+    """Feedback events require new ids; rising summary totals alone do not emit."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {
+            "score": 10,
+            "recent_positive": 1,
+            "recent_neutral": 0,
+            "recent_negative": 0,
+            "recent_feedback_ids": ["fb-1"],
+            "recent_negative_feedback_ids": [],
+            "items_truncated": False,
+        },
+        "messages": {"by_id": {}},
+    }
+    current = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {
+            "score": 10,
+            "recent_positive": 5,
+            "recent_neutral": 0,
+            "recent_negative": 2,
+            "recent_feedback_ids": ["fb-1"],
+            "recent_negative_feedback_ids": [],
+            "items_truncated": False,
+        },
+        "messages": {"by_id": {}},
+    }
+    coordinator._detect_seller_ops_events(previous, current)
+    assert "feedback_received" not in events
+    assert "negative_feedback_received" not in events
+
+
+def test_seller_ops_feedback_events_suppressed_when_items_truncated() -> None:
+    """Truncated or missing feedback id lists must not emit feedback id events."""
+    coordinator = _coordinator()
+    events: list[str] = []
+    coordinator._event_callbacks["seller_ops"] = lambda et, _ed: events.append(et)
+    previous = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {
+            "score": 10,
+            "recent_feedback_ids": ["fb-1"],
+            "recent_negative_feedback_ids": [],
+            "items_truncated": False,
+        },
+        "messages": {"by_id": {}},
+    }
+    truncated_current = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {
+            "score": 11,
+            "recent_feedback_ids": ["fb-1", "fb-2", "fb-neg"],
+            "recent_negative_feedback_ids": ["fb-neg"],
+            "items_truncated": True,
+        },
+        "messages": {"by_id": {}},
+    }
+    coordinator._detect_seller_ops_events(previous, truncated_current)
+    assert "feedback_received" not in events
+    assert "negative_feedback_received" not in events
+    assert "feedback_rating_changed" in events
+
+    events.clear()
+    missing_ids_current = {
+        "orders": {"by_id": {}},
+        "disputes": {"by_id": {}},
+        "standards": {},
+        "feedback": {
+            "score": 12,
+            "recent_positive": 3,
+            "recent_negative": 1,
+            "recent_feedback_ids": None,
+            "items_truncated": False,
+        },
+        "messages": {"by_id": {}},
+    }
+    coordinator._detect_seller_ops_events(previous, missing_ids_current)
+    assert "feedback_received" not in events
+    assert "negative_feedback_received" not in events
+    assert "feedback_rating_changed" in events
 
 
 def test_seller_ops_suppress_incomplete_blocks_new_events() -> None:

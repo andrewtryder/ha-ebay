@@ -22,6 +22,8 @@ def _coordinator() -> EbayDataUpdateCoordinator:
     coordinator._timer_listeners = []
     coordinator._scheduled = {}
     coordinator._fired_ending_soon = set()
+    coordinator._fired_ending_soon_dirty = False
+    coordinator._ending_soon_fired_save_task = None
     coordinator._price_drop_below_active = set()
     coordinator._recent_events = {
         "watching": deque(maxlen=RECENT_EVENTS_MAX),

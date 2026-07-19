@@ -40,6 +40,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     from .api import EbayApiClient, has_core_scope
     from .coordinator import EbayDataUpdateCoordinator
+    from .ending_soon_store import async_load_ending_soon_fired
+    from .inactive_item_store import async_load_inactive_item_sensors
     from .repairs import async_load_repair_streaks
 
     if not has_core_scope(entry.data.get(CONF_OAUTH_SCOPES)):
@@ -69,6 +71,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
     coordinator._repair_streaks = await async_load_repair_streaks(hass, entry.entry_id)
+    coordinator._fired_ending_soon = await async_load_ending_soon_fired(
+        hass, entry.entry_id
+    )
+    coordinator.inactive_item_sensors = await async_load_inactive_item_sensors(
+        hass, entry.entry_id
+    )
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(
@@ -81,27 +89,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an eBay config entry.
 
-    Repair issues stay in the registry across reload. Streaks are flushed so
-    the next setup can recreate threshold-gated issues immediately.
+    Repair issues stay in the registry across reload. Streaks and fired
+    ending-soon keys are flushed so the next setup restores them immediately.
     """
     from homeassistant.const import Platform
 
+    from .ending_soon_store import async_save_ending_soon_fired
+    from .inactive_item_store import async_save_inactive_item_sensors
     from .repairs import async_save_repair_streaks
 
     coordinator = entry.runtime_data
     coordinator.cancel_scheduled_events()
     await async_save_repair_streaks(hass, entry.entry_id, coordinator._repair_streaks)
+    await async_save_ending_soon_fired(
+        hass, entry.entry_id, coordinator._fired_ending_soon
+    )
+    await async_save_inactive_item_sensors(
+        hass, entry.entry_id, coordinator.inactive_item_sensors
+    )
+    coordinator._fired_ending_soon_dirty = False
     return await hass.config_entries.async_unload_platforms(
         entry, [Platform(platform) for platform in PLATFORMS]
     )
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Clean up repairs and persisted streaks when a config entry is removed."""
+    """Clean up repairs and persisted state when a config entry is removed."""
+    from .ending_soon_store import async_remove_ending_soon_fired
+    from .inactive_item_store import async_remove_inactive_item_sensors
     from .repairs import async_delete_entry_issues, async_remove_repair_streaks
 
     async_delete_entry_issues(hass, entry)
     await async_remove_repair_streaks(hass, entry.entry_id)
+    await async_remove_ending_soon_fired(hass, entry.entry_id)
+    await async_remove_inactive_item_sensors(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

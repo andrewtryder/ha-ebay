@@ -78,6 +78,18 @@ def _patch_setup(*, coordinator: Mock, client: Any = None) -> ExitStack:
     )
     stack.enter_context(
         patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        )
+    )
+    stack.enter_context(
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            new=AsyncMock(return_value={}),
+        )
+    )
+    stack.enter_context(
+        patch(
             "homeassistant.helpers.config_entry_oauth2_flow.async_register_implementation"
         )
     )
@@ -318,6 +330,8 @@ def test_async_unload_cancels_timers_and_unloads_platforms() -> None:
     entry = _mock_entry()
     coordinator = Mock()
     coordinator._repair_streaks = {"truncation:watched": 3}
+    coordinator._fired_ending_soon = {("entry-1", "watching", "1", 3600, "t")}
+    coordinator.inactive_item_sensors = {"entry-1_selling_1_bids": Mock()}
     entry.runtime_data = coordinator
 
     with (
@@ -325,6 +339,14 @@ def test_async_unload_cancels_timers_and_unloads_platforms() -> None:
             "custom_components.ebay.repairs.async_save_repair_streaks",
             new_callable=AsyncMock,
         ) as save_streaks,
+        patch(
+            "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+            new_callable=AsyncMock,
+        ) as save_ending_soon,
+        patch(
+            "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+            new_callable=AsyncMock,
+        ) as save_inactive,
         patch(
             "custom_components.ebay.repairs.async_delete_entry_issues"
         ) as delete_issues,
@@ -335,6 +357,13 @@ def test_async_unload_cancels_timers_and_unloads_platforms() -> None:
     save_streaks.assert_awaited_once_with(
         hass, entry.entry_id, coordinator._repair_streaks
     )
+    save_ending_soon.assert_awaited_once_with(
+        hass, entry.entry_id, coordinator._fired_ending_soon
+    )
+    save_inactive.assert_awaited_once_with(
+        hass, entry.entry_id, coordinator.inactive_item_sensors
+    )
+    assert coordinator._fired_ending_soon_dirty is False
     delete_issues.assert_not_called()
     hass.config_entries.async_unload_platforms.assert_awaited()
 
@@ -351,11 +380,21 @@ def test_async_remove_entry_clears_issues_and_streaks() -> None:
             "custom_components.ebay.repairs.async_remove_repair_streaks",
             new_callable=AsyncMock,
         ) as remove_streaks,
+        patch(
+            "custom_components.ebay.ending_soon_store.async_remove_ending_soon_fired",
+            new_callable=AsyncMock,
+        ) as remove_ending_soon,
+        patch(
+            "custom_components.ebay.inactive_item_store.async_remove_inactive_item_sensors",
+            new_callable=AsyncMock,
+        ) as remove_inactive,
     ):
         asyncio.run(ebay_integration.async_remove_entry(hass, entry))
 
     delete_issues.assert_called_once_with(hass, entry)
     remove_streaks.assert_awaited_once_with(hass, entry.entry_id)
+    remove_ending_soon.assert_awaited_once_with(hass, entry.entry_id)
+    remove_inactive.assert_awaited_once_with(hass, entry.entry_id)
 
 
 def test_options_listener_reloads_entry() -> None:
@@ -400,6 +439,14 @@ def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
         ),
         patch(
             "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
