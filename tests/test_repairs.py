@@ -658,3 +658,265 @@ def test_repair_streaks_store_round_trip(monkeypatch: pytest.MonkeyPatch) -> Non
 
     asyncio.run(async_remove_repair_streaks(hass, entry_id))
     assert asyncio.run(async_load_repair_streaks(hass, entry_id)) == {}
+
+
+def test_parse_issue_suffix_and_load_defensive() -> None:
+    from custom_components.ebay.repairs import parse_issue_suffix
+
+    assert parse_issue_suffix("entry-1", "other_issue") is None
+    assert parse_issue_suffix("entry-1", "entry-1_reauthorization_required") == (
+        "reauthorization_required"
+    )
+
+
+def test_load_repair_streaks_skips_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.ebay.repairs import async_load_repair_streaks
+
+    hass = Mock()
+
+    class _MemStore:
+        def __init__(
+            self, _hass: Any, _version: int, key: str, *args: Any, **kwargs: Any
+        ) -> None:
+            self.key = key
+
+        async def async_load(self) -> dict[str, Any]:
+            return {"streaks": {"ok": 2, "bad": object()}}
+
+    monkeypatch.setattr("custom_components.ebay.repairs.Store", _MemStore)
+    assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {"ok": 2}
+
+
+def test_load_repair_streaks_non_dict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.ebay.repairs import async_load_repair_streaks
+
+    hass = Mock()
+    payloads: list[Any] = [None, {"streaks": []}]
+    index = {"i": 0}
+
+    class _MemStore:
+        def __init__(
+            self, _hass: Any, _version: int, key: str, *args: Any, **kwargs: Any
+        ) -> None:
+            self.key = key
+
+        async def async_load(self) -> Any:
+            value = payloads[index["i"]]
+            index["i"] += 1
+            return value
+
+    monkeypatch.setattr("custom_components.ebay.repairs.Store", _MemStore)
+    assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {}
+    assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {}
+
+
+def test_async_delete_entry_issues_handles_missing_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.ebay.repairs import async_delete_entry_issues
+
+    monkeypatch.setattr(
+        "custom_components.ebay.repairs.ir.async_get",
+        lambda hass: (_ for _ in ()).throw(AttributeError("no registry")),
+    )
+    async_delete_entry_issues(Mock(), _entry())
+
+
+def test_async_create_fix_flow_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.ebay.repairs import async_create_fix_flow
+
+    entry = _entry(entry_id="entry-flow")
+    hass = Mock()
+    hass.config_entries.async_get_entry = Mock(return_value=entry)
+    hass.config_entries.async_entries = Mock(return_value=[entry])
+
+    class _Confirm:
+        pass
+
+    monkeypatch.setattr(
+        "homeassistant.components.repairs.ConfirmRepairFlow",
+        _Confirm,
+        raising=False,
+    )
+
+    flow = asyncio.run(
+        async_create_fix_flow(
+            hass,
+            f"{entry.entry_id}_reauthorization_required",
+            {"entry_id": entry.entry_id},
+        )
+    )
+    from custom_components.ebay.repairs import ReauthRepairFlow
+
+    assert isinstance(flow, ReauthRepairFlow)
+
+    site_flow = asyncio.run(
+        async_create_fix_flow(
+            hass,
+            f"{entry.entry_id}_invalid_site_id",
+            {"entry_id": entry.entry_id},
+        )
+    )
+    from custom_components.ebay.repairs import InvalidSiteIdRepairFlow
+
+    assert isinstance(site_flow, InvalidSiteIdRepairFlow)
+
+    hass.config_entries.async_get_entry = Mock(return_value=None)
+    # Fall back via issue id prefix.
+    flow2 = asyncio.run(
+        async_create_fix_flow(hass, f"{entry.entry_id}_missing_scope_feedback", None)
+    )
+    assert isinstance(flow2, ReauthRepairFlow)
+
+    hass.config_entries.async_entries = Mock(return_value=[])
+    # No entry available -> ConfirmRepairFlow (imported inside function).
+
+    class _ConfirmFlow:
+        pass
+
+    real_import = __import__
+
+    def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        module = real_import(name, *args, **kwargs)
+        if name == "homeassistant.components.repairs":
+            module.ConfirmRepairFlow = _ConfirmFlow  # type: ignore[attr-defined]
+        return module
+
+    monkeypatch.setattr("builtins.__import__", _fake_import)
+    fallback = asyncio.run(async_create_fix_flow(hass, "unknown_issue", None))
+    assert isinstance(fallback, _ConfirmFlow)
+
+
+def test_reauth_and_site_id_repair_flows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.ebay.repairs import (
+        InvalidSiteIdRepairFlow,
+        ReauthRepairFlow,
+        _async_start_reauth,
+    )
+
+    entry = _entry(entry_id="entry-repair")
+    hass = Mock()
+    hass.async_create_task = Mock()
+    hass.config_entries.flow.async_init = AsyncMock()
+    hass.config_entries.async_update_entry = Mock()
+    hass.config_entries.async_reload = AsyncMock()
+
+    reauth = ReauthRepairFlow(entry)
+    reauth.hass = hass
+    reauth.async_show_form = Mock(return_value={"type": "form", "step_id": "confirm"})
+    reauth.async_create_entry = Mock(
+        return_value={"type": "create_entry", "title": "", "data": {}}
+    )
+
+    shown = asyncio.run(reauth.async_step_init())
+    assert shown["step_id"] == "confirm"
+
+    started: list[Any] = []
+
+    async def _start(_hass: Any, _entry: Any) -> None:
+        started.append(True)
+
+    monkeypatch.setattr("custom_components.ebay.repairs._async_start_reauth", _start)
+    result = asyncio.run(reauth.async_step_confirm({"confirm": True}))
+    assert result["type"] == "create_entry"
+    assert started == [True]
+
+    site = InvalidSiteIdRepairFlow(entry)
+    site.hass = hass
+    site.async_show_form = Mock(side_effect=lambda **kwargs: {"type": "form", **kwargs})
+    site.async_create_entry = Mock(
+        return_value={"type": "create_entry", "title": "", "data": {}}
+    )
+    init = asyncio.run(site.async_step_init())
+    assert init["step_id"] == "site_id"
+
+    invalid = asyncio.run(site.async_step_site_id({CONF_SITE_ID: "99999"}))
+    assert invalid["errors"]["base"] == "invalid_site_id"
+
+    valid = asyncio.run(site.async_step_site_id({CONF_SITE_ID: "0"}))
+    assert valid["type"] == "create_entry"
+    hass.config_entries.async_update_entry.assert_called()
+
+    asyncio.run(_async_start_reauth(hass, entry))
+    hass.async_create_task.assert_called()
+
+
+def test_preserve_issue_if_present_iterates_values() -> None:
+    from custom_components.ebay.repairs import _preserve_issue_if_present
+
+    class _Issue:
+        def __init__(self, domain: str, issue_id: str) -> None:
+            self.domain = domain
+            self.issue_id = issue_id
+
+    class _WeirdRegistry:
+        # Mapping without (domain, issue_id) key membership.
+        issues = {"x": _Issue(DOMAIN, "entry-1_partial_failure_orders")}
+
+    desired: set[str] = set()
+    _preserve_issue_if_present(
+        _WeirdRegistry(), DOMAIN, "entry-1_partial_failure_orders", desired
+    )
+    assert "entry-1_partial_failure_orders" in desired
+
+    class _BrokenRegistry:
+        @property
+        def issues(self) -> Any:
+            raise AttributeError("broken")
+
+    desired2: set[str] = set()
+    _preserve_issue_if_present(
+        _BrokenRegistry(), DOMAIN, "entry-1_partial_failure_orders", desired2
+    )
+    assert desired2 == set()
+
+
+def test_section_for_streak_key_and_confirm_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.ebay.const import (
+        SECTION_BUYING,
+        SECTION_FEEDBACK,
+        SECTION_FULFILLMENT,
+    )
+    from custom_components.ebay.repairs import (
+        _section_for_streak_key,
+        async_create_fix_flow,
+    )
+
+    assert _section_for_streak_key("truncated:watched") == SECTION_BUYING
+    assert _section_for_streak_key("partial_failure:orders") == SECTION_FULFILLMENT
+    assert (
+        _section_for_streak_key("seller_ops_unavailable:feedback") == SECTION_FEEDBACK
+    )
+    assert _section_for_streak_key("nope") is None
+    assert _section_for_streak_key("unknown:thing") is None
+
+    entry = _entry(entry_id="entry-confirm")
+    hass = Mock()
+    hass.config_entries.async_get_entry = Mock(return_value=entry)
+
+    class _ConfirmFlow:
+        pass
+
+    real_import = __import__
+
+    def _fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        module = real_import(name, *args, **kwargs)
+        if name == "homeassistant.components.repairs":
+            module.ConfirmRepairFlow = _ConfirmFlow  # type: ignore[attr-defined]
+        return module
+
+    monkeypatch.setattr("builtins.__import__", _fake_import)
+    flow = asyncio.run(
+        async_create_fix_flow(
+            hass,
+            f"{entry.entry_id}_partial_failure_orders",
+            {"entry_id": entry.entry_id},
+        )
+    )
+    assert isinstance(flow, _ConfirmFlow)

@@ -263,3 +263,97 @@ def test_parse_finances_funds_and_last_payout() -> None:
     assert payout["last_payout_amount"] == 99.99
     assert payout["last_payout_status"] == "SUCCEEDED"
     assert payout["last_payout_date"] is not None
+
+
+def test_normalize_order_title_and_nested_tracking() -> None:
+    long_title = "T" * 130
+    order = normalize_order(
+        {
+            "orderId": "order-3",
+            "orderPaymentStatus": "PAID",
+            "orderFulfillmentStatus": "IN_PROGRESS",
+            "lineItems": [{"listingId": "333", "title": long_title}],
+            "shippingFulfillments": [
+                {"lineItems": [{"shipmentTrackingNumber": "TRACK1"}]}
+            ],
+        }
+    )
+    assert order["title"].endswith("…")
+    assert len(order["title"]) == 120
+    assert order["has_tracking"] is True
+    assert order["item_id"] == "333"
+
+
+def test_parse_ebay_datetime_edge_cases() -> None:
+    from custom_components.ebay.seller_ops import _parse_ebay_datetime
+
+    assert _parse_ebay_datetime(None) is None
+    assert _parse_ebay_datetime("") is None
+    assert _parse_ebay_datetime("   ") is None
+    assert _parse_ebay_datetime("not-a-date") is None
+    naive = _parse_ebay_datetime("2026-07-01T12:00:00")
+    assert naive is not None and naive.tzinfo is not None
+    aware = _parse_ebay_datetime("2026-07-01T12:00:00+00:00")
+    assert aware is not None
+
+
+def test_parse_seller_standards_fallback_profiles() -> None:
+    empty = parse_seller_standards_profiles({"standardsProfiles": []})
+    assert empty == {}
+
+    current_only = parse_seller_standards_profiles(
+        {
+            "standardsProfiles": [
+                {
+                    "standardsLevel": "TOP_RATED",
+                    "cycle": {"cycleType": "CURRENT"},
+                    "metrics": [
+                        {"metricKey": "TRANSACTION_DEFECT_RATE", "value": "x"},
+                        {
+                            "metricKey": "LATE_SHIPMENT_RATE",
+                            "value": {"value": "0.5"},
+                            "level": "ABOVE_STANDARD",
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    assert current_only["seller_level"] == "TOP_RATED"
+    assert current_only["late_shipment_rate"] == 0.5
+
+    first_profile = parse_seller_standards_profiles(
+        {
+            "standardsProfiles": [
+                {
+                    "standardsLevel": "ABOVE_STANDARD",
+                    "cycle": {"cycleType": "PROJECTED"},
+                    "metrics": [],
+                }
+            ]
+        }
+    )
+    assert first_profile["seller_level"] == "ABOVE_STANDARD"
+
+
+def test_parse_feedback_period_summaries() -> None:
+    summary = parse_feedback_summary(
+        {
+            "summary": {
+                "periodSummaries": [
+                    {
+                        "periodInDays": 30,
+                        "counts": {
+                            "positiveFeedbackCount": 4,
+                            "neutralFeedbackCount": 1,
+                            "negativeFeedbackCount": 0,
+                        },
+                    },
+                    {"periodInDays": 365, "counts": {"positive": "bad"}},
+                ]
+            }
+        }
+    )
+    assert summary["recent_positive"] == 4
+    assert summary["recent_neutral"] == 1
+    assert summary["recent_negative"] == 0

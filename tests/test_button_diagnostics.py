@@ -10,7 +10,7 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.ebay.api import EbayApiError, EbayAuthError
@@ -225,6 +225,37 @@ def test_rapid_repeated_presses_are_rate_limited(
     assert asyncio.run(coordinator.async_request_manual_refresh()) is False
     assert "Ignoring eBay manual refresh during cooldown" in caplog.text
     coordinator.async_request_refresh.assert_awaited_once()
+
+
+def test_refresh_button_raises_during_cooldown() -> None:
+    coordinator = _coordinator()
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    button = EbayRefreshButton(coordinator, entry)
+    assert asyncio.run(button.async_press()) is None
+    with pytest.raises(HomeAssistantError, match="cooldown"):
+        asyncio.run(button.async_press())
+
+
+def test_refresh_button_wraps_unexpected_errors() -> None:
+    coordinator = _coordinator()
+    coordinator.async_request_manual_refresh = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    button = EbayRefreshButton(coordinator, entry)
+    with pytest.raises(HomeAssistantError, match="refresh failed"):
+        asyncio.run(button.async_press())
+
+
+def test_cleanup_button_wraps_unexpected_errors() -> None:
+    coordinator = _coordinator()
+    coordinator.async_cleanup_inactive_item_entities = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    button = EbayCleanupInactiveItemEntitiesButton(coordinator, entry)
+    with pytest.raises(HomeAssistantError, match="clean up"):
+        asyncio.run(button.async_press())
 
 
 def test_press_after_cooldown_works() -> None:

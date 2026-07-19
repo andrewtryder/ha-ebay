@@ -44,6 +44,8 @@ from custom_components.ebay.oauth_errors import (
     OAuth2TokenRequestReauthError,
     OAuth2TokenRequestTransientError,
     oauth_token_error,
+    oauth_token_request_error,
+    oauth_token_transient_error,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -394,6 +396,64 @@ def test_oauth_token_error_classifier_matrix(
     exc = oauth_token_error(status, error_code=error_code)
     assert isinstance(exc, expected)
     assert type(exc) is expected
+
+
+def test_oauth_token_helpers_accept_request_info_and_urls() -> None:
+    from aiohttp import RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("https://example.test/token")
+    info = RequestInfo(
+        url=url,
+        method="POST",
+        headers=CIMultiDictProxy(CIMultiDict()),
+        real_url=url,
+    )
+    transient = oauth_token_error(503, request_info=info)
+    assert isinstance(transient, OAuth2TokenRequestTransientError)
+    assert transient.request_info is info
+
+    custom = oauth_token_transient_error(
+        "temp", token_url="https://api.sandbox.ebay.com/identity/v1/oauth2/token"
+    )
+    assert isinstance(custom, OAuth2TokenRequestTransientError)
+    assert "sandbox" in str(custom.request_info.url)
+
+    generic = oauth_token_request_error("failed", status=418, request_info=info)
+    assert isinstance(generic, OAuth2TokenRequestError)
+    assert generic.request_info is info
+
+
+def test_oauth_implementation_name_includes_environment() -> None:
+    implementation = EbayOAuth2Implementation(_Hass(), _flow_data())
+    assert implementation.name == "eBay production"
+    sandbox = EbayOAuth2Implementation(_Hass(), _flow_data(environment=ENV_SANDBOX))
+    assert sandbox.name == f"eBay {ENV_SANDBOX}"
+
+
+def test_oauth_errors_compat_classes_when_ha_import_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback exception classes are defined when HA OAuth helpers are missing."""
+    import importlib
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.helpers.config_entry_oauth2_flow", None
+    )
+    sys.modules.pop("custom_components.ebay.oauth_errors", None)
+    mod = importlib.import_module("custom_components.ebay.oauth_errors")
+    err = mod.OAuth2TokenRequestError("boom")
+    assert str(err) == "boom"
+    assert issubclass(mod.OAuth2TokenRequestTransientError, mod.OAuth2TokenRequestError)
+    assert issubclass(mod.OAuth2TokenRequestReauthError, mod.OAuth2TokenRequestError)
+    blank = mod.OAuth2TokenRequestError()
+    assert "OAuth token request failed" in str(blank)
+
+    monkeypatch.undo()
+    sys.modules.pop("custom_components.ebay.oauth_errors", None)
+    importlib.import_module("custom_components.ebay.oauth_errors")
 
 
 def test_callback_url_falls_back_when_redirect_uri_unavailable(

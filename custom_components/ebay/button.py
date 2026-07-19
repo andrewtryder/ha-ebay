@@ -8,6 +8,7 @@ from homeassistant.components.button import ButtonEntity, ButtonEntityDescriptio
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -23,6 +24,9 @@ from .const import (
     SECTION_SELLING,
 )
 from .coordinator import EbayDataUpdateCoordinator
+
+# Button presses are sequential; coordinator-backed platforms use 0.
+PARALLEL_UPDATES = 1
 
 REFRESH_BUTTON = ButtonEntityDescription(
     key="refresh",
@@ -138,8 +142,17 @@ class EbayRefreshButton(CoordinatorEntity[EbayDataUpdateCoordinator], ButtonEnti
         )
 
     async def async_press(self) -> None:
-        """Request a manual refresh, ignoring presses during cooldown."""
-        await self.coordinator.async_request_manual_refresh()
+        """Request a manual refresh, raising on cooldown or failure."""
+        try:
+            accepted = await self.coordinator.async_request_manual_refresh()
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError("eBay refresh failed") from err
+        if not accepted:
+            raise HomeAssistantError(
+                "eBay refresh ignored during cooldown or while a refresh is already running"
+            )
 
 
 class EbaySectionRefreshButton(
@@ -176,10 +189,19 @@ class EbaySectionRefreshButton(
         )
 
     async def async_press(self) -> None:
-        """Request a targeted section refresh, ignoring presses during cooldown."""
-        await self.coordinator.async_request_manual_refresh(
-            set(self.entity_description.sections)
-        )
+        """Request a targeted section refresh, raising on cooldown or failure."""
+        try:
+            accepted = await self.coordinator.async_request_manual_refresh(
+                set(self.entity_description.sections)
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError("eBay section refresh failed") from err
+        if not accepted:
+            raise HomeAssistantError(
+                "eBay refresh ignored during cooldown or while a refresh is already running"
+            )
 
 
 class EbayCleanupInactiveItemEntitiesButton(
@@ -218,5 +240,12 @@ class EbayCleanupInactiveItemEntitiesButton(
         )
 
     async def async_press(self) -> None:
-        """Permanently remove all inactive item sensors, ignoring the grace period."""
-        await self.coordinator.async_cleanup_inactive_item_entities(force=True)
+        """Permanently remove inactive item sensors, raising HomeAssistantError on failure."""
+        try:
+            await self.coordinator.async_cleanup_inactive_item_entities(force=True)
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            raise HomeAssistantError(
+                "Failed to clean up inactive eBay item entities"
+            ) from err

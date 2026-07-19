@@ -128,3 +128,108 @@ def test_load_prunes_expired_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(async_save_ending_soon_fired(hass, entry_id, {expired, active}))
     loaded = asyncio.run(async_load_ending_soon_fired(hass, entry_id))
     assert loaded == {active}
+
+
+def test_deserialize_ending_soon_fired_key_rejects_invalid() -> None:
+    assert deserialize_ending_soon_fired_key("a|b|c") is None
+    assert deserialize_ending_soon_fired_key("a|b|c|x|end") is None
+    assert deserialize_ending_soon_fired_key("||c|1|end") is None
+    assert deserialize_ending_soon_fired_key(None) is None
+    assert deserialize_ending_soon_fired_key(12) is None
+    assert deserialize_ending_soon_fired_key({"entry_id": "e"}) is None
+    assert (
+        deserialize_ending_soon_fired_key(
+            {
+                "entry_id": "",
+                "event_kind": "watching",
+                "item_id": "1",
+                "threshold": 60,
+                "normalized_end_time": "2026-07-18T12:00:00+00:00",
+            }
+        )
+        is None
+    )
+    assert (
+        deserialize_ending_soon_fired_key(
+            {
+                "entry_id": "e",
+                "event_kind": "watching",
+                "item_id": "1",
+                "threshold": "nope",
+                "normalized_end_time": "2026-07-18T12:00:00+00:00",
+            }
+        )
+        is None
+    )
+
+
+def test_deserialize_ending_soon_fired_key_from_dict() -> None:
+    key = deserialize_ending_soon_fired_key(
+        {
+            "entry_id": "e",
+            "event_kind": "watching",
+            "item_id": "1",
+            "threshold": 3600,
+            "normalized_end_time": "2026-07-18T12:00:00+00:00",
+        }
+    )
+    assert key == ("e", "watching", "1", 3600, "2026-07-18T12:00:00+00:00")
+
+
+def test_prune_ending_soon_fired_keys_handles_naive_and_invalid() -> None:
+    naive_now = datetime(2026, 7, 18, 12, 0)
+    end_time = datetime(2026, 7, 18, 11, 30, tzinfo=timezone.utc)
+    key = ("e", "watching", "1", 3600, end_time.isoformat())
+    naive_end = ("e", "watching", "2", 3600, "2026-07-18T11:30:00")
+    invalid = ("e", "watching", "3", 3600, "not-a-date")
+    kept = prune_ending_soon_fired_keys({key, naive_end, invalid}, naive_now)
+    assert kept == {key, naive_end}
+
+
+def test_load_ending_soon_fired_defensive_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hass = Mock()
+    payloads: list[Any] = [
+        None,
+        {"fired": "nope"},
+        {
+            "fired": [
+                "bad",
+                {
+                    "entry_id": "e",
+                    "event_kind": "watching",
+                    "item_id": "1",
+                    "threshold": 3600,
+                    "normalized_end_time": (
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).isoformat(),
+                },
+            ]
+        },
+    ]
+    index = {"i": 0}
+
+    class _MemStore:
+        def __init__(
+            self, _hass: Any, _version: int, key: str, *args: Any, **kwargs: Any
+        ) -> None:
+            self.key = key
+
+        async def async_load(self) -> Any:
+            value = payloads[index["i"]]
+            index["i"] += 1
+            return value
+
+        async def async_save(self, data: dict[str, Any]) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "custom_components.ebay.ending_soon_store.Store",
+        _MemStore,
+    )
+
+    assert asyncio.run(async_load_ending_soon_fired(hass, "entry-1")) == set()
+    assert asyncio.run(async_load_ending_soon_fired(hass, "entry-1")) == set()
+    loaded = asyncio.run(async_load_ending_soon_fired(hass, "entry-1"))
+    assert len(loaded) == 1

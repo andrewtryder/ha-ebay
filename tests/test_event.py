@@ -74,3 +74,39 @@ def test_event_callback_registration_and_undeclared_filter() -> None:
 
     unsubscribe()
     assert "selling" not in coordinator._event_callbacks
+
+
+def test_event_lifecycle_registers_and_unregisters() -> None:
+    coordinator = _coordinator()
+    coordinator.async_add_listener = Mock(return_value=lambda: None)
+    entry = Mock(entry_id="entry-1")
+    description = next(item for item in EVENTS if item.kind == "watching")
+    entity = EbayActivityEvent(coordinator, entry, description)
+    entity.hass = Mock()
+    entity.async_on_remove = Mock()
+    entity.async_write_ha_state = Mock()
+
+    async def _run() -> None:
+        await entity.async_added_to_hass()
+        assert "watching" in coordinator._event_callbacks
+        assert entity.extra_state_attributes == {"recent_events": []}
+        await entity.async_will_remove_from_hass()
+        assert "watching" not in coordinator._event_callbacks
+        assert entity._unsubscribe_event_callback is None
+
+    asyncio.run(_run())
+
+
+def test_event_will_remove_without_callback() -> None:
+    coordinator = _coordinator()
+    entry = Mock(entry_id="entry-1")
+    description = next(item for item in EVENTS if item.kind == "bidding")
+    entity = EbayActivityEvent(coordinator, entry, description)
+    entity.hass = Mock()
+    entity.async_on_remove = Mock()
+
+    async def _run() -> None:
+        await entity.async_will_remove_from_hass()
+
+    asyncio.run(_run())
+    assert entity._unsubscribe_event_callback is None

@@ -535,6 +535,12 @@ def test_summary_timestamp_and_enum_native_values() -> None:
         EbaySummarySensor(coordinator, Mock(entry_id="e"), percent).native_value == 99.5
     )
 
+    coordinator.data["summary"]["seller_next_evaluation_date"] = "not-a-date"
+    assert (
+        EbaySummarySensor(coordinator, Mock(entry_id="e"), next_eval).native_value
+        is None
+    )
+
 
 def test_unknown_enum_maps_to_unknown_and_preserves_raw() -> None:
     """Unrecognized eBay enums must stay within declared options."""
@@ -593,6 +599,107 @@ def test_parse_customer_service_prefers_rating_enum() -> None:
         }
     )
     assert parsed["rating"] == "AVERAGE"
+
+
+def test_parse_customer_service_numeric_and_peer_flags() -> None:
+    from custom_components.ebay.seller_ops import parse_customer_service_metric
+
+    numeric = parse_customer_service_metric(
+        {
+            "dimensionMetrics": [
+                {
+                    "metrics": [
+                        {
+                            "value": {"value": 0.2},
+                            "benchmark": {"adjustment": "ABOVE"},
+                        }
+                    ]
+                }
+            ],
+            "evaluationCycle": {"evaluationDate": "2026-07-01"},
+        }
+    )
+    assert numeric["rating"] == "0.2"
+    assert numeric["above_peer_benchmark"] is True
+
+    low = parse_customer_service_metric(
+        {
+            "dimensionMetrics": [
+                {"metrics": [{"rating": "LOW", "benchmark": {"rating": "LOW"}}]}
+            ]
+        }
+    )
+    assert low["rating"] == "LOW"
+    assert low["above_peer_benchmark"] is True
+
+
+def test_item_sensor_end_time_string_and_missing_item() -> None:
+    from custom_components.ebay.sensor import EbayItemSensor
+
+    coordinator = _SelectionCoordinator(
+        options={
+            **DEFAULT_OPTIONS,
+            "entity_mode": ENTITY_MODE_DETAILED,
+            "per_item_cap": 5,
+        },
+        data={
+            "watched": {
+                "001": {
+                    "item_id": "001",
+                    "title": "Cam",
+                    "end_time": "2026-07-18T12:00:00+00:00",
+                    "currency": "USD",
+                    "current_price": 10,
+                    "seconds_left": 3600,
+                }
+            },
+            "bidding": {},
+            "selling": {},
+            "summary": {},
+        },
+    )
+    entry = Mock(entry_id="entry-1")
+    ending = EbayItemSensor(
+        coordinator, entry, "watched", "001", "end_time", "end_time", None
+    )
+    assert ending.native_value == datetime.fromisoformat("2026-07-18T12:00:00+00:00")
+
+    coordinator.data["watched"]["001"]["end_time"] = "not-a-date"
+    assert ending.native_value is None
+
+    coordinator.data["watched"]["001"]["end_time"] = 123
+    assert ending.native_value is None
+
+    missing = EbayItemSensor(
+        coordinator, entry, "watched", "missing", "price", "current_price", None
+    )
+    assert missing.native_value is None
+    assert missing.extra_state_attributes == {"item_id": "missing"}
+
+
+def test_diagnostic_last_successful_update_parses_string() -> None:
+    from custom_components.ebay.sensor import (
+        DIAGNOSTIC_SENSORS,
+        EbayDiagnosticSensor,
+    )
+
+    description = next(
+        item for item in DIAGNOSTIC_SENSORS if item.key == "last_successful_update"
+    )
+    coordinator = _SelectionCoordinator(
+        options=dict(DEFAULT_OPTIONS),
+        data={
+            "summary": {"last_successful_update": "2026-07-18T12:00:00+00:00"},
+            "watched": {},
+            "bidding": {},
+            "selling": {},
+        },
+    )
+    entity = EbayDiagnosticSensor(coordinator, Mock(entry_id="e"), description)
+    assert entity.native_value == datetime.fromisoformat("2026-07-18T12:00:00+00:00")
+
+    coordinator.data["summary"]["last_successful_update"] = "bad"
+    assert entity.native_value is None
 
 
 def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:

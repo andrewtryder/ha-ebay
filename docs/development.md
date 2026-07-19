@@ -55,7 +55,7 @@ Or individually:
 Platforms under test include `sensor`, `binary_sensor`, `event`, `calendar`, and `button`.
 
 `pytest.ini` enables statement **and branch** coverage for `custom_components/ebay`.
-`--cov-fail-under` is a combined TOTAL floor (currently 84%). Raise it gradually
+`--cov-fail-under` is a combined TOTAL floor (currently 90%). Raise it gradually
 toward **95%** on the ladder **84 → 85 → 90 → 95**, preferring new tests that
 exercise config-flow, OAuth, pagination, partial-failure, and transition-event
 branches. The pre-push hook fails the push if coverage drops below the floor.
