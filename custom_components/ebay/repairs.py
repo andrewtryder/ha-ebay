@@ -15,19 +15,16 @@ from homeassistant.helpers.storage import Store
 from .const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
-    CONF_BUYING_ENABLED,
     CONF_FEEDBACK_ENABLED,
     CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
-    CONF_SELLING_ENABLED,
     CONF_SITE_ID,
     DOMAIN,
-    PARTIAL_FAILURE_SECTION,
     REPAIR_STREAK_THRESHOLD,
-    TRUNCATION_COLLECTION_SECTION,
 )
+from .sections import PARTIAL_FAILURE_SECTION, TRUNCATION_COLLECTION_SECTION
 from .seller_ops import SITE_ID_TO_MARKETPLACE, is_known_site_id
 
 REPAIR_STREAKS_STORAGE_VERSION = 1
@@ -240,19 +237,9 @@ def _enabled_sections_for_repairs(coordinator: Any) -> set[str] | None:
     options = getattr(coordinator, "options", None)
     if not isinstance(options, dict):
         return None
-    from .api import enabled_sections_for_options
+    from .sections import enabled_sections_for_options
 
-    return enabled_sections_for_options(
-        buying_enabled=bool(options.get(CONF_BUYING_ENABLED)),
-        selling_enabled=bool(options.get(CONF_SELLING_ENABLED)),
-        analytics_enabled=bool(options.get(CONF_ANALYTICS_ENABLED)),
-        fulfillment_enabled=bool(options.get(CONF_FULFILLMENT_ENABLED)),
-        seller_standards_enabled=bool(options.get(CONF_SELLER_STANDARDS_ENABLED)),
-        feedback_enabled=bool(options.get(CONF_FEEDBACK_ENABLED)),
-        messages_enabled=bool(options.get(CONF_MESSAGES_ENABLED)),
-        account_privileges_enabled=bool(options.get(CONF_ACCOUNT_PRIVILEGES_ENABLED)),
-        finances_enabled=bool(options.get(CONF_FINANCES_ENABLED)),
-    )
+    return enabled_sections_for_options(options)
 
 
 def _section_enabled(enabled_sections: set[str] | None, section: str | None) -> bool:

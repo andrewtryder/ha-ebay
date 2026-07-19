@@ -1,13 +1,14 @@
 """SectionSpec registry for coordinator payload sections.
 
-Pragmatic metadata for refresh cadence, OAuth scopes, marketplace gates, and
-partial-failure categories. Fetch orchestration remains in ``api.py``;
-per-API fetchers live under ``clients/``.
+Single source of truth for refresh cadence, OAuth scopes, marketplace gates,
+truncation keys, and partial-failure categories. Fetch orchestration remains in
+``api.py``; per-API fetchers live under ``clients/``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 from .clients.scopes import (
     CORE_SCOPE,
@@ -29,7 +30,6 @@ from .const import (
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
     CONF_SELLING_ENABLED,
-    PARTIAL_FAILURE_SECTION,
     SECTION_ACCOUNT_PRIVILEGES,
     SECTION_ACCOUNT_PRIVILEGES_INTERVAL_MINUTES,
     SECTION_ACCOUNT_PRIVILEGES_RETRY_MINUTES,
@@ -67,15 +67,9 @@ class SectionSpec:
     marketplace_capability: str | None
     fetcher_name: str | None
     partial_failure_categories: tuple[str, ...]
-
-
-def _partial_categories(section: str) -> tuple[str, ...]:
-    """Return partial-failure category keys owned by ``section``."""
-    return tuple(
-        category
-        for category, owner in PARTIAL_FAILURE_SECTION.items()
-        if owner == section
-    )
+    truncation_collections: tuple[str, ...] = ()
+    # When True, section is only enabled if Selling is also enabled.
+    requires_selling: bool = False
 
 
 SECTION_SPECS: dict[str, SectionSpec] = {
@@ -87,7 +81,8 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=None,
         marketplace_capability=None,
         fetcher_name="_fetch_buying_pages",
-        partial_failure_categories=_partial_categories(SECTION_BUYING),
+        partial_failure_categories=("buying_truncated",),
+        truncation_collections=("watched", "bidding"),
     ),
     SECTION_SELLING: SectionSpec(
         key=SECTION_SELLING,
@@ -97,7 +92,21 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=None,
         marketplace_capability=None,
         fetcher_name="_fetch_selling_pages",
-        partial_failure_categories=_partial_categories(SECTION_SELLING),
+        partial_failure_categories=(
+            "selling_truncated",
+            "sold_unsold_truncated",
+            "sold_unsold_classification",
+            "seller_list_views_truncated",
+            "seller_list_views",
+            "active_offers_truncated",
+            "active_offers",
+        ),
+        truncation_collections=(
+            "selling",
+            "seller_list_views",
+            "active_offers",
+            "sold_unsold",
+        ),
     ),
     SECTION_ANALYTICS: SectionSpec(
         key=SECTION_ANALYTICS,
@@ -107,7 +116,12 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=SECTION_ANALYTICS_RETRY_MINUTES,
         marketplace_capability="traffic_report",
         fetcher_name="async_fetch_analytics_views",
-        partial_failure_categories=_partial_categories(SECTION_ANALYTICS),
+        partial_failure_categories=(
+            "analytics_views_missing_scope",
+            "analytics_views",
+            "analytics_views_unsupported",
+        ),
+        requires_selling=True,
     ),
     SECTION_FULFILLMENT: SectionSpec(
         key=SECTION_FULFILLMENT,
@@ -117,7 +131,15 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=None,
         marketplace_capability="fulfillment",
         fetcher_name="async_fetch_orders",
-        partial_failure_categories=_partial_categories(SECTION_FULFILLMENT),
+        partial_failure_categories=(
+            "orders_missing_scope",
+            "payment_disputes_missing_scope",
+            "orders_truncated",
+            "orders",
+            "payment_disputes_truncated",
+            "payment_disputes",
+        ),
+        truncation_collections=("orders", "payment_disputes"),
     ),
     SECTION_SELLER_STANDARDS: SectionSpec(
         key=SECTION_SELLER_STANDARDS,
@@ -127,7 +149,10 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=SECTION_SELLER_STANDARDS_RETRY_MINUTES,
         marketplace_capability="seller_standards",
         fetcher_name="async_fetch_seller_standards",
-        partial_failure_categories=_partial_categories(SECTION_SELLER_STANDARDS),
+        partial_failure_categories=(
+            "seller_standards_missing_scope",
+            "seller_standards",
+        ),
     ),
     SECTION_FEEDBACK: SectionSpec(
         key=SECTION_FEEDBACK,
@@ -137,7 +162,14 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=SECTION_FEEDBACK_RETRY_MINUTES,
         marketplace_capability="feedback",
         fetcher_name="async_fetch_feedback",
-        partial_failure_categories=_partial_categories(SECTION_FEEDBACK),
+        partial_failure_categories=(
+            "feedback_missing_scope",
+            "feedback",
+            "feedback_invalid_request",
+            "feedback_user_lookup",
+            "feedback_forbidden",
+            "feedback_not_found",
+        ),
     ),
     SECTION_MESSAGES: SectionSpec(
         key=SECTION_MESSAGES,
@@ -148,7 +180,12 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=None,
         marketplace_capability=None,
         fetcher_name="async_fetch_messages",
-        partial_failure_categories=_partial_categories(SECTION_MESSAGES),
+        partial_failure_categories=(
+            "messages_missing_scope",
+            "messages_truncated",
+            "messages",
+        ),
+        truncation_collections=("messages",),
     ),
     SECTION_ACCOUNT_PRIVILEGES: SectionSpec(
         key=SECTION_ACCOUNT_PRIVILEGES,
@@ -158,7 +195,11 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=SECTION_ACCOUNT_PRIVILEGES_RETRY_MINUTES,
         marketplace_capability="account_privileges",
         fetcher_name="async_fetch_account_privileges",
-        partial_failure_categories=_partial_categories(SECTION_ACCOUNT_PRIVILEGES),
+        partial_failure_categories=(
+            "account_privileges_missing_scope",
+            "account_privileges_unsupported",
+            "account_privileges",
+        ),
     ),
     SECTION_FINANCES: SectionSpec(
         key=SECTION_FINANCES,
@@ -168,6 +209,75 @@ SECTION_SPECS: dict[str, SectionSpec] = {
         retry_minutes=SECTION_FINANCES_RETRY_MINUTES,
         marketplace_capability="finances",
         fetcher_name="async_fetch_finances",
-        partial_failure_categories=_partial_categories(SECTION_FINANCES),
+        partial_failure_categories=(
+            "finances_missing_scope",
+            "finances_unsupported",
+            "finances",
+        ),
     ),
 }
+
+ALL_SECTIONS: tuple[str, ...] = tuple(SECTION_SPECS)
+
+PARTIAL_FAILURE_CATEGORIES_BY_SECTION: dict[str, frozenset[str]] = {
+    key: frozenset(spec.partial_failure_categories)
+    for key, spec in SECTION_SPECS.items()
+}
+
+PARTIAL_FAILURE_SECTION: dict[str, str] = {
+    category: spec.key
+    for spec in SECTION_SPECS.values()
+    for category in spec.partial_failure_categories
+}
+
+TRUNCATED_KEYS_BY_SECTION: dict[str, tuple[str, ...]] = {
+    key: spec.truncation_collections
+    for key, spec in SECTION_SPECS.items()
+    if spec.truncation_collections
+}
+
+TRUNCATION_COLLECTION_SECTION: dict[str, str] = {
+    collection: spec.key
+    for spec in SECTION_SPECS.values()
+    for collection in spec.truncation_collections
+}
+
+EMPTY_TRUNCATED_COLLECTIONS: dict[str, bool] = {
+    collection: False
+    for spec in SECTION_SPECS.values()
+    for collection in spec.truncation_collections
+}
+
+MISSING_SCOPE_PARTIAL_FAILURES: frozenset[str] = frozenset(
+    category
+    for spec in SECTION_SPECS.values()
+    for category in spec.partial_failure_categories
+    if category.endswith("_missing_scope")
+)
+
+
+def module_scopes() -> dict[str, tuple[str, ...]]:
+    """Return option_key → scopes for modules that need scopes beyond core Trading."""
+    return {
+        spec.option_key: spec.scopes
+        for spec in SECTION_SPECS.values()
+        if spec.option_key and spec.scopes != (CORE_SCOPE,)
+    }
+
+
+def enabled_sections_for_options(options: Mapping[str, Any]) -> set[str]:
+    """Return payload sections that should be fetched for the given options."""
+    sections: set[str] = set()
+    for key, spec in SECTION_SPECS.items():
+        if spec.option_key is None or not options.get(spec.option_key):
+            continue
+        if spec.requires_selling and not options.get(CONF_SELLING_ENABLED):
+            continue
+        sections.add(key)
+    return sections
+
+
+def section_marketplace_capability(section: str) -> str | None:
+    """Return the marketplace capability gate for a section, if any."""
+    spec = SECTION_SPECS.get(section)
+    return None if spec is None else spec.marketplace_capability

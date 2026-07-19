@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
-from custom_components.ebay.api import enabled_sections_for_options
 from custom_components.ebay.const import (
-    ALL_SECTIONS,
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
+    CONF_ANALYTICS_ENABLED,
+    CONF_BUYING_ENABLED,
+    CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
+    CONF_FULFILLMENT_ENABLED,
+    CONF_MESSAGES_ENABLED,
+    CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
     SECTION_ACCOUNT_PRIVILEGES_INTERVAL_MINUTES,
     SECTION_ANALYTICS_INTERVAL_MINUTES,
     SECTION_FEEDBACK_INTERVAL_MINUTES,
@@ -13,7 +20,18 @@ from custom_components.ebay.const import (
     section_interval_minutes,
     section_retry_minutes,
 )
-from custom_components.ebay.sections import MESSAGES_POLL_MULTIPLIER, SECTION_SPECS
+from custom_components.ebay.sections import (
+    ALL_SECTIONS,
+    MESSAGES_POLL_MULTIPLIER,
+    MISSING_SCOPE_PARTIAL_FAILURES,
+    PARTIAL_FAILURE_CATEGORIES_BY_SECTION,
+    PARTIAL_FAILURE_SECTION,
+    SECTION_SPECS,
+    TRUNCATED_KEYS_BY_SECTION,
+    TRUNCATION_COLLECTION_SECTION,
+    enabled_sections_for_options,
+    module_scopes,
+)
 
 
 def test_section_specs_cover_all_sections() -> None:
@@ -59,35 +77,31 @@ def test_section_retry_minutes_from_specs() -> None:
 
 def test_enabled_sections_for_options_uses_specs() -> None:
     assert enabled_sections_for_options(
-        buying_enabled=True,
-        selling_enabled=False,
-        analytics_enabled=True,
-        fulfillment_enabled=True,
-        seller_standards_enabled=False,
-        feedback_enabled=False,
-        messages_enabled=True,
-        account_privileges_enabled=True,
-        finances_enabled=False,
+        {
+            CONF_BUYING_ENABLED: True,
+            CONF_SELLING_ENABLED: False,
+            CONF_ANALYTICS_ENABLED: True,
+            CONF_FULFILLMENT_ENABLED: True,
+            CONF_SELLER_STANDARDS_ENABLED: False,
+            CONF_FEEDBACK_ENABLED: False,
+            CONF_MESSAGES_ENABLED: True,
+            CONF_ACCOUNT_PRIVILEGES_ENABLED: True,
+            CONF_FINANCES_ENABLED: False,
+        }
     ) == {"buying", "fulfillment", "messages", "account_privileges"}
 
     # Analytics requires selling.
     assert "analytics" not in enabled_sections_for_options(
-        buying_enabled=False,
-        selling_enabled=False,
-        analytics_enabled=True,
-        fulfillment_enabled=False,
-        seller_standards_enabled=False,
-        feedback_enabled=False,
-        messages_enabled=False,
+        {
+            CONF_ANALYTICS_ENABLED: True,
+            CONF_SELLING_ENABLED: False,
+        }
     )
     assert "analytics" in enabled_sections_for_options(
-        buying_enabled=False,
-        selling_enabled=True,
-        analytics_enabled=True,
-        fulfillment_enabled=False,
-        seller_standards_enabled=False,
-        feedback_enabled=False,
-        messages_enabled=False,
+        {
+            CONF_ANALYTICS_ENABLED: True,
+            CONF_SELLING_ENABLED: True,
+        }
     )
 
 
@@ -105,3 +119,23 @@ def test_section_specs_partial_failure_categories_nonempty_for_ops() -> None:
         assert SECTION_SPECS[key].fetcher_name
     assert SECTION_SPECS["analytics"].marketplace_capability == "traffic_report"
     assert SECTION_SPECS["finances"].marketplace_capability == "finances"
+
+
+def test_module_scopes_derived_from_specs() -> None:
+    scopes = module_scopes()
+    assert CONF_BUYING_ENABLED not in scopes
+    assert CONF_SELLING_ENABLED not in scopes
+    assert scopes[CONF_ANALYTICS_ENABLED] == SECTION_SPECS["analytics"].scopes
+    assert scopes[CONF_FINANCES_ENABLED] == SECTION_SPECS["finances"].scopes
+    assert scopes[CONF_FULFILLMENT_ENABLED] == SECTION_SPECS["fulfillment"].scopes
+
+
+def test_partial_failure_and_truncation_maps_derived_from_specs() -> None:
+    assert PARTIAL_FAILURE_CATEGORIES_BY_SECTION["buying"] == frozenset(
+        SECTION_SPECS["buying"].partial_failure_categories
+    )
+    assert PARTIAL_FAILURE_SECTION["finances_missing_scope"] == "finances"
+    assert TRUNCATED_KEYS_BY_SECTION["buying"] == ("watched", "bidding")
+    assert TRUNCATION_COLLECTION_SECTION["orders"] == "fulfillment"
+    assert "finances_missing_scope" in MISSING_SCOPE_PARTIAL_FAILURES
+    assert "analytics_views" not in MISSING_SCOPE_PARTIAL_FAILURES

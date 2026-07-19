@@ -4,16 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..const import (
-    CONF_ACCOUNT_PRIVILEGES_ENABLED,
-    CONF_ANALYTICS_ENABLED,
-    CONF_FEEDBACK_ENABLED,
-    CONF_FINANCES_ENABLED,
-    CONF_FULFILLMENT_ENABLED,
-    CONF_MESSAGES_ENABLED,
-    CONF_SELLER_STANDARDS_ENABLED,
-    CONF_SELLING_ENABLED,
-)
+from ..const import CONF_ANALYTICS_ENABLED, CONF_SELLING_ENABLED
 
 CORE_SCOPE = "https://api.ebay.com/oauth/api_scope"
 SCOPE_ANALYTICS_READONLY = (
@@ -28,16 +19,6 @@ SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
 SCOPE_ACCOUNT_READONLY = "https://api.ebay.com/oauth/api_scope/sell.account.readonly"
 SCOPE_FINANCES = "https://api.ebay.com/oauth/api_scope/sell.finances"
 
-MODULE_SCOPES: dict[str, tuple[str, ...]] = {
-    CONF_ANALYTICS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
-    CONF_SELLER_STANDARDS_ENABLED: (SCOPE_ANALYTICS_READONLY,),
-    CONF_FULFILLMENT_ENABLED: (SCOPE_FULFILLMENT_READONLY, SCOPE_PAYMENT_DISPUTE),
-    CONF_FEEDBACK_ENABLED: (SCOPE_FEEDBACK,),
-    CONF_MESSAGES_ENABLED: (SCOPE_MESSAGE,),
-    CONF_ACCOUNT_PRIVILEGES_ENABLED: (SCOPE_ACCOUNT_READONLY,),
-    CONF_FINANCES_ENABLED: (SCOPE_FINANCES,),
-}
-
 ALL_OPTIONAL_SCOPES = (
     SCOPE_ANALYTICS_READONLY,
     SCOPE_FULFILLMENT_READONLY,
@@ -47,6 +28,20 @@ ALL_OPTIONAL_SCOPES = (
     SCOPE_ACCOUNT_READONLY,
     SCOPE_FINANCES,
 )
+
+
+def module_scopes() -> dict[str, tuple[str, ...]]:
+    """Return option_key → scopes derived from the SectionSpec registry."""
+    from ..sections import module_scopes as _from_specs
+
+    return _from_specs()
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy MODULE_SCOPES derived from SectionSpec (avoids import cycles)."""
+    if name == "MODULE_SCOPES":
+        return module_scopes()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def parse_scope_set(scopes: str | None) -> set[str]:
@@ -68,7 +63,7 @@ def join_scopes(scopes: list[str] | tuple[str, ...] | set[str]) -> str:
 def scopes_for_options(options: dict[str, Any]) -> str:
     """Return the OAuth scope string required by enabled feature options."""
     scopes: list[str] = [CORE_SCOPE]
-    for option_key, option_scopes in MODULE_SCOPES.items():
+    for option_key, option_scopes in module_scopes().items():
         if not options.get(option_key):
             continue
         # Analytics is only useful/scheduled when Selling is also enabled.
@@ -86,7 +81,7 @@ def missing_scopes_for_options(
     """Return enabled modules whose required scopes are not all granted."""
     granted_set = granted if isinstance(granted, set) else parse_scope_set(granted)
     missing: dict[str, list[str]] = {}
-    for option_key, option_scopes in MODULE_SCOPES.items():
+    for option_key, option_scopes in module_scopes().items():
         if not options.get(option_key):
             continue
         if option_key == CONF_ANALYTICS_ENABLED and not options.get(
