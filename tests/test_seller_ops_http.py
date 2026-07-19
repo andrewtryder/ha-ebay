@@ -952,37 +952,87 @@ def test_fetch_account_privileges() -> None:
 
 def test_fetch_finances_summary_and_last_payout() -> None:
     capture: list[dict[str, Any]] = []
-    client = _client(
-        [
-            _Response(
-                json_payload={
-                    "availableFunds": {"value": "200.00", "currency": "USD"},
-                    "processingFunds": {"value": "25.00", "currency": "USD"},
-                    "totalFunds": {"value": "225.00", "currency": "USD"},
-                }
-            ),
-            _Response(
-                json_payload={
-                    "payouts": [
-                        {
-                            "payoutStatus": "SUCCEEDED",
-                            "amount": {"value": "150.00", "currency": "USD"},
-                            "payoutDate": "2026-07-10T00:00:00.000Z",
-                        }
-                    ]
-                }
-            ),
-        ],
-        capture=capture,
-    )
+    # Funds + last payout + 3 failed-status pages + 3 transaction summaries
+    # + 2 payout summaries (daily/monthly).
+    responses = [
+        _Response(
+            json_payload={
+                "availableFunds": {"value": "200.00", "currency": "USD"},
+                "processingFunds": {"value": "25.00", "currency": "USD"},
+                "fundsOnHold": {"value": "5.00", "currency": "USD"},
+                "totalFunds": {"value": "230.00", "currency": "USD"},
+            }
+        ),
+        _Response(
+            json_payload={
+                "payouts": [
+                    {
+                        "payoutStatus": "SUCCEEDED",
+                        "amount": {"value": "150.00", "currency": "USD"},
+                        "payoutDate": "2026-07-10T00:00:00.000Z",
+                    }
+                ]
+            }
+        ),
+        # RETRYABLE_FAILED / TERMINAL_FAILED / REVERSED
+        _Response(json_payload={"total": 1, "payouts": []}),
+        _Response(json_payload={"total": 0, "payouts": []}),
+        _Response(
+            json_payload={
+                "total": 1,
+                "payouts": [
+                    {
+                        "payoutStatus": "REVERSED",
+                        "payoutDate": "2026-07-09T00:00:00.000Z",
+                    }
+                ],
+            }
+        ),
+        # recent / daily / monthly transaction_summary interleaved with
+        # daily / monthly payout_summary (recent has no payout_summary).
+        _Response(
+            json_payload={
+                "creditAmount": {"value": "100.00", "currency": "USD"},
+                "refundAmount": {"value": "10.00", "currency": "USD"},
+                "nonSaleChargeAmount": {"value": "5.00", "currency": "USD"},
+            }
+        ),
+        _Response(
+            json_payload={
+                "creditAmount": {"value": "10.00", "currency": "USD"},
+                "refundAmount": {"value": "1.00", "currency": "USD"},
+                "nonSaleChargeAmount": {"value": "0.50", "currency": "USD"},
+            }
+        ),
+        _Response(json_payload={"amount": {"value": "20.00", "currency": "USD"}}),
+        _Response(
+            json_payload={
+                "creditAmount": {"value": "80.00", "currency": "USD"},
+                "refundAmount": {"value": "8.00", "currency": "USD"},
+                "nonSaleChargeAmount": {"value": "4.00", "currency": "USD"},
+            }
+        ),
+        _Response(json_payload={"amount": {"value": "200.00", "currency": "USD"}}),
+    ]
+    client = _client(responses, capture=capture)
     finances = asyncio.run(client.async_fetch_finances())
     assert finances["available_funds"] == 200.0
     assert finances["pending_funds"] == 25.0
+    assert finances["held_funds"] == 5.0
     assert finances["last_payout_amount"] == 150.0
     assert finances["last_payout_status"] == "SUCCEEDED"
+    assert finances["failed_payout_count"] == 1
+    assert finances["returned_payout_count"] == 1
+    assert finances["recent_fees"] == 5.0
+    assert finances["recent_refunds"] == 10.0
+    assert finances["recent_net"] == 85.0
+    assert finances["daily_payout_total"] == 20.0
+    assert finances["monthly_payout_total"] == 200.0
     assert "/sell/finances/v1/seller_funds_summary" in capture[0]["args"][0]
     assert "/sell/finances/v1/payout" in capture[1]["args"][0]
     assert capture[1]["kwargs"].get("params", {}).get("limit") == "1"
+    assert any("/transaction_summary" in item["args"][0] for item in capture)
+    assert any("/payout_summary" in item["args"][0] for item in capture)
 
 
 def test_fetch_finances_keeps_funds_when_payout_soft_fails() -> None:
@@ -994,8 +1044,56 @@ def test_fetch_finances_keeps_funds_when_payout_soft_fails() -> None:
                 }
             ),
             _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            # failed-status pages soft-fail
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            # period summaries soft-fail
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
+            _Response(status=500, json_payload={"errors": [{"message": "boom"}]}),
         ]
     )
     finances = asyncio.run(client.async_fetch_finances())
     assert finances["available_funds"] == 10.0
     assert finances["last_payout_amount"] is None
+    assert finances["recent_fees"] is None
+
+
+def test_fetch_finances_keeps_funds_when_transaction_summary_soft_fails() -> None:
+    client = _client(
+        [
+            _Response(
+                json_payload={
+                    "availableFunds": {"value": "11.00", "currency": "USD"},
+                    "processingFunds": {"value": "1.00", "currency": "USD"},
+                }
+            ),
+            _Response(
+                json_payload={
+                    "payouts": [
+                        {
+                            "payoutStatus": "SUCCEEDED",
+                            "amount": {"value": "5.00", "currency": "USD"},
+                        }
+                    ]
+                }
+            ),
+            _Response(json_payload={"total": 0, "payouts": []}),
+            _Response(json_payload={"total": 0, "payouts": []}),
+            _Response(json_payload={"total": 0, "payouts": []}),
+            _Response(status=403, json_payload={"errors": [{"message": "denied"}]}),
+            _Response(status=403, json_payload={"errors": [{"message": "denied"}]}),
+            _Response(status=403, json_payload={"errors": [{"message": "denied"}]}),
+            _Response(status=403, json_payload={"errors": [{"message": "denied"}]}),
+            _Response(status=403, json_payload={"errors": [{"message": "denied"}]}),
+        ]
+    )
+    finances = asyncio.run(client.async_fetch_finances())
+    assert finances["available_funds"] == 11.0
+    assert finances["pending_funds"] == 1.0
+    assert finances["last_payout_amount"] == 5.0
+    assert finances["failed_payout_count"] == 0
+    assert finances["recent_net"] is None

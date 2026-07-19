@@ -1192,6 +1192,30 @@ def _seller_ops_summary_keys(seller_ops: dict[str, Any]) -> dict[str, Any]:
         "selling_near_limit": privileges.get("near_limit"),
         "available_funds": finances.get("available_funds"),
         "pending_funds": finances.get("pending_funds"),
+        "held_funds": finances.get("held_funds"),
+        "funds_currency": finances.get("funds_currency"),
         "last_payout_amount": finances.get("last_payout_amount"),
         "last_payout_status": finances.get("last_payout_status"),
+        "last_payout_date": finances.get("last_payout_date"),
+        "failed_payout_count": finances.get("failed_payout_count"),
+        "returned_payout_count": finances.get("returned_payout_count"),
+        "last_failed_payout_date": finances.get("last_failed_payout_date"),
+        "payout_failure": bool(
+            (finances.get("failed_payout_count") or 0) > 0
+            or (finances.get("returned_payout_count") or 0) > 0
+        )
+        if finances.get("failed_payout_count") is not None
+        or finances.get("returned_payout_count") is not None
+        else None,
+        "recent_fees": finances.get("recent_fees"),
+        "recent_refunds": finances.get("recent_refunds"),
+        "recent_net": finances.get("recent_net"),
+        "daily_fees": finances.get("daily_fees"),
+        "daily_refunds": finances.get("daily_refunds"),
+        "daily_net": finances.get("daily_net"),
+        "daily_payout_total": finances.get("daily_payout_total"),
+        "monthly_fees": finances.get("monthly_fees"),
+        "monthly_refunds": finances.get("monthly_refunds"),
+        "monthly_net": finances.get("monthly_net"),
+        "monthly_payout_total": finances.get("monthly_payout_total"),
     }

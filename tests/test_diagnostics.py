@@ -190,7 +190,20 @@ def test_diagnostics_account_privileges_includes_used_and_currency() -> None:
                         "quantity_remaining": 20,
                         "quantity_used": 180,
                         "near_limit": True,
-                    }
+                    },
+                    "finances": {
+                        "available_funds": 50.0,
+                        "pending_funds": 5.0,
+                        "held_funds": 2.0,
+                        "funds_currency": "USD",
+                        "failed_payout_count": 1,
+                        "returned_payout_count": 0,
+                        "recent_fees": 3.0,
+                        "recent_refunds": 1.0,
+                        "recent_net": 10.0,
+                        "daily_payout_total": 4.0,
+                        "monthly_payout_total": 40.0,
+                    },
                 },
             }
         ),
@@ -206,6 +219,11 @@ def test_diagnostics_account_privileges_includes_used_and_currency() -> None:
         "quantity_used": 180,
         "near_limit": True,
     }
+    finances = result["seller_ops_summary"]["finances"]
+    assert finances["held_funds"] == 2.0
+    assert finances["failed_payout_count"] == 1
+    assert finances["recent_net"] == 10.0
+    assert finances["monthly_payout_total"] == 40.0
 
 
 def test_section_ages_handles_invalid_and_non_datetime_values() -> None:

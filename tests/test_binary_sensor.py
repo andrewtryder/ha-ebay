@@ -239,3 +239,22 @@ def test_account_privilege_bool_binary_sensors() -> None:
     }
     assert registered.is_on is None
     assert near_limit.is_on is None
+
+
+def test_payout_failure_binary_sensor() -> None:
+    from custom_components.ebay.const import CONF_FINANCES_ENABLED
+
+    coordinator = Mock()
+    coordinator.options = {**DEFAULT_OPTIONS, CONF_FINANCES_ENABLED: True}
+    coordinator.data = {
+        "summary": {"payout_failure": True},
+        "partial_failures": [],
+        "truncated_collections": {},
+    }
+    entry = Mock(entry_id="entry-1", runtime_data=coordinator)
+    added: list = []
+    asyncio.run(
+        async_setup_entry(Mock(), entry, lambda entities: added.append(list(entities)))
+    )
+    failure = _entity_by_key(added[0], "payout_failure")
+    assert failure.is_on is True

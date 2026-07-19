@@ -91,7 +91,7 @@
           "poll_interval": "Poll interval in minutes"
         },
         "data_description": {
-          "poll_interval": "Base refresh cadence (5\u20131440 minutes). Slower sections such as feedback, analytics, and seller standards refresh on longer fixed schedules."
+          "poll_interval": "Base refresh cadence (5–1440 minutes). Slower sections such as feedback, analytics, and seller standards refresh on longer fixed schedules."
         }
       },
       "buying_alerts": {
@@ -135,7 +135,7 @@
           "feedback_enabled": "Enable feedback monitoring",
           "messages_enabled": "Enable buyer messages monitoring",
           "account_privileges_enabled": "Enable account privileges / selling limits",
-          "finances_enabled": "Enable finances (funds and last payout)"
+          "finances_enabled": "Enable finances (funds, payouts, and summaries)"
         },
         "data_description": {
           "fulfillment_enabled": "Fetches paid orders, shipment status, and open payment disputes. May require OAuth reauthorization for Fulfillment and payment-dispute scopes.",
@@ -143,7 +143,7 @@
           "feedback_enabled": "Fetches feedback score and recent rating counts. May require OAuth reauthorization for Feedback.",
           "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages.",
           "account_privileges_enabled": "Fetches seller registration status and listing amount/quantity used vs remaining, plus a near-limit warning. May require OAuth reauthorization for sell.account.readonly.",
-          "finances_enabled": "Fetches available/pending funds and the latest payout. Unsupported on marketplaces that require request signing. May require OAuth reauthorization for sell.finances."
+          "finances_enabled": "Fetches available/pending/held funds, last payout, failed/returned payouts, and daily/monthly fees/refunds/net. Unsupported on marketplaces that require request signing. May require OAuth reauthorization for sell.finances."
         }
       },
       "entities": {
@@ -162,7 +162,7 @@
       },
       "diagnostics": {
         "title": "Diagnostics",
-        "description": "Persistent problems appear under Settings \u2192 Repairs (missing scopes, invalid Site ID, repeated partial failures, truncation).\n\nFor technical detail, enable the disabled-by-default diagnostic sensors on the eBay device and download integration diagnostics.\n\nRefresh cadence: buying/selling/orders use the poll interval; messages are slower; feedback and analytics are hourly; seller standards are daily. Full Refresh fetches every enabled section; section refresh buttons refresh only Buying, Selling, Feedback, Seller operations, or Analytics."
+        "description": "Persistent problems appear under Settings → Repairs (missing scopes, invalid Site ID, repeated partial failures, truncation).\n\nFor technical detail, enable the disabled-by-default diagnostic sensors on the eBay device and download integration diagnostics.\n\nRefresh cadence: buying/selling/orders use the poll interval; messages are slower; feedback and analytics are hourly; seller standards are daily. Full Refresh fetches every enabled section; section refresh buttons refresh only Buying, Selling, Feedback, Seller operations, or Analytics."
       },
       "save": {
         "title": "Cannot save options",
@@ -329,6 +329,54 @@
       },
       "scheduled_ending_soon_timer_count": {
         "name": "Scheduled ending-soon timer count"
+      },
+      "held_funds": {
+        "name": "Held funds"
+      },
+      "last_payout_date": {
+        "name": "Last payout date"
+      },
+      "failed_payout_count": {
+        "name": "Failed payout count"
+      },
+      "returned_payout_count": {
+        "name": "Returned payout count"
+      },
+      "last_failed_payout_date": {
+        "name": "Last failed payout date"
+      },
+      "recent_fees": {
+        "name": "Recent fees (30 days)"
+      },
+      "recent_refunds": {
+        "name": "Recent refunds (30 days)"
+      },
+      "recent_net": {
+        "name": "Recent net (30 days)"
+      },
+      "daily_fees": {
+        "name": "Daily fees"
+      },
+      "daily_refunds": {
+        "name": "Daily refunds"
+      },
+      "daily_net": {
+        "name": "Daily net"
+      },
+      "daily_payout_total": {
+        "name": "Daily payout total"
+      },
+      "monthly_fees": {
+        "name": "Monthly fees"
+      },
+      "monthly_refunds": {
+        "name": "Monthly refunds"
+      },
+      "monthly_net": {
+        "name": "Monthly net"
+      },
+      "monthly_payout_total": {
+        "name": "Monthly payout total"
       }
     },
     "event": {
@@ -375,6 +423,9 @@
       },
       "api_data_truncated": {
         "name": "API data truncated"
+      },
+      "payout_failure": {
+        "name": "Payout failure"
       }
     },
     "calendar": {

@@ -494,6 +494,7 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
     from custom_components.ebay.const import (
         CONF_ACCOUNT_PRIVILEGES_ENABLED,
         CONF_FEEDBACK_ENABLED,
+        CONF_FINANCES_ENABLED,
         CONF_FULFILLMENT_ENABLED,
         CONF_MESSAGES_ENABLED,
         CONF_SELLER_STANDARDS_ENABLED,
@@ -507,6 +508,8 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
     assert "seller_level" not in default_keys
     assert "listing_amount_used" not in default_keys
     assert "listing_quantity_used" not in default_keys
+    assert "held_funds" not in default_keys
+    assert "recent_fees" not in default_keys
     assert "watched_items" in default_keys
     assert "active_selling_items" in default_keys
     assert "sold_items_count" in default_keys
@@ -520,11 +523,19 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
             CONF_FEEDBACK_ENABLED: True,
             CONF_MESSAGES_ENABLED: True,
             CONF_ACCOUNT_PRIVILEGES_ENABLED: True,
+            CONF_FINANCES_ENABLED: True,
         }
     )
     by_key = {item.key: item for item in enabled}
     assert "listing_amount_used" in by_key
     assert "listing_quantity_used" in by_key
+    assert "held_funds" in by_key
+    assert "last_payout_date" in by_key
+    assert "failed_payout_count" in by_key
+    assert "recent_net" in by_key
+    assert "monthly_payout_total" in by_key
+    assert by_key["held_funds"].entity_registry_enabled_default is False
+    assert by_key["last_payout_date"].device_class == SensorDeviceClass.TIMESTAMP
     assert by_key["listing_amount_used"].entity_registry_enabled_default is False
     assert by_key["listing_quantity_used"].entity_registry_enabled_default is False
     assert by_key["listing_amount_remaining"].entity_registry_enabled_default is False

@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
@@ -187,6 +188,13 @@ BINARY_SENSORS: tuple[EbayBinarySensorDescription, ...] = (
         is_on_fn=lambda coordinator: _summary_bool_on(
             coordinator, "selling_near_limit"
         ),
+    ),
+    EbayBinarySensorDescription(
+        key="payout_failure",
+        translation_key="payout_failure",
+        device_class=BinarySensorDeviceClass.PROBLEM,
+        feature=CONF_FINANCES_ENABLED,
+        is_on_fn=lambda coordinator: _summary_bool_on(coordinator, "payout_failure"),
     ),
     EbayBinarySensorDescription(
         key="account_data_partially_unavailable",
