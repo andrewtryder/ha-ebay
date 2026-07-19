@@ -1,0 +1,94 @@
+# Home Assistant Integration Quality Scale tracker (custom / HACS).
+# Target: Silver. Core Silver rule test-coverage requires ≥95%; this repo’s
+# pytest floor is climbing 84 → 85 → 90 → 95 (see docs/development.md). Goal: 90
+# next, then 95 for Silver test-coverage.
+# https://developers.home-assistant.io/docs/core/integration-quality-scale/
+
+rules:
+  # Bronze
+  action-setup:
+    status: exempt
+    comment: |
+      Integration exposes buttons via the button platform, not hass.services
+      register / ACTION definitions beyond entity actions.
+  appropriate-polling: done
+  brands: done
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage: done
+  dependency-transparency: done
+  docs-actions:
+    status: exempt
+    comment: No custom service actions; button entities cover manual refresh.
+  docs-conditions:
+    status: exempt
+    comment: Integration does not provide condition platforms.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: todo
+  docs-triggers:
+    status: exempt
+    comment: Event entities are used instead of device/automation triggers.
+  entity-event-setup:
+    status: exempt
+    comment: Entities do not subscribe to external events beyond the coordinator.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure: done
+  test-before-setup: done
+  unique-config-entry: done
+
+  # Silver (primary target)
+  action-exceptions: todo
+  config-entry-unloading: done
+  docs-configuration-parameters: done
+  docs-installation-parameters: done
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable: todo
+  parallel-updates: todo
+  reauthentication-flow: done
+  test-coverage:
+    status: todo
+    comment: |
+      Silver requires ≥95% coverage. Current pytest --cov-fail-under is 85%
+      (ladder 84 → 85 → 90 → 95; next goal 90, then 95 for Silver).
+
+  # Gold (stretch)
+  devices: done
+  diagnostics: done
+  discovery:
+    status: exempt
+    comment: Cloud OAuth integration; no local device discovery.
+  discovery-update-info:
+    status: exempt
+    comment: No discovery.
+  docs-data-update: todo
+  docs-examples: todo
+  docs-known-limitations: todo
+  docs-supported-devices:
+    status: exempt
+    comment: Cloud account integration; no physical devices.
+  docs-supported-functions: todo
+  docs-troubleshooting: todo
+  docs-use-cases: todo
+  dynamic-devices:
+    status: exempt
+    comment: Single logical device per config entry.
+  entity-category: done
+  entity-device-class: todo
+  entity-disabled-by-default: done
+  entity-translations: done
+  exception-translations: todo
+  icon-translations: todo
+  reconfiguration-flow: todo
+  repair-issues: done
+  stale-devices:
+    status: exempt
+    comment: Single logical device per config entry.
+
+  # Platinum (stretch)
+  async-dependency: done
+  inject-websession: done
+  strict-typing: todo

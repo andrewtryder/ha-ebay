@@ -22,6 +22,7 @@ from custom_components.ebay.diagnostics import (
     TO_REDACT,
     async_get_config_entry_diagnostics,
 )
+from custom_components.ebay.sections import SECTION_SPECS
 
 
 def _coordinator(
@@ -70,6 +71,7 @@ def test_diagnostics_without_coordinator_data() -> None:
     }
     assert result["partial_failure_categories"] == []
     assert result["partial_failure_details"] == []
+    assert result["last_api_failure"] is None
     assert result["truncated_collections"] == {}
     assert result["api_warnings"] == []
     assert result["section_last_fetched_ages_minutes"] == {}
@@ -112,6 +114,17 @@ def test_diagnostics_with_coordinator_data() -> None:
                         "source": "rest",
                     }
                 ],
+                "last_api_failure": {
+                    "operation": "analytics_views.get",
+                    "endpoint_key": "/sell/analytics/v1/traffic_report",
+                    "http_status": 403,
+                    "ebay_error_id": 1100,
+                    "ebay_domain": "API_ANALYTICS",
+                    "ebay_category": "REQUEST",
+                    "message": "Access denied",
+                    "classification": "permission",
+                    "mapped_category": "analytics_views",
+                },
                 "truncated_collections": {"selling": True},
                 "api_warnings": [{"code": "1", "short_message": "warn"}],
                 "section_last_fetched": {
@@ -133,12 +146,42 @@ def test_diagnostics_with_coordinator_data() -> None:
     assert result["partial_failure_categories"] == ["analytics_views"]
     assert result["partial_failure_details"][0]["http_status"] == 403
     assert result["partial_failure_details"][0]["errors"][0]["error_id"] == 1100
+    assert result["last_api_failure"] == {
+        "operation": "analytics_views.get",
+        "endpoint_key": "/sell/analytics/v1/traffic_report",
+        "status": 403,
+        "ebay_error_id": 1100,
+        "domain": "API_ANALYTICS",
+        "category": "REQUEST",
+        "message": "Access denied",
+        "transient": False,
+        "classification": "permission",
+        "mapped_category": "analytics_views",
+    }
     assert result["truncated_collections"] == {"selling": True}
     assert result["api_warnings"] == [{"code": "1", "short_message": "warn"}]
     assert "buying" in result["section_last_fetched_ages_minutes"]
     assert result["section_last_fetched_ages_minutes"]["buying"] is not None
     assert result["enabled_features"]["analytics"] is True
     assert result["enabled_features"]["fulfillment"] is True
+    assert set(result["enabled_features"]) == set(SECTION_SPECS)
     assert result["pinned_item_ids_count"] == 2
     assert result["seller_ops_summary"]["orders"]["order_count"] == 0
     assert result["seller_ops_summary"]["messages"]["unread_count"] is None
+
+
+def test_section_ages_handles_invalid_and_non_datetime_values() -> None:
+    from custom_components.ebay.diagnostics import _section_ages_minutes
+
+    ages = _section_ages_minutes(
+        {
+            "section_last_fetched": {
+                "buying": "not-a-timestamp",
+                "selling": 12345,
+                "feedback": None,
+            }
+        }
+    )
+    assert ages["buying"] is None
+    assert ages["selling"] is None
+    assert ages["feedback"] is None

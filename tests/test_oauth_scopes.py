@@ -10,8 +10,10 @@ from custom_components.ebay.api import (
     CORE_SCOPE,
     DEFAULT_SCOPE,
     EbayApiClient,
+    SCOPE_ACCOUNT_READONLY,
     SCOPE_ANALYTICS_READONLY,
     SCOPE_FEEDBACK,
+    SCOPE_FINANCES,
     SCOPE_FULFILLMENT_READONLY,
     SCOPE_PAYMENT_DISPUTE,
     has_core_scope,
@@ -22,8 +24,10 @@ from custom_components.ebay.api import (
     scopes_for_options,
 )
 from custom_components.ebay.const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
@@ -283,7 +287,7 @@ def test_analytics_unknown_site_becomes_partial_failure() -> None:
 
     payload = asyncio.run(run())
     assert client.async_fetch_analytics_views.await_count == 0
-    assert "analytics_views" in payload["partial_failures"]
+    assert "analytics_views_unsupported" in payload["partial_failures"]
 
 
 def test_analytics_missing_scope_classified_when_selling_enabled() -> None:
@@ -334,3 +338,94 @@ def test_analytics_missing_scope_classified_when_selling_enabled() -> None:
     assert "analytics_views_missing_scope" in payload["partial_failures"]
     assert CONF_ANALYTICS_ENABLED in payload["missing_scope_features"]
     assert "analytics_views" not in payload["partial_failures"]
+
+
+def test_scopes_for_options_account_privileges_and_finances() -> None:
+    scopes = parse_scope_set(
+        scopes_for_options(
+            {
+                CONF_ACCOUNT_PRIVILEGES_ENABLED: True,
+                CONF_FINANCES_ENABLED: True,
+            }
+        )
+    )
+    assert SCOPE_ACCOUNT_READONLY in scopes
+    assert SCOPE_FINANCES in scopes
+    assert CORE_SCOPE in scopes
+
+
+def test_finances_unsupported_marketplace_skips_fetch() -> None:
+    """FR and similar marketplaces soft-fail finances without calling the API."""
+    from custom_components.ebay.api import SECTION_FINANCES
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="71",  # EBAY_FR
+            )
+            self.async_fetch_finances = AsyncMock()
+
+    client = Client()
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=False,
+            analytics_enabled=False,
+            finances_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=join_scopes((CORE_SCOPE, SCOPE_FINANCES)),
+            sections={SECTION_FINANCES},
+        )
+
+    payload = asyncio.run(run())
+    assert client.async_fetch_finances.await_count == 0
+    assert "finances_unsupported" in payload["partial_failures"]
+
+
+def test_account_privileges_fetch_when_enabled() -> None:
+    from custom_components.ebay.api import SECTION_ACCOUNT_PRIVILEGES
+
+    class Client(EbayApiClient):
+        def __init__(self) -> None:
+            super().__init__(
+                None,  # type: ignore[arg-type]
+                environment="production",
+                client_id="client",
+                client_secret="secret",
+                runame="runame",
+                refresh_token="refresh",
+                site_id="0",
+            )
+            self.async_fetch_account_privileges = AsyncMock(
+                return_value={
+                    "seller_registration_completed": True,
+                    "amount_remaining": 100.0,
+                    "quantity_remaining": 20,
+                    "near_limit": False,
+                }
+            )
+
+    client = Client()
+
+    async def run() -> dict[str, Any]:
+        return await client.async_fetch_data(
+            buying_enabled=False,
+            selling_enabled=False,
+            analytics_enabled=False,
+            account_privileges_enabled=True,
+            ending_soon_threshold_seconds=3600,
+            granted_scopes=join_scopes((CORE_SCOPE, SCOPE_ACCOUNT_READONLY)),
+            sections={SECTION_ACCOUNT_PRIVILEGES},
+        )
+
+    payload = asyncio.run(run())
+    assert client.async_fetch_account_privileges.await_count == 1
+    assert payload["summary"]["selling_registered"] is True
+    assert payload["summary"]["listing_amount_remaining"] == 100.0

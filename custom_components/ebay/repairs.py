@@ -13,9 +13,11 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
@@ -43,6 +45,8 @@ FEATURE_LABELS = {
     CONF_SELLER_STANDARDS_ENABLED: "seller standards",
     CONF_FEEDBACK_ENABLED: "feedback",
     CONF_MESSAGES_ENABLED: "buyer messages",
+    CONF_ACCOUNT_PRIVILEGES_ENABLED: "account privileges",
+    CONF_FINANCES_ENABLED: "finances",
 }
 
 SELLER_OPS_UNAVAILABLE_CATEGORIES = {
@@ -51,6 +55,8 @@ SELLER_OPS_UNAVAILABLE_CATEGORIES = {
     "seller_standards": "seller_standards",
     "feedback": "feedback",
     "messages": "messages",
+    "account_privileges": "account_privileges",
+    "finances": "finances",
 }
 
 # Soft-fail categories that are covered by truncation or missing-scope issues.
@@ -65,11 +71,16 @@ _SKIP_PARTIAL_FAILURE_CATEGORIES = frozenset(
         "payment_disputes_truncated",
         "messages_truncated",
         "analytics_views_missing_scope",
+        "analytics_views_unsupported",
         "orders_missing_scope",
         "payment_disputes_missing_scope",
         "seller_standards_missing_scope",
         "feedback_missing_scope",
         "messages_missing_scope",
+        "account_privileges_missing_scope",
+        "finances_missing_scope",
+        "account_privileges_unsupported",
+        "finances_unsupported",
         *SELLER_OPS_UNAVAILABLE_CATEGORIES,
     }
 )
@@ -187,6 +198,28 @@ def _bump_streak(
     return streaks[key]
 
 
+def is_transient_failure_category(data: dict[str, Any], category: str) -> bool:
+    """Return True when failures for ``category`` are only transient.
+
+    Transient classifications must not advance persistent repair streaks.
+    """
+    last = data.get("last_api_failure")
+    if isinstance(last, dict) and last.get("mapped_category") == category:
+        if last.get("classification") == "transient":
+            return True
+    details = data.get("partial_failure_details") or []
+    matching = [
+        detail
+        for detail in details
+        if isinstance(detail, dict) and detail.get("mapped_category") == category
+    ]
+    if matching and all(
+        detail.get("classification") == "transient" for detail in matching
+    ):
+        return True
+    return False
+
+
 def _section_observed(refreshed_sections: set[str] | None, section: str | None) -> bool:
     """Return whether the owning section was attempted on this refresh.
 
@@ -217,6 +250,8 @@ def _enabled_sections_for_repairs(coordinator: Any) -> set[str] | None:
         seller_standards_enabled=bool(options.get(CONF_SELLER_STANDARDS_ENABLED)),
         feedback_enabled=bool(options.get(CONF_FEEDBACK_ENABLED)),
         messages_enabled=bool(options.get(CONF_MESSAGES_ENABLED)),
+        account_privileges_enabled=bool(options.get(CONF_ACCOUNT_PRIVILEGES_ENABLED)),
+        finances_enabled=bool(options.get(CONF_FINANCES_ENABLED)),
     )
 
 
@@ -359,10 +394,18 @@ async def async_sync_repair_issues(
             continue
         active = category in partial_failures
         observed = _section_observed(refreshed_sections, section)
-        streak = _bump_streak(coordinator, streak_key, active=active, observed=observed)
+        if active and is_transient_failure_category(payload, category):
+            # Transient soft-fails must not advance (or clear) persistent streaks.
+            streak = _bump_streak(coordinator, streak_key, active=True, observed=False)
+        else:
+            streak = _bump_streak(
+                coordinator, streak_key, active=active, observed=observed
+            )
         suffix = f"seller_ops_unavailable_{feature}"
         issue_id = issue_id_for(entry_id, suffix)
-        if not observed:
+        if not observed or (
+            active and is_transient_failure_category(payload, category)
+        ):
             _preserve_issue_if_present(registry, DOMAIN, issue_id, desired)
             continue
         if streak < REPAIR_STREAK_THRESHOLD:
@@ -384,6 +427,8 @@ async def async_sync_repair_issues(
                         "seller_standards": CONF_SELLER_STANDARDS_ENABLED,
                         "feedback": CONF_FEEDBACK_ENABLED,
                         "messages": CONF_MESSAGES_ENABLED,
+                        "account_privileges": CONF_ACCOUNT_PRIVILEGES_ENABLED,
+                        "finances": CONF_FINANCES_ENABLED,
                     }.get(feature, feature),
                     feature,
                 )
@@ -401,10 +446,15 @@ async def async_sync_repair_issues(
             _bump_streak(coordinator, streak_key, active=False, observed=True)
             continue
         observed = _section_observed(refreshed_sections, section)
-        streak = _bump_streak(coordinator, streak_key, active=True, observed=observed)
+        if is_transient_failure_category(payload, category):
+            streak = _bump_streak(coordinator, streak_key, active=True, observed=False)
+        else:
+            streak = _bump_streak(
+                coordinator, streak_key, active=True, observed=observed
+            )
         suffix = f"partial_failure_{category}"
         issue_id = issue_id_for(entry_id, suffix)
-        if not observed:
+        if not observed or is_transient_failure_category(payload, category):
             _preserve_issue_if_present(registry, DOMAIN, issue_id, desired)
             continue
         if streak < REPAIR_STREAK_THRESHOLD:
