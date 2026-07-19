@@ -172,6 +172,42 @@ def test_diagnostics_with_coordinator_data() -> None:
     assert result["seller_ops_summary"]["messages"]["unread_count"] is None
 
 
+def test_diagnostics_account_privileges_includes_used_and_currency() -> None:
+    entry = Mock(
+        data={CONF_ENVIRONMENT: "production", CONF_SITE_ID: "0"},
+        runtime_data=_coordinator(
+            data={
+                "watched": {},
+                "bidding": {},
+                "selling": {},
+                "summary": {},
+                "seller_ops": {
+                    "account_privileges": {
+                        "seller_registration_completed": True,
+                        "amount_remaining": 100.0,
+                        "amount_used": 900.0,
+                        "amount_currency": "USD",
+                        "quantity_remaining": 20,
+                        "quantity_used": 180,
+                        "near_limit": True,
+                    }
+                },
+            }
+        ),
+    )
+    result = asyncio.run(async_get_config_entry_diagnostics(Mock(), entry))
+    privileges = result["seller_ops_summary"]["account_privileges"]
+    assert privileges == {
+        "seller_registration_completed": True,
+        "amount_remaining": 100.0,
+        "amount_used": 900.0,
+        "amount_currency": "USD",
+        "quantity_remaining": 20,
+        "quantity_used": 180,
+        "near_limit": True,
+    }
+
+
 def test_section_ages_handles_invalid_and_non_datetime_values() -> None:
     from datetime import datetime, timezone
 

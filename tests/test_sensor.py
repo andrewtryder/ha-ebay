@@ -455,8 +455,44 @@ def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
     assert context_attrs["api_warnings"] == [{"code": "1"}]
 
 
+def test_listing_amount_sensors_include_currency_attribute() -> None:
+    from custom_components.ebay.sensor import EbaySummarySensor
+
+    coordinator = _SelectionCoordinator(
+        options={**DEFAULT_OPTIONS, "account_privileges_enabled": True},
+        data={
+            "summary": {
+                "listing_amount_remaining": 100.0,
+                "listing_amount_used": 900.0,
+                "listing_amount_currency": "USD",
+                "last_update": None,
+            },
+            "selling": {},
+            "watched": {},
+            "bidding": {},
+        },
+    )
+    remaining = EbaySummarySensor(
+        coordinator,
+        Mock(entry_id="entry-1"),
+        next(
+            item for item in SUMMARY_SENSORS if item.key == "listing_amount_remaining"
+        ),
+    )
+    used = EbaySummarySensor(
+        coordinator,
+        Mock(entry_id="entry-1"),
+        next(item for item in SUMMARY_SENSORS if item.key == "listing_amount_used"),
+    )
+    assert remaining.extra_state_attributes["currency"] == "USD"
+    assert used.extra_state_attributes["currency"] == "USD"
+    assert remaining.native_value == 100.0
+    assert used.native_value == 900.0
+
+
 def test_summary_sensors_are_gated_by_feature_options() -> None:
     from custom_components.ebay.const import (
+        CONF_ACCOUNT_PRIVILEGES_ENABLED,
         CONF_FEEDBACK_ENABLED,
         CONF_FULFILLMENT_ENABLED,
         CONF_MESSAGES_ENABLED,
@@ -469,6 +505,8 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
     assert "orders_overdue" not in default_keys
     assert "unread_conversations" not in default_keys
     assert "seller_level" not in default_keys
+    assert "listing_amount_used" not in default_keys
+    assert "listing_quantity_used" not in default_keys
     assert "watched_items" in default_keys
     assert "active_selling_items" in default_keys
     assert "sold_items_count" in default_keys
@@ -481,9 +519,15 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
             CONF_SELLER_STANDARDS_ENABLED: True,
             CONF_FEEDBACK_ENABLED: True,
             CONF_MESSAGES_ENABLED: True,
+            CONF_ACCOUNT_PRIVILEGES_ENABLED: True,
         }
     )
     by_key = {item.key: item for item in enabled}
+    assert "listing_amount_used" in by_key
+    assert "listing_quantity_used" in by_key
+    assert by_key["listing_amount_used"].entity_registry_enabled_default is False
+    assert by_key["listing_quantity_used"].entity_registry_enabled_default is False
+    assert by_key["listing_amount_remaining"].entity_registry_enabled_default is False
     assert by_key["orders_overdue"].entity_registry_enabled_default is not False
     assert by_key["open_payment_disputes"].entity_registry_enabled_default is not False
     assert by_key["unread_conversations"].entity_registry_enabled_default is not False
