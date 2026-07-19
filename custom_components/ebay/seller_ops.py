@@ -749,9 +749,10 @@ def orders_for_summary_attrs(orders_section: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Heuristic thresholds when privilege payloads only expose remaining capacity.
+# Near-limit when remaining capacity is low, or when used/(used+remaining) ≥ 90%.
 NEAR_LIMIT_QUANTITY_REMAINING = 10
 NEAR_LIMIT_AMOUNT_REMAINING = 100.0
+NEAR_LIMIT_USED_RATIO = 0.9
 
 
 def _parse_money_amount(value: Any) -> tuple[float | None, str | None]:
@@ -761,6 +762,18 @@ def _parse_money_amount(value: Any) -> tuple[float | None, str | None]:
             str(value["currency"]) if value.get("currency") else None
         )
     return _coerce_float(value), None
+
+
+def _used_ratio_near_limit(
+    used: float | int | None, remaining: float | int | None
+) -> bool:
+    """Return True when used/(used+remaining) is at least NEAR_LIMIT_USED_RATIO."""
+    if used is None or remaining is None:
+        return False
+    total = float(used) + float(remaining)
+    if total <= 0:
+        return False
+    return (float(used) / total) >= NEAR_LIMIT_USED_RATIO
 
 
 def parse_account_privileges(payload: dict[str, Any]) -> dict[str, Any]:
@@ -802,8 +815,14 @@ def parse_account_privileges(payload: dict[str, Any]) -> dict[str, Any]:
     if registered is not None:
         registered = bool(registered)
 
+    has_capacity = (
+        quantity_remaining is not None
+        or amount_remaining is not None
+        or quantity_used is not None
+        or amount_used is not None
+    )
     near_limit = None
-    if quantity_remaining is not None or amount_remaining is not None:
+    if has_capacity:
         near_limit = False
         if (
             quantity_remaining is not None
@@ -814,6 +833,10 @@ def parse_account_privileges(payload: dict[str, Any]) -> dict[str, Any]:
             amount_remaining is not None
             and amount_remaining <= NEAR_LIMIT_AMOUNT_REMAINING
         ):
+            near_limit = True
+        if _used_ratio_near_limit(quantity_used, quantity_remaining):
+            near_limit = True
+        if _used_ratio_near_limit(amount_used, amount_remaining):
             near_limit = True
 
     return {

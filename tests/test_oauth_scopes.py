@@ -407,7 +407,10 @@ def test_account_privileges_fetch_when_enabled() -> None:
                 return_value={
                     "seller_registration_completed": True,
                     "amount_remaining": 100.0,
+                    "amount_used": 900.0,
+                    "amount_currency": "USD",
                     "quantity_remaining": 20,
+                    "quantity_used": 180,
                     "near_limit": False,
                 }
             )
@@ -429,3 +432,6 @@ def test_account_privileges_fetch_when_enabled() -> None:
     assert client.async_fetch_account_privileges.await_count == 1
     assert payload["summary"]["selling_registered"] is True
     assert payload["summary"]["listing_amount_remaining"] == 100.0
+    assert payload["summary"]["listing_amount_used"] == 900.0
+    assert payload["summary"]["listing_amount_currency"] == "USD"
+    assert payload["summary"]["listing_quantity_used"] == 180

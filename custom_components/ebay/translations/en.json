@@ -142,7 +142,7 @@
           "seller_standards_enabled": "Fetches seller level, evaluation dates, and customer-service metrics. May require OAuth reauthorization for Sell Analytics.",
           "feedback_enabled": "Fetches feedback score and recent rating counts. May require OAuth reauthorization for Feedback.",
           "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages.",
-          "account_privileges_enabled": "Fetches seller registration status and remaining listing amount/quantity. May require OAuth reauthorization for sell.account.readonly.",
+          "account_privileges_enabled": "Fetches seller registration status and listing amount/quantity used vs remaining, plus a near-limit warning. May require OAuth reauthorization for sell.account.readonly.",
           "finances_enabled": "Fetches available/pending funds and the latest payout. Unsupported on marketplaces that require request signing. May require OAuth reauthorization for sell.finances."
         }
       },
@@ -285,8 +285,14 @@
       "listing_amount_remaining": {
         "name": "Listing amount remaining"
       },
+      "listing_amount_used": {
+        "name": "Listing amount used"
+      },
       "listing_quantity_remaining": {
         "name": "Listing quantity remaining"
+      },
+      "listing_quantity_used": {
+        "name": "Listing quantity used"
       },
       "available_funds": {
         "name": "Available funds"

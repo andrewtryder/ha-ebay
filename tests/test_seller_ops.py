@@ -220,6 +220,32 @@ def test_parse_account_privileges_remaining_and_near_limit() -> None:
     assert parsed["amount_remaining"] == 50.0
     assert parsed["amount_currency"] == "USD"
     assert parsed["quantity_remaining"] == 5
+    assert parsed["amount_used"] is None
+    assert parsed["quantity_used"] is None
+    assert parsed["near_limit"] is True
+
+
+def test_parse_account_privileges_used_and_ratio_near_limit() -> None:
+    from custom_components.ebay.seller_ops import parse_account_privileges
+
+    parsed = parse_account_privileges(
+        {
+            "sellerRegistrationCompleted": True,
+            "sellingLimit": {
+                "amount": {"value": "200.00", "currency": "USD"},
+                "amountUsed": {"value": "1800.00", "currency": "USD"},
+                "quantity": 100,
+                "quantityUsed": 900,
+            },
+        }
+    )
+    assert parsed["amount_remaining"] == 200.0
+    assert parsed["amount_used"] == 1800.0
+    assert parsed["amount_currency"] == "USD"
+    assert parsed["quantity_remaining"] == 100
+    assert parsed["quantity_used"] == 900
+    # Remaining thresholds alone would be False (qty 100, amount 200), but
+    # used/(used+remaining) is 0.9 for both → near_limit.
     assert parsed["near_limit"] is True
 
 

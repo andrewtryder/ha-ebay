@@ -360,9 +360,25 @@ SUMMARY_SENSORS = [
         entity_registry_enabled_default=False,
     ),
     EbaySummarySensorDescription(
+        key="listing_amount_used",
+        translation_key="listing_amount_used",
+        value_key="listing_amount_used",
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
         key="listing_quantity_remaining",
         translation_key="listing_quantity_remaining",
         value_key="listing_quantity_remaining",
+        feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_registry_enabled_default=False,
+    ),
+    EbaySummarySensorDescription(
+        key="listing_quantity_used",
+        translation_key="listing_quantity_used",
+        value_key="listing_quantity_used",
         feature=CONF_ACCOUNT_PRIVILEGES_ENABLED,
         state_class=SensorStateClass.MEASUREMENT,
         entity_registry_enabled_default=False,
@@ -894,6 +910,13 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
             attrs["window_days"] = summary.get(
                 "sold_unsold_window_days", SOLD_UNSOLD_DURATION_DAYS
             )
+        if self.entity_description.key in {
+            "listing_amount_remaining",
+            "listing_amount_used",
+        }:
+            currency = summary.get("listing_amount_currency")
+            if currency is not None:
+                attrs["currency"] = currency
         if self.entity_description.device_class == SensorDeviceClass.ENUM:
             raw = summary.get(self.entity_description.value_key)
             if raw is not None:

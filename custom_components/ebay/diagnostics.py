@@ -205,7 +205,10 @@ def _safe_seller_ops_summary(seller_ops: dict[str, Any]) -> dict[str, Any]:
                 "seller_registration_completed"
             ),
             "amount_remaining": privileges.get("amount_remaining"),
+            "amount_used": privileges.get("amount_used"),
+            "amount_currency": privileges.get("amount_currency"),
             "quantity_remaining": privileges.get("quantity_remaining"),
+            "quantity_used": privileges.get("quantity_used"),
             "near_limit": privileges.get("near_limit"),
         },
         "finances": {
