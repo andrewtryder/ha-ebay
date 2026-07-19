@@ -268,11 +268,13 @@ def test_parse_finances_funds_and_last_payout() -> None:
         {
             "availableFunds": {"value": "120.5", "currency": "USD"},
             "processingFunds": {"value": "10", "currency": "USD"},
-            "totalFunds": {"value": "130.5", "currency": "USD"},
+            "fundsOnHold": {"value": "5", "currency": "USD"},
+            "totalFunds": {"value": "135.5", "currency": "USD"},
         }
     )
     assert funds["available_funds"] == 120.5
     assert funds["pending_funds"] == 10.0
+    assert funds["held_funds"] == 5.0
     assert funds["funds_currency"] == "USD"
 
     payout = parse_last_payout(
@@ -289,6 +291,64 @@ def test_parse_finances_funds_and_last_payout() -> None:
     assert payout["last_payout_amount"] == 99.99
     assert payout["last_payout_status"] == "SUCCEEDED"
     assert payout["last_payout_date"] is not None
+
+
+def test_parse_failed_and_returned_payouts() -> None:
+    from custom_components.ebay.seller_ops import (
+        merge_failed_payout_stats,
+        parse_failed_payouts,
+        parse_payout_status_page,
+        parse_payout_summary,
+        parse_transaction_summary,
+    )
+
+    mixed = parse_failed_payouts(
+        {
+            "payouts": [
+                {
+                    "payoutStatus": "RETRYABLE_FAILED",
+                    "lastAttemptedPayoutDate": "2026-07-01T00:00:00.000Z",
+                },
+                {
+                    "payoutStatus": "REVERSED",
+                    "payoutDate": "2026-07-02T00:00:00.000Z",
+                },
+                {"payoutStatus": "SUCCEEDED"},
+            ]
+        }
+    )
+    assert mixed["failed_payout_count"] == 1
+    assert mixed["returned_payout_count"] == 1
+    assert mixed["last_failed_payout_date"] is not None
+
+    failed_page = parse_payout_status_page(
+        {"total": 3, "payouts": [{"payoutStatus": "TERMINAL_FAILED"}]},
+        status_kind="failed",
+    )
+    returned_page = parse_payout_status_page(
+        {"total": 2, "payouts": [{"payoutStatus": "REVERSED"}]},
+        status_kind="returned",
+    )
+    merged = merge_failed_payout_stats(failed_page, returned_page)
+    assert merged["failed_payout_count"] == 3
+    assert merged["returned_payout_count"] == 2
+
+    summary = parse_transaction_summary(
+        {
+            "creditAmount": {"value": "100.00", "currency": "USD"},
+            "refundAmount": {"value": "20.00", "currency": "USD"},
+            "nonSaleChargeAmount": {"value": "5.00", "currency": "USD"},
+        }
+    )
+    assert summary["fees"] == 5.0
+    assert summary["refunds"] == 20.0
+    assert summary["net"] == 75.0
+
+    payout_sum = parse_payout_summary(
+        {"amount": {"value": "50.00", "currency": "USD"}, "payoutCount": 2}
+    )
+    assert payout_sum["payout_total"] == 50.0
+    assert payout_sum["payout_count"] == 2
 
 
 def test_normalize_order_title_and_nested_tracking() -> None:

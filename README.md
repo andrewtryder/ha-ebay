@@ -125,7 +125,7 @@ Read-only monitoring of one linked eBay account:
 - Watched items, bids, and selling listings (counts, calendars, optional per-item sensors)
 - Ending-soon timers and watched-price / threshold events
 - Optional seller operations: orders, fulfillment, disputes, standards, feedback, messages
-- Optional account privileges (selling registration, listing amount/quantity used vs remaining, near-limit binary; requires `sell.account.readonly` reauth) and finances (payout) summaries when enabled and scoped
+- Optional account privileges (selling registration, listing amount/quantity used vs remaining, near-limit binary; requires `sell.account.readonly` reauth) and finances (available/pending/held funds, last payout, failed/returned payouts, daily/monthly fees/refunds/net; requires `sell.finances`; capability-gated where request signing is required) when enabled and scoped
 - Optional Sell Analytics traffic views when the marketplace and scopes support them
 - Manual refresh, inactive-item cleanup, diagnostics download, and Settings → Repairs issues
 

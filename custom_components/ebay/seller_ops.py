@@ -84,11 +84,26 @@ def empty_seller_ops() -> dict[str, Any]:
         "finances": {
             "available_funds": None,
             "pending_funds": None,
+            "held_funds": None,
             "total_funds": None,
             "funds_currency": None,
             "last_payout_amount": None,
             "last_payout_status": None,
             "last_payout_date": None,
+            "failed_payout_count": None,
+            "returned_payout_count": None,
+            "last_failed_payout_date": None,
+            "recent_fees": None,
+            "recent_refunds": None,
+            "recent_net": None,
+            "daily_fees": None,
+            "daily_refunds": None,
+            "daily_net": None,
+            "daily_payout_total": None,
+            "monthly_fees": None,
+            "monthly_refunds": None,
+            "monthly_net": None,
+            "monthly_payout_total": None,
         },
     }
 
@@ -851,23 +866,26 @@ def parse_account_privileges(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_seller_funds_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    """Parse Sell Finances seller_funds_summary into available/pending totals."""
+    """Parse Sell Finances seller_funds_summary into available/pending/held totals."""
     available, currency = _parse_money_amount(
         payload.get("availableFunds") or payload.get("available_funds")
     )
     pending, pending_currency = _parse_money_amount(
         payload.get("processingFunds")
         or payload.get("pendingFunds")
-        or payload.get("fundsOnHold")
         or payload.get("processing_funds")
+    )
+    held, held_currency = _parse_money_amount(
+        payload.get("fundsOnHold") or payload.get("funds_on_hold")
     )
     total, total_currency = _parse_money_amount(
         payload.get("totalFunds") or payload.get("total_funds")
     )
-    funds_currency = currency or pending_currency or total_currency
+    funds_currency = currency or pending_currency or held_currency or total_currency
     return {
         "available_funds": available,
         "pending_funds": pending,
+        "held_funds": held,
         "total_funds": total,
         "funds_currency": funds_currency,
     }
@@ -899,3 +917,188 @@ def parse_last_payout(payload: dict[str, Any]) -> dict[str, Any]:
         "last_payout_status": str(status) if status else None,
         "last_payout_date": stamp.isoformat() if stamp else None,
     }
+
+
+_FAILED_PAYOUT_STATUSES = frozenset({"RETRYABLE_FAILED", "TERMINAL_FAILED"})
+_RETURNED_PAYOUT_STATUSES = frozenset({"REVERSED"})
+
+
+def parse_payout_status_page(
+    payload: dict[str, Any], *, status_kind: str
+) -> dict[str, Any]:
+    """Parse a payout list filtered to one failure/returned status.
+
+    ``status_kind`` is ``failed`` or ``returned``. Uses ``total`` when present,
+    otherwise the page length.
+    """
+    payouts = payload.get("payouts") or payload.get("payout") or []
+    if isinstance(payouts, dict):
+        payouts = [payouts]
+    if not isinstance(payouts, list):
+        payouts = []
+
+    total = _coerce_int(payload.get("total"))
+    count = (
+        total
+        if total is not None
+        else len([item for item in payouts if isinstance(item, dict)])
+    )
+
+    last_failed: datetime | None = None
+    for raw in payouts:
+        if not isinstance(raw, dict):
+            continue
+        stamp = _parse_ebay_datetime(
+            raw.get("lastAttemptedPayoutDate")
+            or raw.get("payoutDate")
+            or raw.get("creationDate")
+        )
+        if stamp is not None and (last_failed is None or stamp > last_failed):
+            last_failed = stamp
+
+    if status_kind == "returned":
+        return {
+            "failed_payout_count": 0,
+            "returned_payout_count": count,
+            "last_failed_payout_date": last_failed.isoformat() if last_failed else None,
+        }
+    return {
+        "failed_payout_count": count,
+        "returned_payout_count": 0,
+        "last_failed_payout_date": last_failed.isoformat() if last_failed else None,
+    }
+
+
+def parse_failed_payouts(payload: dict[str, Any]) -> dict[str, Any]:
+    """Count failed/returned payouts from an unfiltered payout page."""
+    payouts = payload.get("payouts") or payload.get("payout") or []
+    if isinstance(payouts, dict):
+        payouts = [payouts]
+    if not isinstance(payouts, list):
+        payouts = []
+
+    failed = 0
+    returned = 0
+    last_failed: datetime | None = None
+    for raw in payouts:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("payoutStatus") or raw.get("status") or "").upper()
+        stamp = _parse_ebay_datetime(
+            raw.get("lastAttemptedPayoutDate")
+            or raw.get("payoutDate")
+            or raw.get("creationDate")
+        )
+        if status in _FAILED_PAYOUT_STATUSES:
+            failed += 1
+        elif status in _RETURNED_PAYOUT_STATUSES:
+            returned += 1
+        else:
+            continue
+        if stamp is not None and (last_failed is None or stamp > last_failed):
+            last_failed = stamp
+
+    return {
+        "failed_payout_count": failed,
+        "returned_payout_count": returned,
+        "last_failed_payout_date": last_failed.isoformat() if last_failed else None,
+    }
+
+
+def merge_failed_payout_stats(*parts: dict[str, Any]) -> dict[str, Any]:
+    """Merge per-status failed/returned payout parses into one summary."""
+    failed = 0
+    returned = 0
+    last_failed: datetime | None = None
+    saw_any = False
+    for part in parts:
+        if not part:
+            continue
+        saw_any = True
+        failed += int(part.get("failed_payout_count") or 0)
+        returned += int(part.get("returned_payout_count") or 0)
+        stamp = _parse_ebay_datetime(part.get("last_failed_payout_date"))
+        if stamp is not None and (last_failed is None or stamp > last_failed):
+            last_failed = stamp
+    if not saw_any:
+        return {
+            "failed_payout_count": None,
+            "returned_payout_count": None,
+            "last_failed_payout_date": None,
+        }
+    return {
+        "failed_payout_count": failed,
+        "returned_payout_count": returned,
+        "last_failed_payout_date": last_failed.isoformat() if last_failed else None,
+    }
+
+
+def parse_transaction_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map Finances transaction_summary into fees / refunds / net amounts."""
+    fees, fee_currency = _parse_money_amount(
+        payload.get("nonSaleChargeAmount") or payload.get("non_sale_charge_amount")
+    )
+    refunds, refund_currency = _parse_money_amount(
+        payload.get("refundAmount") or payload.get("refund_amount")
+    )
+    credits, credit_currency = _parse_money_amount(
+        payload.get("creditAmount") or payload.get("credit_amount")
+    )
+    currency = fee_currency or refund_currency or credit_currency
+    net: float | None = None
+    if credits is not None or refunds is not None or fees is not None:
+        net = (credits or 0.0) - (refunds or 0.0) - (fees or 0.0)
+    return {
+        "fees": fees,
+        "refunds": refunds,
+        "net": net,
+        "currency": currency,
+    }
+
+
+def parse_payout_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Map Finances payout_summary into a total payout amount."""
+    amount, currency = _parse_money_amount(payload.get("amount"))
+    return {
+        "payout_total": amount,
+        "payout_count": _coerce_int(
+            payload.get("payoutCount") or payload.get("payout_count")
+        ),
+        "currency": currency,
+    }
+
+
+def finances_date_range_filter(field: str, start: datetime, end: datetime) -> str:
+    """Build a Finances OpenAPI date-range filter value."""
+    start_s = start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_s = end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return f"{field}:[{start_s}..{end_s}]"
+
+
+def utc_day_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return UTC start/end for the calendar day containing ``now``."""
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    start = stamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1) - timedelta(milliseconds=1)
+    return start, end
+
+
+def utc_month_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
+    """Return UTC start/end for the calendar month containing ``now``."""
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    start = stamp.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        next_month = start.replace(year=start.year + 1, month=1)
+    else:
+        next_month = start.replace(month=start.month + 1)
+    end = next_month - timedelta(milliseconds=1)
+    return start, end
+
+
+def utc_rolling_days_bounds(
+    days: int, now: datetime | None = None
+) -> tuple[datetime, datetime]:
+    """Return UTC start/end for a rolling window ending at ``now``."""
+    end = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    start = end - timedelta(days=days)
+    return start, end
