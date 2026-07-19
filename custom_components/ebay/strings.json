@@ -78,7 +78,7 @@
           "general": "Poll interval used as the base refresh cadence.",
           "buying_alerts": "Watchlist, bidding, ending-soon timing, and price-drop alerts.",
           "selling": "Active listings and optional Sell Analytics views.",
-          "seller_operations": "Orders, seller standards, feedback, and buyer messages.",
+          "seller_operations": "Orders, seller standards, feedback, messages, account privileges, and finances.",
           "entities": "How many per-item entities Home Assistant creates.",
           "diagnostics": "Where to find diagnostic entities, Repairs, and refresh behavior.",
           "save": "Apply all section changes. May start reauthorization if new scopes are needed."
@@ -111,7 +111,7 @@
           "watched_price_change_min_percent": "Minimum absolute percent change required before directional watched-price events fire. Use 0 to emit on any numeric change. Requires Buying.",
           "watched_price_drop_threshold": "Optional global amount. Leave blank to disable. Compared only against listings in the matching currency. Requires Buying.",
           "watched_price_drop_currency": "Required when a global threshold is set. Normalized to uppercase (for example USD). Requires Buying.",
-          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY. Item IDs must also appear in pinned item IDs under Entities. Per-item targets override the global threshold. Requires Buying."
+          "pinned_item_price_targets": "One target per line: item_id=amount CURRENCY (example: 123456789012=25.00 USD). Each item_id must also be listed under Entities → Pinned item IDs. Do not put price targets in the pinned IDs field. Per-item targets override the global threshold. Requires Buying."
         }
       },
       "selling": {
@@ -133,13 +133,17 @@
           "fulfillment_enabled": "Enable orders and fulfillment data",
           "seller_standards_enabled": "Enable seller standards and service metrics",
           "feedback_enabled": "Enable feedback monitoring",
-          "messages_enabled": "Enable buyer messages monitoring"
+          "messages_enabled": "Enable buyer messages monitoring",
+          "account_privileges_enabled": "Enable account privileges / selling limits",
+          "finances_enabled": "Enable finances (funds and last payout)"
         },
         "data_description": {
           "fulfillment_enabled": "Fetches paid orders, shipment status, and open payment disputes. May require OAuth reauthorization for Fulfillment and payment-dispute scopes.",
           "seller_standards_enabled": "Fetches seller level, evaluation dates, and customer-service metrics. May require OAuth reauthorization for Sell Analytics.",
           "feedback_enabled": "Fetches feedback score and recent rating counts. May require OAuth reauthorization for Feedback.",
-          "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages."
+          "messages_enabled": "Fetches unread conversation counts without storing message bodies. May require OAuth reauthorization for Messages.",
+          "account_privileges_enabled": "Fetches seller registration status and remaining listing amount/quantity. May require OAuth reauthorization for sell.account.readonly.",
+          "finances_enabled": "Fetches available/pending funds and the latest payout. Unsupported on marketplaces that require request signing. May require OAuth reauthorization for sell.finances."
         }
       },
       "entities": {
@@ -153,12 +157,12 @@
         "data_description": {
           "entity_mode": "minimal creates no per-item entities; balanced selects a capped set; detailed allows more listings within the cap. Summary sensors are unaffected.",
           "per_item_cap": "Limits the number of selected item listings. Each selected listing can create multiple Home Assistant entities depending on item type.",
-          "pinned_item_ids": "Comma-separated eBay item IDs that should always be included in the per-item selection when entity mode is not minimal. Also required for per-item price-drop targets."
+          "pinned_item_ids": "One eBay item ID per line, or comma-separated. Use letters, digits, underscore, or hyphen only (typically numeric listing IDs). These IDs stay in the per-item selection when entity mode is not minimal. Also required for per-item price-drop targets under Buying and alerts. Do not enter amount=CURRENCY lines here."
         }
       },
       "diagnostics": {
         "title": "Diagnostics",
-        "description": "Persistent problems appear under Settings \u2192 Repairs (missing scopes, invalid Site ID, repeated partial failures, truncation).\n\nFor technical detail, enable the disabled-by-default diagnostic sensors on the eBay device and download integration diagnostics.\n\nRefresh cadence: buying/selling/orders use the poll interval; messages are slower; feedback and analytics are hourly; seller standards are daily. Manual refresh fetches every enabled section."
+        "description": "Persistent problems appear under Settings \u2192 Repairs (missing scopes, invalid Site ID, repeated partial failures, truncation).\n\nFor technical detail, enable the disabled-by-default diagnostic sensors on the eBay device and download integration diagnostics.\n\nRefresh cadence: buying/selling/orders use the poll interval; messages are slower; feedback and analytics are hourly; seller standards are daily. Full Refresh fetches every enabled section; section refresh buttons refresh only Buying, Selling, Feedback, Seller operations, or Analytics."
       },
       "save": {
         "title": "Cannot save options",
@@ -168,9 +172,10 @@
     "error": {
       "invalid": "Enter a valid nonnegative number.",
       "required": "This field is required.",
-      "invalid_price_target": "Each line must be item_id=amount CURRENCY with a nonnegative amount.",
+      "invalid_price_target": "Each line must be item_id=amount CURRENCY with a nonnegative amount (example: 123456789012=25.00 USD).",
       "duplicate_price_target": "Each pinned item ID may appear only once in price targets.",
-      "target_not_pinned": "Price target item IDs must also be listed in pinned item IDs."
+      "target_not_pinned": "Price target item IDs must also be listed in pinned item IDs.",
+      "invalid_pinned_item_ids": "Pinned item IDs must be comma- or newline-separated eBay IDs (letters, digits, underscore, or hyphen only). Do not use item_id=amount CURRENCY syntax here."
     }
   },
   "entity": {
@@ -277,6 +282,24 @@
       "oldest_unanswered_message_hours": {
         "name": "Oldest unanswered message age"
       },
+      "listing_amount_remaining": {
+        "name": "Listing amount remaining"
+      },
+      "listing_quantity_remaining": {
+        "name": "Listing quantity remaining"
+      },
+      "available_funds": {
+        "name": "Available funds"
+      },
+      "pending_funds": {
+        "name": "Pending funds"
+      },
+      "last_payout_amount": {
+        "name": "Last payout amount"
+      },
+      "last_payout_status": {
+        "name": "Last payout status"
+      },
       "refresh_context": {
         "name": "Refresh context"
       },
@@ -335,6 +358,12 @@
       "negative_feedback_received_recently": {
         "name": "Negative feedback received recently"
       },
+      "selling_registered": {
+        "name": "Selling registration completed"
+      },
+      "selling_near_limit": {
+        "name": "Near selling limit"
+      },
       "account_data_partially_unavailable": {
         "name": "Account data partially unavailable"
       },
@@ -356,6 +385,24 @@
     "button": {
       "refresh": {
         "name": "Refresh"
+      },
+      "refresh_buying": {
+        "name": "Refresh buying"
+      },
+      "refresh_selling": {
+        "name": "Refresh selling"
+      },
+      "refresh_feedback": {
+        "name": "Refresh feedback"
+      },
+      "refresh_seller_operations": {
+        "name": "Refresh seller operations"
+      },
+      "refresh_analytics": {
+        "name": "Refresh analytics"
+      },
+      "cleanup_inactive_item_entities": {
+        "name": "Clean up inactive item entities"
       }
     }
   },
