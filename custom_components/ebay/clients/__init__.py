@@ -1,7 +1,6 @@
-"""Future home for per-API HTTP clients extracted from ``api.py``.
+"""Per-API HTTP client mixins extracted from ``api.py``.
 
-This package is a stub for the planned split (Trading, Sell Analytics,
-Fulfillment, Feedback, Messages, Account, Finances). Section metadata lives in
-``sections.SECTION_SPECS``; fetch orchestration remains in ``EbayApi`` until a
-dedicated extraction pass.
+Section metadata lives in ``sections.SECTION_SPECS``. Fetch orchestration
+(``async_fetch_data`` / ``async_fetch_sections``) remains on ``EbayApiClient``
+in ``api.py``; mixins provide the per-API fetchers.
 """

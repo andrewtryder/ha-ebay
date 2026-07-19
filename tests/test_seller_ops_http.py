@@ -215,7 +215,7 @@ def test_rest_429_soft_fails_transient_after_bounded_sleep() -> None:
         [_Response(status=429, headers={"Retry-After": "30"}, json_payload={})]
     )
     with patch(
-        "custom_components.ebay.api.asyncio.sleep", new_callable=AsyncMock
+        "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
     ) as sleep:
         with pytest.raises(EbayPartialFailure) as exc_info:
             asyncio.run(

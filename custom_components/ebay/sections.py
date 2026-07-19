@@ -1,15 +1,15 @@
 """SectionSpec registry for coordinator payload sections.
 
 Pragmatic metadata for refresh cadence, OAuth scopes, marketplace gates, and
-partial-failure categories. Fetch orchestration remains in ``api.py`` for now;
-a future pass may move per-section clients under ``clients/``.
+partial-failure categories. Fetch orchestration remains in ``api.py``;
+per-API fetchers live under ``clients/``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .api import (
+from .clients.scopes import (
     CORE_SCOPE,
     SCOPE_ACCOUNT_READONLY,
     SCOPE_ANALYTICS_READONLY,
