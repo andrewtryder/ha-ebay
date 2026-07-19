@@ -179,8 +179,16 @@ async def test_item_sensor_registry_retains_selection_change_during_grace(
         for unique_id in first_ids
     }
     assert None not in first_entity_ids
-    for entity_id in first_entity_ids:
-        assert hass.states.get(entity_id) is not None
+    for unique_id in first_ids:
+        entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id is not None
+        registry_entry = entity_registry.async_get(entity_id)
+        assert registry_entry is not None
+        if unique_id.endswith("_seconds_left"):
+            assert registry_entry.disabled_by is not None
+            assert hass.states.get(entity_id) is None
+        else:
+            assert hass.states.get(entity_id) is not None
 
     second_payload = _payload("002")
     caplog.clear()
@@ -196,7 +204,12 @@ async def test_item_sensor_registry_retains_selection_change_during_grace(
         _registered_item_sensor_unique_ids(entity_registry, entry.entry_id)
     )
     assert first_ids <= set(coordinator.inactive_item_sensors)
-    for entity_id in first_entity_ids:
+    for unique_id in first_ids:
+        entity_id = entity_registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id is not None
+        if unique_id.endswith("_seconds_left"):
+            assert hass.states.get(entity_id) is None
+            continue
         state = hass.states.get(entity_id)
         assert state is not None
         assert state.state == "unavailable"

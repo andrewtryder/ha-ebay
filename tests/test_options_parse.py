@@ -14,6 +14,8 @@ from custom_components.ebay.const import (
     CONF_WATCHED_PRICE_DROP_THRESHOLD,
 )
 from custom_components.ebay.options_parse import (
+    normalize_pinned_item_ids,
+    normalize_price_targets,
     parse_nonnegative_decimal,
     parse_price_targets,
     pinned_ids,
@@ -31,9 +33,32 @@ def test_parse_price_targets_normalizes() -> None:
     }
 
 
+def test_parse_price_targets_from_structured_list() -> None:
+    targets = parse_price_targets(
+        [
+            {"item_id": "1", "amount": "9.50", "currency": "usd"},
+            {"item_id": "2", "amount": 12, "currency": "EUR"},
+        ]
+    )
+    assert targets == {
+        "1": (Decimal("9.50"), "USD"),
+        "2": (Decimal("12"), "EUR"),
+    }
+    assert normalize_price_targets(
+        [{"item_id": "2", "amount": "5", "currency": "GBP"}]
+    ) == [{"item_id": "2", "amount": "5", "currency": "GBP"}]
+
+
 def test_parse_price_targets_rejects_duplicates() -> None:
     with pytest.raises(ValueError, match="duplicate_price_target"):
         parse_price_targets("1=10 USD\n1=20 USD")
+    with pytest.raises(ValueError, match="duplicate_price_target"):
+        parse_price_targets(
+            [
+                {"item_id": "1", "amount": "10", "currency": "USD"},
+                {"item_id": "1", "amount": "20", "currency": "USD"},
+            ]
+        )
 
 
 def test_parse_price_targets_rejects_invalid() -> None:
@@ -41,6 +66,10 @@ def test_parse_price_targets_rejects_invalid() -> None:
         parse_price_targets("not-a-target")
     with pytest.raises(ValueError, match="invalid_price_target"):
         parse_price_targets("1=-5 USD")
+    with pytest.raises(ValueError, match="invalid_price_target"):
+        parse_price_targets([{"item_id": "1", "amount": "-1", "currency": "USD"}])
+    with pytest.raises(ValueError, match="invalid_price_target"):
+        parse_price_targets({"item_id": "1", "amount": "1", "currency": "USD"})
 
 
 def test_validate_price_options_accepts_valid() -> None:
@@ -53,6 +82,22 @@ def test_validate_price_options_accepts_valid() -> None:
     }
     assert validate_price_options(data) == {}
     assert data[CONF_WATCHED_PRICE_DROP_CURRENCY] == "USD"
+    assert data[CONF_PINNED_ITEM_PRICE_TARGETS] == [
+        {"item_id": "1", "amount": "9.99", "currency": "USD"}
+    ]
+
+
+def test_validate_price_options_accepts_structured_list() -> None:
+    data = {
+        CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT: 0,
+        CONF_WATCHED_PRICE_DROP_THRESHOLD: "",
+        CONF_WATCHED_PRICE_DROP_CURRENCY: "",
+        CONF_PINNED_ITEM_IDS: ["1", "2"],
+        CONF_PINNED_ITEM_PRICE_TARGETS: [
+            {"item_id": "1", "amount": "9.99", "currency": "USD"}
+        ],
+    }
+    assert validate_price_options(data) == {}
 
 
 def test_validate_price_options_rejects_incomplete_threshold() -> None:
@@ -92,12 +137,16 @@ def test_validate_price_options_rejects_negative_percent() -> None:
 
 
 def test_validate_pinned_item_options_accepts_valid() -> None:
-    assert (
-        validate_pinned_item_options(
-            {CONF_PINNED_ITEM_IDS: "123456789012\n987654321098, abc-1_2"}
-        )
-        == {}
-    )
+    data = {CONF_PINNED_ITEM_IDS: "123456789012\n987654321098, abc-1_2"}
+    assert validate_pinned_item_options(data) == {}
+    assert data[CONF_PINNED_ITEM_IDS] == [
+        "123456789012",
+        "987654321098",
+        "abc-1_2",
+    ]
+    data = {CONF_PINNED_ITEM_IDS: ["xyz", "abc"]}
+    assert validate_pinned_item_options(data) == {}
+    assert data[CONF_PINNED_ITEM_IDS] == ["abc", "xyz"]
 
 
 def test_validate_pinned_item_options_rejects_malformed() -> None:
@@ -125,6 +174,8 @@ def test_parse_nonnegative_decimal_and_to_decimal() -> None:
 
 def test_pinned_ids_and_blank_price_target_lines() -> None:
     assert pinned_ids("1\n2, 3") == {"1", "2", "3"}
+    assert pinned_ids(["1", "2", " 3 "]) == {"1", "2", "3"}
+    assert normalize_pinned_item_ids("2,1") == ["1", "2"]
     assert parse_price_targets("\n\n1=10 USD\n") == {"1": (Decimal("10"), "USD")}
 
 
