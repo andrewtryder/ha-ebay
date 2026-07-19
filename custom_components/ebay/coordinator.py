@@ -7,6 +7,7 @@ from decimal import Decimal
 from collections import deque
 import logging
 import time
+from collections.abc import Awaitable
 from typing import Any, Callable
 
 from homeassistant.config_entries import ConfigEntry
@@ -23,11 +24,13 @@ from .api import (
     enabled_sections_for_options,
 )
 from .const import (
+    CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_ENDING_SOON_THRESHOLD,
     CONF_ENTITY_MODE,
     CONF_FEEDBACK_ENABLED,
+    CONF_FINANCES_ENABLED,
     CONF_FULFILLMENT_ENABLED,
     CONF_MESSAGES_ENABLED,
     CONF_OAUTH_SCOPES,
@@ -62,6 +65,7 @@ from .options_parse import parse_price_targets, pinned_ids, to_decimal
 _LOGGER = logging.getLogger(__name__)
 
 EventCallback = Callable[[str, dict[str, Any]], None]
+ItemEntityCleanupCallback = Callable[..., Awaitable[int]]
 EndingSoonKey = tuple[str, str, str, int, str]
 SelectedItemKey = tuple[str, str]
 
@@ -136,10 +140,15 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_refresh_duration_seconds: float | None = None
         self.last_refresh_result: str = REFRESH_RESULT_UNKNOWN
         self.selected_item_keys: set[SelectedItemKey] = set()
+        # unique_id -> UTC time the sensor left the capped selection.
+        self.inactive_item_sensors: dict[str, datetime] = {}
+        self._item_entity_cleanup: ItemEntityCleanupCallback | None = None
         self._event_callbacks: dict[str, EventCallback] = {}
         self._timer_listeners: list[Callable[[], None]] = []
         self._scheduled: dict[EndingSoonKey, CALLBACK_TYPE] = {}
         self._fired_ending_soon: set[EndingSoonKey] = set()
+        self._fired_ending_soon_dirty = False
+        self._ending_soon_fired_save_task: Any | None = None
         # Items currently at/below their effective drop threshold (no repeat events).
         self._price_drop_below_active: set[str] = set()
         self._recent_events: dict[str, deque[dict[str, Any]]] = {
@@ -152,6 +161,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._recent_history_ending_soon: set[EndingSoonKey] = set()
         self._manual_refresh_last_requested: float | None = None
         self._force_full_refresh = False
+        self._force_sections: set[str] | None = None
         self._repair_streaks: dict[str, int] = {}
         self._repair_streaks_dirty = False
         super().__init__(
@@ -214,8 +224,13 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for listener in list(self._timer_listeners):
             listener()
 
-    async def async_request_manual_refresh(self) -> bool:
+    async def async_request_manual_refresh(
+        self, sections: set[str] | frozenset[str] | None = None
+    ) -> bool:
         """Request a coordinator refresh subject to the manual cooldown.
+
+        When ``sections`` is None, every enabled section is forced. Otherwise only
+        the intersection of ``sections`` and currently enabled sections is forced.
 
         Returns True when a refresh was requested, False when ignored.
         """
@@ -237,8 +252,21 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return False
         self._manual_refresh_last_requested = now
-        self._force_full_refresh = True
-        _LOGGER.debug("Requesting eBay manual refresh entry_id=%s", self.entry.entry_id)
+        if sections is None:
+            self._force_full_refresh = True
+            self._force_sections = None
+        else:
+            self._force_full_refresh = False
+            enabled = self._enabled_sections()
+            self._force_sections = {
+                section for section in sections if section in enabled
+            }
+        _LOGGER.debug(
+            "Requesting eBay manual refresh entry_id=%s force_full=%s force_sections=%s",
+            self.entry.entry_id,
+            self._force_full_refresh,
+            sorted(self._force_sections) if self._force_sections is not None else None,
+        )
         await self.async_request_refresh()
         return True
 
@@ -252,6 +280,10 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             seller_standards_enabled=bool(self.options[CONF_SELLER_STANDARDS_ENABLED]),
             feedback_enabled=bool(self.options[CONF_FEEDBACK_ENABLED]),
             messages_enabled=bool(self.options[CONF_MESSAGES_ENABLED]),
+            account_privileges_enabled=bool(
+                self.options[CONF_ACCOUNT_PRIVILEGES_ENABLED]
+            ),
+            finances_enabled=bool(self.options[CONF_FINANCES_ENABLED]),
         )
 
     def _due_sections(self, *, force: bool) -> set[str]:
@@ -316,13 +348,23 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         seller_standards_enabled = bool(self.options[CONF_SELLER_STANDARDS_ENABLED])
         feedback_enabled = bool(self.options[CONF_FEEDBACK_ENABLED])
         messages_enabled = bool(self.options[CONF_MESSAGES_ENABLED])
+        account_privileges_enabled = bool(self.options[CONF_ACCOUNT_PRIVILEGES_ENABLED])
+        finances_enabled = bool(self.options[CONF_FINANCES_ENABLED])
         force = self._force_full_refresh
+        force_sections = self._force_sections
         self._force_full_refresh = False
-        due_sections = self._due_sections(force=force)
+        self._force_sections = None
+        if force:
+            due_sections = self._due_sections(force=True)
+        elif force_sections is not None:
+            due_sections = set(force_sections)
+        else:
+            due_sections = self._due_sections(force=False)
         _LOGGER.debug(
-            "eBay coordinator refresh started entry_id=%s force=%s due_sections=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s",
+            "eBay coordinator refresh started entry_id=%s force=%s force_sections=%s due_sections=%s buying_enabled=%s selling_enabled=%s analytics_enabled=%s fulfillment_enabled=%s seller_standards_enabled=%s feedback_enabled=%s messages_enabled=%s account_privileges_enabled=%s finances_enabled=%s",
             self.entry.entry_id,
             force,
+            sorted(force_sections) if force_sections is not None else None,
             sorted(due_sections),
             buying_enabled,
             selling_enabled,
@@ -331,6 +373,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             seller_standards_enabled,
             feedback_enabled,
             messages_enabled,
+            account_privileges_enabled,
+            finances_enabled,
         )
         if not due_sections and self.data is not None:
             self._record_refresh_attempt(
@@ -351,6 +395,8 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 seller_standards_enabled=seller_standards_enabled,
                 feedback_enabled=feedback_enabled,
                 messages_enabled=messages_enabled,
+                account_privileges_enabled=account_privileges_enabled,
+                finances_enabled=finances_enabled,
                 ending_soon_threshold_seconds=self.ending_soon_threshold_seconds,
                 granted_scopes=self.entry.data.get(CONF_OAUTH_SCOPES),
                 sections=due_sections,
@@ -419,6 +465,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._rebuild_ending_soon_timers(payload)
         self.previous_payload = _baseline_payload(self.previous_payload, payload)
         self.refresh_selected_item_keys(payload)
+        await self._async_flush_ending_soon_fired()
 
         from .repairs import async_sync_repair_issues
 
@@ -473,6 +520,18 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             int(self.options[CONF_PER_ITEM_CAP]),
         )
         return self.selected_item_keys
+
+    def register_item_entity_cleanup(
+        self, cleanup: ItemEntityCleanupCallback | None
+    ) -> None:
+        """Register the sensor-platform callback that removes inactive item entities."""
+        self._item_entity_cleanup = cleanup
+
+    async def async_cleanup_inactive_item_entities(self, *, force: bool = True) -> int:
+        """Remove inactive item sensors (all when force, else past grace only)."""
+        if self._item_entity_cleanup is None:
+            return 0
+        return await self._item_entity_cleanup(force=force)
 
     def _emit(
         self,
@@ -1023,34 +1082,44 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         prev_feedback = previous.get("feedback") or {}
         curr_feedback = current.get("feedback") or {}
-        prev_total = (
-            int(prev_feedback.get("recent_positive") or 0)
-            + int(prev_feedback.get("recent_neutral") or 0)
-            + int(prev_feedback.get("recent_negative") or 0)
+        prev_ids = prev_feedback.get("recent_feedback_ids")
+        curr_ids = curr_feedback.get("recent_feedback_ids")
+        feedback_ids_usable = (
+            isinstance(prev_ids, list)
+            and isinstance(curr_ids, list)
+            and not prev_feedback.get("items_truncated")
+            and not curr_feedback.get("items_truncated")
         )
-        curr_total = (
-            int(curr_feedback.get("recent_positive") or 0)
-            + int(curr_feedback.get("recent_neutral") or 0)
-            + int(curr_feedback.get("recent_negative") or 0)
-        )
-        if curr_total > prev_total:
-            self._emit(
-                "seller_ops",
-                "feedback_received",
-                {},
-                old_value=prev_total,
-                new_value=curr_total,
-            )
-        prev_neg = int(prev_feedback.get("recent_negative") or 0)
-        curr_neg = int(curr_feedback.get("recent_negative") or 0)
-        if curr_neg > prev_neg:
-            self._emit(
-                "seller_ops",
-                "negative_feedback_received",
-                {},
-                old_value=prev_neg,
-                new_value=curr_neg,
-            )
+        if feedback_ids_usable:
+            prev_id_set = set(prev_ids)
+            new_ids = [fid for fid in curr_ids if fid not in prev_id_set]
+            if new_ids:
+                self._emit(
+                    "seller_ops",
+                    "feedback_received",
+                    {},
+                    old_value=len(prev_ids),
+                    new_value=len(curr_ids),
+                )
+            curr_negative_ids = curr_feedback.get("recent_negative_feedback_ids")
+            if isinstance(curr_negative_ids, list):
+                negative_id_set = set(curr_negative_ids)
+                new_negative_ids = [fid for fid in new_ids if fid in negative_id_set]
+                if new_negative_ids:
+                    prev_negative_ids = prev_feedback.get(
+                        "recent_negative_feedback_ids"
+                    )
+                    self._emit(
+                        "seller_ops",
+                        "negative_feedback_received",
+                        {},
+                        old_value=(
+                            len(prev_negative_ids)
+                            if isinstance(prev_negative_ids, list)
+                            else 0
+                        ),
+                        new_value=len(curr_negative_ids),
+                    )
         prev_score = prev_feedback.get("score")
         curr_score = curr_feedback.get("score")
         if (
@@ -1087,10 +1156,52 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self._emit("seller_ops", "new_message_received", payload)
 
+    def _mark_ending_soon_fired(self, key: EndingSoonKey) -> None:
+        """Record a fired ending-soon key and mark persistence dirty."""
+        if key in self._fired_ending_soon:
+            return
+        self._fired_ending_soon.add(key)
+        self._mark_fired_ending_soon_dirty()
+
+    def _mark_fired_ending_soon_dirty(self) -> None:
+        """Mark fired ending-soon keys dirty and schedule a store flush."""
+        self._fired_ending_soon_dirty = True
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+        task = getattr(self, "_ending_soon_fired_save_task", None)
+        if task is not None and not task.done():
+            return
+        self._ending_soon_fired_save_task = hass.async_create_task(
+            self._async_flush_ending_soon_fired()
+        )
+
+    async def _async_flush_ending_soon_fired(self) -> None:
+        """Persist fired ending-soon keys when the in-memory set changed."""
+        if not getattr(self, "_fired_ending_soon_dirty", False):
+            return
+        from .ending_soon_store import async_save_ending_soon_fired
+
+        await async_save_ending_soon_fired(
+            self.hass, self.entry.entry_id, self._fired_ending_soon
+        )
+        self._fired_ending_soon_dirty = False
+
+    def _prune_fired_ending_soon(self, now: datetime) -> None:
+        """Drop fired keys after listing end_time plus retention window."""
+        from .ending_soon_store import prune_ending_soon_fired_keys
+
+        pruned = prune_ending_soon_fired_keys(self._fired_ending_soon, now)
+        if pruned != self._fired_ending_soon:
+            self._fired_ending_soon = pruned
+            self._mark_fired_ending_soon_dirty()
+
     def _rebuild_ending_soon_timers(self, payload: dict[str, Any]) -> None:
         wanted: set[EndingSoonKey] = set()
         previous_keys = set(self._scheduled)
         threshold = self.ending_soon_threshold_seconds
+        now = datetime.now(timezone.utc)
+        self._prune_fired_ending_soon(now)
         for kind, collection, event_type in (
             ("watching", payload["watched"], "watched_item_ending_soon"),
             ("bidding", payload["bidding"], "bidding_item_ending_soon"),
@@ -1099,7 +1210,6 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 end_time = item.get("end_time")
                 if not isinstance(end_time, datetime):
                     continue
-                now = datetime.now(timezone.utc)
                 if item.get("seconds_left") == 0 or end_time <= now:
                     continue
                 normalized_end_time = _normalized_end_time(end_time)
@@ -1128,7 +1238,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 _with_current_seconds_left(item, now),
                                 history_key=key,
                             ):
-                                self._fired_ending_soon.add(key)
+                                self._mark_ending_soon_fired(key)
                         else:
                             _LOGGER.debug(
                                 "Skipping already-fired eBay ending-soon timer kind=%s item_id=%s threshold=%s end_time=%s",
@@ -1184,7 +1294,6 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     normalized_end_time,
                 )
                 self._scheduled.pop(key)()
-        self._fired_ending_soon.intersection_update(wanted)
         self._recent_history_ending_soon.intersection_update(wanted)
         if set(self._scheduled) != previous_keys:
             self._async_notify_timer_listeners()
@@ -1248,7 +1357,7 @@ class EbayDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _with_current_seconds_left(item, now),
                 history_key=key,
             ):
-                self._fired_ending_soon.add(key)
+                self._mark_ending_soon_fired(key)
 
         return fire
 
