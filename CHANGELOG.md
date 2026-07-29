@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/andrewtryder/ha-ebay/compare/v0.8.0...v0.8.1) (2026-07-29)
+
+
+### Bug Fixes
+
+* route Analytics through shared REST soft-fail handling ([91a1650](https://github.com/andrewtryder/ha-ebay/commit/91a1650ef6ef2dda058dde33ff027ef59f07220a))
+* route Analytics through shared REST soft-fail handling ([ec776ad](https://github.com/andrewtryder/ha-ebay/commit/ec776adb73aa4c0a04361f74bb3bd58e04fb35b1))
+
 ## [0.8.0](https://github.com/andrewtryder/ha-ebay/compare/v0.7.0...v0.8.0) (2026-07-19)
 
 
