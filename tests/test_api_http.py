@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 import logging
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
+import aiohttp
 import pytest
 
 from custom_components.ebay.api import (
@@ -21,6 +24,7 @@ from custom_components.ebay.api import (
     EbayParseError,
     EbayPartialFailure,
     BEST_OFFERS_CALL_NAME,
+    analytics_date_range_filter,
     build_get_my_ebay_buying_xml,
     chunk_item_ids,
     dedupe_trading_warnings,
@@ -57,22 +61,32 @@ class _Response:
         self,
         *,
         status: int = 200,
-        text: str = "",
+        text: str | None = None,
         json_payload: Any | None = None,
+        headers: dict[str, str] | None = None,
         raise_json: Exception | None = None,
     ) -> None:
         self.status = status
+        self.headers = headers or {}
         self._text = text
         self._json_payload = json_payload
         self._raise_json = raise_json
 
     async def text(self) -> str:
-        return self._text
+        if self._text is not None:
+            return self._text
+        if self._json_payload is None:
+            return ""
+        return json.dumps(self._json_payload)
 
     async def json(self, *, content_type: str | None = None) -> Any:
         if self._raise_json:
             raise self._raise_json
-        return self._json_payload
+        if self._json_payload is None and self._text is not None:
+            if not self._text.strip():
+                raise json.JSONDecodeError("Expecting value", self._text, 0)
+            return json.loads(self._text)
+        return self._json_payload if self._json_payload is not None else {}
 
 
 class _Context:
@@ -175,7 +189,7 @@ def test_analytics_partial_intermediate_batch_failure_keeps_successes() -> None:
 def test_analytics_batch_failure_debug_log_includes_batch_context(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.api")
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.clients.analytics")
 
     class Client(EbayApiClient):
         def __init__(self) -> None:
@@ -469,24 +483,88 @@ def test_dedupe_trading_warnings_by_code_and_message() -> None:
     assert API_WARNINGS_STATE_ATTR_MAX == 10
 
 
-def test_analytics_http_403_is_partial_failure() -> None:
+def test_analytics_http_403_is_partial_failure_with_api_failure() -> None:
     session = Mock()
     client = _client(session)
     client.async_get_access_token = AsyncMock(return_value="token")
-    session.get.return_value = _Context(_Response(status=403, text="forbidden"))
-    with pytest.raises(EbayPartialFailure, match="analytics_views"):
+    session.get.return_value = _Context(
+        _Response(status=403, json_payload={"errors": [{"message": "forbidden"}]})
+    )
+    with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
         asyncio.run(client.async_get_traffic_report(["1"]))
     assert session.get.call_count == 1
+    assert client._last_api_failure is not None
+    assert client._last_api_failure.mapped_category == "analytics_views"
+    assert client._last_api_failure.classification == "permission"
+    assert client._last_api_failure.http_status == 403
+    assert client._last_api_failure.operation == "analytics.traffic_report"
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "permission"
 
 
-def test_analytics_http_400_is_partial_failure() -> None:
+def test_analytics_http_400_is_partial_failure_with_api_failure() -> None:
     session = Mock()
     client = _client(session)
     client.async_get_access_token = AsyncMock(return_value="token")
-    session.get.return_value = _Context(_Response(status=400, text="bad request"))
-    with pytest.raises(EbayPartialFailure, match="analytics_views"):
+    session.get.return_value = _Context(
+        _Response(status=400, json_payload={"errors": [{"message": "bad request"}]})
+    )
+    with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
         asyncio.run(client.async_get_traffic_report(["1"]))
     assert session.get.call_count == 1
+    assert client._last_api_failure is not None
+    assert client._last_api_failure.classification == "malformed_request"
+    assert client._last_api_failure.http_status == 400
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "malformed_request"
+
+
+def test_analytics_http_429_is_transient_partial_failure() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(
+        _Response(status=429, headers={"Retry-After": "30"}, json_payload={})
+    )
+    with patch(
+        "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
+    ) as sleep:
+        with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
+            asyncio.run(client.async_get_traffic_report(["1"]))
+    sleep.assert_awaited_once_with(5)
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "transient"
+    assert client._last_api_failure is not None
+    assert client._last_api_failure.classification == "transient"
+    assert client._last_api_failure.http_status == 429
+
+
+def test_analytics_http_5xx_is_transient_partial_failure() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(_Response(status=503, json_payload={}))
+    with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
+        asyncio.run(client.async_get_traffic_report(["1"]))
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "transient"
+    assert client._last_api_failure is not None
+    assert client._last_api_failure.classification == "transient"
+    assert client._last_api_failure.http_status == 503
+
+
+def test_analytics_transport_error_is_transient_partial_failure() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.side_effect = aiohttp.ClientError("connection reset")
+    with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
+        asyncio.run(client.async_get_traffic_report(["1"]))
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "transient"
+    assert client._last_api_failure is not None
+    assert client._last_api_failure.classification == "transient"
+    assert client._last_api_failure.http_status is None
 
 
 def test_analytics_http_401_retries_then_raises_auth_error() -> None:
@@ -509,6 +587,36 @@ def test_analytics_http_401_then_successful_retry() -> None:
     ]
     assert asyncio.run(client.async_get_traffic_report(["1"])) == {"records": []}
     assert session.get.call_count == 2
+
+
+def test_analytics_date_range_uses_pacific_calendar_days() -> None:
+    # 2024-01-02 05:00 UTC is still 2024-01-01 in America/Los_Angeles.
+    now = datetime(2024, 1, 2, 5, 0, tzinfo=timezone.utc)
+    assert analytics_date_range_filter(now=now) == "date_range:[20231202..20240101]"
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    local = datetime(2024, 1, 2, 0, 30, tzinfo=pacific)
+    assert analytics_date_range_filter(now=local) == "date_range:[20231203..20240102]"
+
+
+def test_analytics_request_filter_uses_pacific_date_range() -> None:
+    session = Mock()
+    client = _client(session)
+    client.async_get_access_token = AsyncMock(return_value="token")
+    session.get.return_value = _Context(
+        _Response(status=200, json_payload={"records": []})
+    )
+    now = datetime(2024, 1, 2, 5, 0, tzinfo=timezone.utc)
+    with patch(
+        "custom_components.ebay.clients.analytics.analytics_date_range_filter",
+        return_value=analytics_date_range_filter(now=now),
+    ):
+        asyncio.run(client.async_get_traffic_report(["1", "2"]))
+    params = session.get.call_args.kwargs["params"]
+    assert params["dimension"] == "LISTING"
+    assert params["metric"] == "LISTING_VIEWS_TOTAL"
+    assert "listing_ids:{1|2}" in params["filter"]
+    assert "date_range:[20231202..20240101]" in params["filter"]
 
 
 def test_analytics_auth_error_propagates_from_batch_fetch() -> None:
