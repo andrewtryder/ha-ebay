@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/andrewtryder/ha-ebay/compare/v0.8.1...v0.8.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* pin ruff to the version pre-commit enforces ([0b1d18d](https://github.com/andrewtryder/ha-ebay/commit/0b1d18d5b586bfb660eeb95fe0f18c236822dc4d))
+* pin ruff to the version pre-commit enforces ([9904159](https://github.com/andrewtryder/ha-ebay/commit/99041598748f118b5914d537440729063ca04948))
+
 ## [0.8.1](https://github.com/andrewtryder/ha-ebay/compare/v0.8.0...v0.8.1) (2026-07-29)
 
 
