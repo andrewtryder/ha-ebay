@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import base64
-from http import HTTPStatus
 import json
 import logging
 import time
+from http import HTTPStatus
 from typing import Any, cast
 
 from aiohttp import ClientError
-from yarl import URL
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.config_entry_oauth2_flow import (
@@ -19,6 +17,7 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     LocalOAuth2Implementation,
     async_get_redirect_uri,
 )
+from yarl import URL
 
 from .api import CORE_SCOPE, endpoints_for
 from .const import (

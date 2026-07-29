@@ -107,11 +107,10 @@ class EbayListingCalendar(CoordinatorEntity[EbayDataUpdateCoordinator], Calendar
             CONF_BUYING_ENABLED, True
         ):
             return False
-        if self._description.requires_selling and not options.get(
-            CONF_SELLING_ENABLED, True
-        ):
-            return False
-        return True
+        return not (
+            self._description.requires_selling
+            and not options.get(CONF_SELLING_ENABLED, True)
+        )
 
     @property
     def event(self) -> CalendarEvent | None:

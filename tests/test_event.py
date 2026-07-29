@@ -13,7 +13,7 @@ from custom_components.ebay.const import (
     SELLING_EVENT_TYPES,
 )
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
-from custom_components.ebay.event import EbayActivityEvent, EVENTS, async_setup_entry
+from custom_components.ebay.event import EVENTS, EbayActivityEvent, async_setup_entry
 
 
 def _coordinator() -> EbayDataUpdateCoordinator:

@@ -2,7 +2,7 @@ pytest
 pytest-cov
 # Keep in sync with the ruff-pre-commit rev in .pre-commit-config.yaml; ruff
 # changes its default rule set between minor releases.
-ruff==0.15.21
+ruff==0.16.0
 pre-commit
 pillow
 aiohttp

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import ExitStack
 import logging
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -307,9 +307,8 @@ def test_async_setup_entry_first_refresh_api_failure() -> None:
     coordinator.async_config_entry_first_refresh = AsyncMock(
         side_effect=ConfigEntryNotReady("fail")
     )
-    with _patch_setup(coordinator=coordinator):
-        with pytest.raises(ConfigEntryNotReady):
-            asyncio.run(ebay_integration.async_setup_entry(hass, entry))
+    with _patch_setup(coordinator=coordinator), pytest.raises(ConfigEntryNotReady):
+        asyncio.run(ebay_integration.async_setup_entry(hass, entry))
 
 
 def test_async_setup_entry_first_refresh_auth_failure() -> None:
@@ -319,9 +318,11 @@ def test_async_setup_entry_first_refresh_auth_failure() -> None:
     coordinator.async_config_entry_first_refresh = AsyncMock(
         side_effect=ConfigEntryAuthFailed("auth")
     )
-    with _patch_setup(coordinator=coordinator):
-        with pytest.raises(ConfigEntryAuthFailed):
-            asyncio.run(ebay_integration.async_setup_entry(hass, entry))
+    with (
+        _patch_setup(coordinator=coordinator),
+        pytest.raises(ConfigEntryAuthFailed),
+    ):
+        asyncio.run(ebay_integration.async_setup_entry(hass, entry))
 
 
 def test_async_unload_cancels_timers_and_unloads_platforms() -> None:

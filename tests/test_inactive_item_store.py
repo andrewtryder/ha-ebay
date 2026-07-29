@@ -56,7 +56,7 @@ def test_inactive_item_store_round_trip(monkeypatch: pytest.MonkeyPatch) -> None
 def test_parse_inactive_since_variants() -> None:
     from custom_components.ebay.inactive_item_store import _parse_inactive_since
 
-    naive = datetime(2026, 7, 10, 12, 0)
+    naive = datetime(2026, 7, 10, 12, 0)  # noqa: DTZ001
     assert _parse_inactive_since(naive) == naive.replace(tzinfo=timezone.utc)
 
     aware = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)

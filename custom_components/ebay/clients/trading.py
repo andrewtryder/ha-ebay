@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 import xml.etree.ElementTree as ET
+from typing import Any
 
 import aiohttp
 

@@ -118,7 +118,7 @@ def _parse_price_targets_from_list(
     targets: dict[str, tuple[Decimal, str]] = {}
     for raw in value:
         if not isinstance(raw, dict):
-            raise ValueError("invalid_price_target")
+            raise ValueError("invalid_price_target")  # noqa: TRY004
         item_id = str(raw.get("item_id") or "").strip()
         currency = str(raw.get("currency") or "").strip().upper()
         if not item_id or not currency:
@@ -146,7 +146,8 @@ def parse_price_targets(value: Any) -> dict[str, tuple[Decimal, str]]:
         return _parse_price_targets_from_list(value)
     if isinstance(value, dict):
         # Single dict is invalid; require a list of entries.
-        raise ValueError("invalid_price_target")
+        # ValueError (not TypeError) keeps options-flow error keys stable.
+        raise ValueError("invalid_price_target")  # noqa: TRY004
     return _parse_price_targets_from_string(str(value))
 
 

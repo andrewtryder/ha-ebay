@@ -40,15 +40,12 @@ class FinancesClientMixin:
         so funds summary remains useful when payout/transaction endpoints fail.
         """
         finances = empty_seller_ops()["finances"]
-        try:
-            funds_payload = await self._async_rest_get(
-                f"{self._endpoints.finances}/seller_funds_summary",
-                partial_category="finances",
-                allow_404=True,
-            )
-            finances.update(parse_seller_funds_summary(funds_payload))
-        except EbayPartialFailure:
-            raise
+        funds_payload = await self._async_rest_get(
+            f"{self._endpoints.finances}/seller_funds_summary",
+            partial_category="finances",
+            allow_404=True,
+        )
+        finances.update(parse_seller_funds_summary(funds_payload))
 
         try:
             payout_payload = await self._async_rest_get(

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import Mock
 
@@ -19,6 +19,8 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.ebay import sensor as sensor_module
 from custom_components.ebay.button import (
     EbayCleanupInactiveItemEntitiesButton,
+)
+from custom_components.ebay.button import (
     async_setup_entry as async_setup_button_entry,
 )
 from custom_components.ebay.const import (

@@ -6,9 +6,9 @@ per-API HTTP on client mixins under ``clients/``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -56,6 +56,8 @@ from .parsers.trading_items import (
 from .parsers.xml import _safe_exception_context, dedupe_trading_warnings
 from .sections import (
     EMPTY_TRUNCATED_COLLECTIONS as _EMPTY_TRUNCATED_COLLECTIONS,
+)
+from .sections import (
     PARTIAL_FAILURE_CATEGORIES_BY_SECTION,
     SECTION_SPECS,
     TRUNCATED_KEYS_BY_SECTION,

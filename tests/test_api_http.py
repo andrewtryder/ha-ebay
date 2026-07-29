@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import json
 import logging
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
-import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -17,13 +17,16 @@ import pytest
 from custom_components.ebay.api import (
     ANALYTICS_BATCH_SIZE,
     API_WARNINGS_STATE_ATTR_MAX,
+    BEST_OFFERS_CALL_NAME,
     EBAY_XML_NS,
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
     EbayParseError,
     EbayPartialFailure,
-    BEST_OFFERS_CALL_NAME,
+    _to_bool,
+    _to_float,
+    _to_int,
     analytics_date_range_filter,
     build_get_my_ebay_buying_xml,
     chunk_item_ids,
@@ -31,9 +34,6 @@ from custom_components.ebay.api import (
     extract_trading_warnings,
     parse_ebay_time,
     parse_selling_container,
-    _to_bool,
-    _to_float,
-    _to_int,
 )
 
 
@@ -526,11 +526,13 @@ def test_analytics_http_429_is_transient_partial_failure() -> None:
     session.get.return_value = _Context(
         _Response(status=429, headers={"Retry-After": "30"}, json_payload={})
     )
-    with patch(
-        "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep:
-        with pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info:
-            asyncio.run(client.async_get_traffic_report(["1"]))
+    with (
+        patch(
+            "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info,
+    ):
+        asyncio.run(client.async_get_traffic_report(["1"]))
     sleep.assert_awaited_once_with(5)
     assert exc_info.value.failure is not None
     assert exc_info.value.failure.classification == "transient"

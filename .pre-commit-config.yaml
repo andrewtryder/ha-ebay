@@ -2,7 +2,7 @@
 # Commit hooks: fast lint/format/file hygiene. Push hooks: full pytest with coverage.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.21
+    rev: v0.16.0
     hooks:
       - id: ruff-check
         name: ruff check

@@ -7,9 +7,13 @@ from typing import Any
 from urllib.parse import quote
 
 from .marketplace import (
-    SITE_ID_TO_MARKETPLACE as SITE_ID_TO_MARKETPLACE,
-    is_known_site_id as is_known_site_id,
-    marketplace_id_for_site as marketplace_id_for_site,
+    SITE_ID_TO_MARKETPLACE as SITE_ID_TO_MARKETPLACE,  # noqa: PLC0414
+)
+from .marketplace import (
+    is_known_site_id as is_known_site_id,  # noqa: PLC0414
+)
+from .marketplace import (
+    marketplace_id_for_site as marketplace_id_for_site,  # noqa: PLC0414
 )
 
 SHIPMENT_DUE_SOON_HOURS = 24
@@ -373,9 +377,11 @@ def parse_customer_service_metric(payload: dict[str, Any]) -> dict[str, Any]:
             # Prefer a declared enum over a numeric score for sensor state.
             if isinstance(rating_enum, str) and rating_enum in _CS_RATING_ENUMS:
                 rating = rating_enum
-            elif isinstance(raw_score, str) and raw_score in _CS_RATING_ENUMS:
-                rating = raw_score
-            elif raw_score is not None:
+            elif (
+                isinstance(raw_score, str)
+                and raw_score in _CS_RATING_ENUMS
+                or raw_score is not None
+            ):
                 rating = raw_score
             if rating_enum in {"LOW", "VERY_LOW", "BELOW_STANDARD"}:
                 above_benchmark = True
@@ -515,9 +521,10 @@ def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
                 or rating_summary.get("lookbackPeriod")
                 or rating_summary.get("periodInDays")
             )
-            if period_days not in {30, "30", None}:
-                if recent_positive or recent_neutral or recent_negative:
-                    continue
+            if period_days not in {30, "30", None} and (
+                recent_positive or recent_neutral or recent_negative
+            ):
+                continue
             if isinstance(distribution, list) and distribution:
                 pos = neu = neg = 0
                 for entry in distribution:
@@ -558,9 +565,10 @@ def parse_feedback_summary(payload: dict[str, Any]) -> dict[str, Any]:
                 period_days = period.get("periodInDays") or period.get(
                     "lookbackPeriodInDays"
                 )
-                if period_days not in {30, "30", None}:
-                    if recent_positive or recent_neutral or recent_negative:
-                        continue
+                if period_days not in {30, "30", None} and (
+                    recent_positive or recent_neutral or recent_negative
+                ):
+                    continue
                 counts = period.get("counts") or period
                 try:
                     recent_positive = int(
@@ -760,7 +768,7 @@ def orders_for_summary_attrs(orders_section: dict[str, Any]) -> dict[str, Any]:
     """Return order counts plus sorted IDs for diagnostics-safe attributes."""
     return {
         **{k: v for k, v in orders_section.items() if k != "by_id"},
-        "order_ids": sorted((orders_section.get("by_id") or {})),
+        "order_ids": sorted(orders_section.get("by_id") or {}),
     }
 
 
@@ -779,9 +787,7 @@ def _parse_money_amount(value: Any) -> tuple[float | None, str | None]:
     return _coerce_float(value), None
 
 
-def _used_ratio_near_limit(
-    used: float | int | None, remaining: float | int | None
-) -> bool:
+def _used_ratio_near_limit(used: float | None, remaining: float | None) -> bool:
     """Return True when used/(used+remaining) is at least NEAR_LIMIT_USED_RATIO."""
     if used is None or remaining is None:
         return False

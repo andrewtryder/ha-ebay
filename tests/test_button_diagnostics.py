@@ -15,10 +15,10 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.ebay.api import EbayApiError, EbayAuthError
 from custom_components.ebay.button import (
+    SECTION_REFRESH_BUTTONS,
     EbayCleanupInactiveItemEntitiesButton,
     EbayRefreshButton,
     EbaySectionRefreshButton,
-    SECTION_REFRESH_BUTTONS,
     async_setup_entry,
 )
 from custom_components.ebay.const import (
@@ -29,11 +29,11 @@ from custom_components.ebay.const import (
     REFRESH_RESULT_ERROR,
     REFRESH_RESULT_PARTIAL,
     REFRESH_RESULT_SUCCESS,
+    SECTION_ACCOUNT_PRIVILEGES,
     SECTION_BUYING,
+    SECTION_FINANCES,
     SECTION_FULFILLMENT,
     SECTION_SELLER_STANDARDS,
-    SECTION_ACCOUNT_PRIVILEGES,
-    SECTION_FINANCES,
 )
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 from custom_components.ebay.sensor import DIAGNOSTIC_SENSORS, EbayDiagnosticSensor

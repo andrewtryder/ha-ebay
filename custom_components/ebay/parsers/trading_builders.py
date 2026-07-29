@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
-import xml.etree.ElementTree as ET
 
 from ..const import COMPATIBILITY_LEVEL, EBAY_XML_NS, NS
 from .xml import _text, ebay_time
