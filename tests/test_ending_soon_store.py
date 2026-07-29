@@ -177,7 +177,7 @@ def test_deserialize_ending_soon_fired_key_from_dict() -> None:
 
 
 def test_prune_ending_soon_fired_keys_handles_naive_and_invalid() -> None:
-    naive_now = datetime(2026, 7, 18, 12, 0)
+    naive_now = datetime(2026, 7, 18, 12, 0)  # noqa: DTZ001
     end_time = datetime(2026, 7, 18, 11, 30, tzinfo=timezone.utc)
     key = ("e", "watching", "1", 3600, end_time.isoformat())
     naive_end = ("e", "watching", "2", 3600, "2026-07-18T11:30:00")

@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import json
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
-import xml.etree.ElementTree as ET
 
 import pytest
 
 from custom_components.ebay.api import (
     EBAY_XML_NS,
+    GET_USER_CALL_NAME,
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
     EbayPartialFailure,
-    GET_USER_CALL_NAME,
     build_api_failure,
     classify_rest_status,
     endpoint_key_from_url,
@@ -67,7 +67,7 @@ class _Context:
     async def __aenter__(self) -> _Response:
         return self._response
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         return None
 
 
@@ -214,16 +214,18 @@ def test_rest_429_soft_fails_transient_after_bounded_sleep() -> None:
     client = _client(
         [_Response(status=429, headers={"Retry-After": "30"}, json_payload={})]
     )
-    with patch(
-        "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
-    ) as sleep:
-        with pytest.raises(EbayPartialFailure) as exc_info:
-            asyncio.run(
-                client._async_rest_get(
-                    "https://api.ebay.com/sell/fulfillment/v1/order",
-                    partial_category="orders",
-                )
+    with (
+        patch(
+            "custom_components.ebay.clients.http.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(EbayPartialFailure) as exc_info,
+    ):
+        asyncio.run(
+            client._async_rest_get(
+                "https://api.ebay.com/sell/fulfillment/v1/order",
+                partial_category="orders",
             )
+        )
     sleep.assert_awaited_once_with(5)
     assert exc_info.value.failure is not None
     assert exc_info.value.failure.classification == "transient"
@@ -741,8 +743,6 @@ def test_merge_partial_failure_details_keeps_active_newest() -> None:
 
 def test_build_and_merge_partial_failure_detail_helpers() -> None:
     from custom_components.ebay.api import (
-        build_partial_failure_detail,
-        merge_partial_failure_details,
         _copy_seller_ops,
         _error_text_blob,
         _is_unsupported_error,
@@ -751,7 +751,9 @@ def test_build_and_merge_partial_failure_detail_helpers() -> None:
         _to_bool,
         _to_float,
         _to_int,
+        build_partial_failure_detail,
         format_seconds,
+        merge_partial_failure_details,
         parse_ebay_time,
         seconds_until,
     )

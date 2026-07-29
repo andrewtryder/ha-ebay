@@ -368,7 +368,7 @@ def test_calendar_handles_naive_end_time_and_price_without_currency() -> None:
             "w1": {
                 "item_id": "w1",
                 "title": "Naive",
-                "end_time": datetime(2026, 7, 18, 15, 0),
+                "end_time": datetime(2026, 7, 18, 15, 0),  # noqa: DTZ001
                 "current_price": 12.5,
             }
         },

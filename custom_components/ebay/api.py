@@ -6,8 +6,8 @@ across ``clients/`` (HTTP mixins) and ``parsers/`` (pure helpers).
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from typing import Any
 
 import aiohttp
@@ -91,20 +91,6 @@ from .const import (
 from .marketplace import accept_language_for_site
 from .models import ApiFailure
 from .parsers.payload import _dict_by_item_id, summarize_payload
-from .sections import (
-    EMPTY_TRUNCATED_COLLECTIONS as _EMPTY_TRUNCATED_COLLECTIONS,
-    PARTIAL_FAILURE_CATEGORIES_BY_SECTION,
-    TRUNCATED_KEYS_BY_SECTION,
-    enabled_sections_for_options,
-)
-from .section_fetch import (
-    SectionFetchMixin,
-    _copy_seller_ops,
-    _parse_section_dt_map,
-    _payload_shell,
-    _seller_ops_summary_keys,
-    _stamp_section_attempt,
-)
 from .parsers.trading_builders import (
     BEST_OFFERS_CALL_NAME,
     BEST_OFFERS_ENTRIES_PER_PAGE,
@@ -154,6 +140,22 @@ from .parsers.xml import (
     parse_ebay_time,
     seconds_until,
 )
+from .section_fetch import (
+    SectionFetchMixin,
+    _copy_seller_ops,
+    _parse_section_dt_map,
+    _payload_shell,
+    _seller_ops_summary_keys,
+    _stamp_section_attempt,
+)
+from .sections import (
+    EMPTY_TRUNCATED_COLLECTIONS as _EMPTY_TRUNCATED_COLLECTIONS,
+)
+from .sections import (
+    PARTIAL_FAILURE_CATEGORIES_BY_SECTION,
+    TRUNCATED_KEYS_BY_SECTION,
+    enabled_sections_for_options,
+)
 
 __all__ = [
     "ALL_OPTIONAL_SCOPES",
@@ -174,14 +176,6 @@ __all__ = [
     "CORE_SCOPE",
     "DEFAULT_SCOPE",
     "EBAY_XML_NS",
-    "EbayApiClient",
-    "EbayApiError",
-    "EbayAuthError",
-    "EbayAuthTransientError",
-    "EbayEndpoints",
-    "EbayError",
-    "EbayParseError",
-    "EbayPartialFailure",
     "GET_USER_CALL_NAME",
     "MAX_PAGES",
     "MODULE_SCOPES",
@@ -210,6 +204,14 @@ __all__ = [
     "TOKEN_REFRESH_MARGIN",
     "TRUNCATED_KEYS_BY_SECTION",
     "_EMPTY_TRUNCATED_COLLECTIONS",
+    "EbayApiClient",
+    "EbayApiError",
+    "EbayAuthError",
+    "EbayAuthTransientError",
+    "EbayEndpoints",
+    "EbayError",
+    "EbayParseError",
+    "EbayPartialFailure",
     "_copy_seller_ops",
     "_dict_by_item_id",
     "_duration_ms",

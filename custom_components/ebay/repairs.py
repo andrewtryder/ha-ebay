@@ -201,20 +201,22 @@ def is_transient_failure_category(data: dict[str, Any], category: str) -> bool:
     Transient classifications must not advance persistent repair streaks.
     """
     last = data.get("last_api_failure")
-    if isinstance(last, dict) and last.get("mapped_category") == category:
-        if last.get("classification") == "transient":
-            return True
+    if (
+        isinstance(last, dict)
+        and last.get("mapped_category") == category
+        and last.get("classification") == "transient"
+    ):
+        return True
     details = data.get("partial_failure_details") or []
     matching = [
         detail
         for detail in details
         if isinstance(detail, dict) and detail.get("mapped_category") == category
     ]
-    if matching and all(
-        detail.get("classification") == "transient" for detail in matching
-    ):
-        return True
-    return False
+    return bool(
+        matching
+        and all(detail.get("classification") == "transient" for detail in matching)
+    )
 
 
 def _section_observed(refreshed_sections: set[str] | None, section: str | None) -> bool:

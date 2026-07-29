@@ -81,19 +81,16 @@ class FeedbackClientMixin:
         """
         feedback = empty_seller_ops()["feedback"]
         ebay_user_id = await self.async_get_feedback_user_id()
-        try:
-            summary_payload = await self._async_rest_get(
-                f"{self._endpoints.feedback}/feedback_rating_summary",
-                params={
-                    "user_id": ebay_user_id,
-                    "filter": "ratingType:OVERALL_EXPERIENCE,lookbackPeriodInDays:30",
-                },
-                partial_category="feedback",
-                allow_404=True,
-            )
-            feedback.update(parse_feedback_summary(summary_payload))
-        except EbayPartialFailure:
-            raise
+        summary_payload = await self._async_rest_get(
+            f"{self._endpoints.feedback}/feedback_rating_summary",
+            params={
+                "user_id": ebay_user_id,
+                "filter": "ratingType:OVERALL_EXPERIENCE,lookbackPeriodInDays:30",
+            },
+            partial_category="feedback",
+            allow_404=True,
+        )
+        feedback.update(parse_feedback_summary(summary_payload))
 
         try:
             recent_ids: list[str] = []

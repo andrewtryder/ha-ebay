@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Callable
-
-import pytest
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import pytest
 from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.ebay import sensor as sensor_module
@@ -18,7 +18,7 @@ from custom_components.ebay.const import (
     ENTITY_MODE_BALANCED,
     ENTITY_MODE_DETAILED,
 )
-from custom_components.ebay.coordinator import _select_item_entities, _pinned_ids
+from custom_components.ebay.coordinator import _pinned_ids, _select_item_entities
 from custom_components.ebay.sensor import (
     DIAGNOSTIC_SENSORS,
     ITEM_SENSOR_FIELDS,
@@ -493,6 +493,9 @@ def test_listing_amount_sensors_include_currency_attribute() -> None:
 
 
 def test_summary_sensors_are_gated_by_feature_options() -> None:
+    from homeassistant.components.sensor import SensorDeviceClass
+    from homeassistant.const import PERCENTAGE
+
     from custom_components.ebay.const import (
         CONF_ACCOUNT_PRIVILEGES_ENABLED,
         CONF_FEEDBACK_ENABLED,
@@ -501,8 +504,6 @@ def test_summary_sensors_are_gated_by_feature_options() -> None:
         CONF_MESSAGES_ENABLED,
         CONF_SELLER_STANDARDS_ENABLED,
     )
-    from homeassistant.components.sensor import SensorDeviceClass
-    from homeassistant.const import PERCENTAGE
 
     default_keys = {item.key for item in summary_sensors_for_options(DEFAULT_OPTIONS)}
     assert "orders_overdue" not in default_keys
@@ -604,8 +605,8 @@ def test_unknown_enum_maps_to_unknown_and_preserves_raw() -> None:
     from custom_components.ebay.sensor import (
         CUSTOMER_SERVICE_RATING_OPTIONS,
         ENUM_UNKNOWN,
-        EbaySummarySensor,
         SELLER_LEVEL_OPTIONS,
+        EbaySummarySensor,
     )
 
     coordinator = _SelectionCoordinator(

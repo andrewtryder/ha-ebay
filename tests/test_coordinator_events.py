@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-
-import pytest
-
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import Mock
+
+import pytest
 
 from custom_components.ebay.const import DEFAULT_OPTIONS, RECENT_EVENTS_MAX
 from custom_components.ebay.coordinator import (

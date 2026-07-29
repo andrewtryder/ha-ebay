@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-
 from homeassistant import config_entries
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import (
@@ -80,7 +79,7 @@ def _flow_data(**overrides: str) -> dict[str, str]:
 
 
 class _Config:
-    components = {"my"}
+    components: ClassVar[set[str]] = {"my"}
 
 
 class _Hass:
@@ -173,7 +172,7 @@ def test_token_exchange_uses_basic_auth_and_runame(
         status = 200
         request_info = None
         history: tuple = ()
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         async def json(self, *, content_type: str | None = None) -> dict[str, Any]:
             return {
@@ -218,7 +217,7 @@ def test_refresh_preserves_refresh_token_when_omitted(
         status = 200
         request_info = None
         history: tuple = ()
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         async def json(self, *, content_type: str | None = None) -> dict[str, Any]:
             return {"access_token": "new-access", "expires_in": 7200}
@@ -254,7 +253,7 @@ def test_token_request_transient_errors_do_not_force_reauth(
     class Response:
         request_info = None
         history: tuple = ()
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         async def text(self) -> str:
             return json.dumps({"error": "temporarily_unavailable"})
@@ -285,7 +284,7 @@ def test_token_request_invalid_grant_requires_reauth(
         status = 400
         request_info = None
         history: tuple = ()
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         async def text(self) -> str:
             return json.dumps({"error": "invalid_grant"})
@@ -362,7 +361,7 @@ def test_token_request_non_json_error_body_still_classifies_by_status(
         status = 400
         request_info = None
         history: tuple = ()
-        headers: dict[str, str] = {}
+        headers: ClassVar[dict[str, str]] = {}
 
         async def text(self) -> str:
             return "<!html>gateway error"
@@ -997,9 +996,10 @@ async def _async_noop(*args: Any, **kwargs: Any) -> None:
 
 
 def test_options_flow_menu_sections_and_save() -> None:
+    import voluptuous as vol
+
     from custom_components.ebay.config_flow import EbayOptionsFlow
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
-    import voluptuous as vol
 
     entry = type(
         "Entry",

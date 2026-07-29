@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 from custom_components.ebay.const import DEFAULT_OPTIONS, RECENT_EVENTS_MAX
 from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
-from custom_components.ebay.event import EbayActivityEvent, EVENTS
+from custom_components.ebay.event import EVENTS, EbayActivityEvent
 
 
 def _coordinator() -> EbayDataUpdateCoordinator:

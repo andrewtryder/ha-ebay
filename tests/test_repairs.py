@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -855,7 +855,9 @@ def test_preserve_issue_if_present_iterates_values() -> None:
 
     class _WeirdRegistry:
         # Mapping without (domain, issue_id) key membership.
-        issues = {"x": _Issue(DOMAIN, "entry-1_partial_failure_orders")}
+        issues: ClassVar[dict[str, Any]] = {
+            "x": _Issue(DOMAIN, "entry-1_partial_failure_orders")
+        }
 
     desired: set[str] = set()
     _preserve_issue_if_present(

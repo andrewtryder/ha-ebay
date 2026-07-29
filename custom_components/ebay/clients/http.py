@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timedelta, timezone
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, NoReturn
 
 import aiohttp
@@ -24,11 +24,11 @@ from ..oauth_errors import (
 from ..parsers.xml import _duration_ms, _to_int
 from .endpoints import EbayEndpoints, extract_authorization_code
 from .errors import (
+    _PARTIAL_FAILURE_DETAILS_MAX,
     EbayAuthError,
     EbayAuthTransientError,
-    EbayPartialFailure,
     EbayParseError,
-    _PARTIAL_FAILURE_DETAILS_MAX,
+    EbayPartialFailure,
     _safe_ebay_error_payload,
     build_api_failure,
     classify_rest_status,

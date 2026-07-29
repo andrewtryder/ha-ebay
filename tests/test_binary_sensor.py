@@ -7,8 +7,8 @@ from unittest.mock import Mock
 
 from custom_components.ebay.binary_sensor import (
     EbayBinarySensor,
-    binary_sensors_for_options,
     async_setup_entry,
+    binary_sensors_for_options,
 )
 from custom_components.ebay.const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,

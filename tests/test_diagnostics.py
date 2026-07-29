@@ -252,7 +252,7 @@ def test_manifest_version_handles_read_errors(monkeypatch: pytest.MonkeyPatch) -
     from custom_components.ebay import diagnostics as diagnostics_mod
 
     class _Boom:
-        def with_name(self, name: str) -> "_Boom":
+        def with_name(self, name: str) -> _Boom:
             return self
 
         def read_text(self, encoding: str = "utf-8") -> str:

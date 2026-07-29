@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from collections import deque
 import logging
 import time
-from collections.abc import Awaitable
-from typing import Any, Callable
+from collections import deque
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
@@ -36,8 +36,8 @@ from .const import (
     CONF_PER_ITEM_CAP,
     CONF_PINNED_ITEM_IDS,
     CONF_POLL_INTERVAL,
-    CONF_SELLING_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
     DOMAIN,
     ENTITY_MODE_DETAILED,
     ENTITY_MODE_MINIMAL,

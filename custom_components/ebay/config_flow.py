@@ -7,7 +7,6 @@ import secrets
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow, selector
@@ -45,8 +44,8 @@ from .const import (
     CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
     CONF_RUNAME,
-    CONF_SELLING_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
+    CONF_SELLING_ENABLED,
     CONF_SITE_ID,
     CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT,
     CONF_WATCHED_PRICE_DROP_CURRENCY,
@@ -59,13 +58,6 @@ from .const import (
     OAUTH_MODE_CALLBACK,
     OAUTH_MODE_MANUAL,
 )
-from .options_parse import (
-    COMMON_CURRENCIES,
-    normalize_pinned_item_ids,
-    normalize_price_targets,
-    validate_pinned_item_options,
-    validate_price_options,
-)
 from .oauth2 import (
     DEVELOPER_CONSOLE_URL,
     OAUTH_SETUP_GUIDE_URL,
@@ -73,6 +65,13 @@ from .oauth2 import (
     EbayOAuth2Implementation,
     async_get_ebay_callback_url,
     normalize_new_token,
+)
+from .options_parse import (
+    COMMON_CURRENCIES,
+    normalize_pinned_item_ids,
+    normalize_price_targets,
+    validate_pinned_item_options,
+    validate_price_options,
 )
 
 _LOGGER = logging.getLogger(__name__)

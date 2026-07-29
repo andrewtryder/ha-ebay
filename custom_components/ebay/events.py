@@ -5,9 +5,9 @@ Distinct from the Home Assistant event platform module (event.py).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
-import logging
 from typing import Any
 
 from .const import (
@@ -42,7 +42,7 @@ def _percent_change(old_price: Decimal, new_price: Decimal) -> Decimal | None:
     """Return percent change from old to new, or None when undefined."""
     if old_price == 0:
         return None
-    return ((new_price - old_price) / old_price) * Decimal("100")
+    return ((new_price - old_price) / old_price) * Decimal(100)
 
 
 def _decimal_payload(value: Decimal | None) -> float | int | None:
@@ -113,14 +113,12 @@ class EbayEventMixin:
         if record_history is None:
             record_history = event_type not in LEGACY_COMPATIBILITY_EVENT_TYPES
         event_data = self._event_data(event_type, item, kind, extra)
-        if record_history:
-            if (
-                history_key is None
-                or history_key not in self._recent_history_ending_soon
-            ):
-                self._append_recent_event(kind, event_data)
-                if history_key is not None:
-                    self._recent_history_ending_soon.add(history_key)
+        if record_history and (
+            history_key is None or history_key not in self._recent_history_ending_soon
+        ):
+            self._append_recent_event(kind, event_data)
+            if history_key is not None:
+                self._recent_history_ending_soon.add(history_key)
         callback_func = self._event_callbacks.get(kind)
         if not callback_func:
             return False
@@ -399,7 +397,7 @@ class EbayEventMixin:
             percent_change = _percent_change(old_price, new_price)
             min_percent = to_decimal(
                 self.options.get(CONF_WATCHED_PRICE_CHANGE_MIN_PERCENT, 0)
-            ) or Decimal("0")
+            ) or Decimal(0)
             meets_threshold = (
                 old_price > 0
                 and percent_change is not None

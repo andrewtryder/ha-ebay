@@ -42,7 +42,7 @@ def test_parse_price_targets_from_structured_list() -> None:
     )
     assert targets == {
         "1": (Decimal("9.50"), "USD"),
-        "2": (Decimal("12"), "EUR"),
+        "2": (Decimal(12), "EUR"),
     }
     assert normalize_price_targets(
         [{"item_id": "2", "amount": "5", "currency": "GBP"}]
@@ -176,7 +176,7 @@ def test_pinned_ids_and_blank_price_target_lines() -> None:
     assert pinned_ids("1\n2, 3") == {"1", "2", "3"}
     assert pinned_ids(["1", "2", " 3 "]) == {"1", "2", "3"}
     assert normalize_pinned_item_ids("2,1") == ["1", "2"]
-    assert parse_price_targets("\n\n1=10 USD\n") == {"1": (Decimal("10"), "USD")}
+    assert parse_price_targets("\n\n1=10 USD\n") == {"1": (Decimal(10), "USD")}
 
 
 def test_parse_price_targets_rejects_malformed_parts() -> None:
