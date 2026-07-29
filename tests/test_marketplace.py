@@ -56,6 +56,33 @@ def test_canada_traffic_report_not_supported() -> None:
     assert capabilities_for_site("2").traffic_report is False
 
 
+def test_traffic_report_allowlisted_marketplaces_only() -> None:
+    """eBay documents traffic_report for AU/FR/DE/GB/IT/ES/US only."""
+    supported_sites = {
+        "0",  # US
+        "3",  # GB
+        "15",  # AU
+        "71",  # FR
+        "77",  # DE
+        "101",  # IT
+        "186",  # ES
+    }
+    unsupported_sites = {
+        "2",  # CA
+        "16",  # AT
+        "23",  # BE
+        "146",  # NL
+        "193",  # CH
+        "205",  # IE
+        "212",  # PL
+        "201",  # HK
+    }
+    for site_id in supported_sites:
+        assert capability_supported(site_id, "traffic_report") is True, site_id
+    for site_id in unsupported_sites:
+        assert capability_supported(site_id, "traffic_report") is False, site_id
+
+
 def test_unknown_site_id() -> None:
     assert is_known_site_id("999") is False
     assert marketplace_id_for_site("999") is None

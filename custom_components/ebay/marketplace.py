@@ -45,7 +45,8 @@ class MarketplaceCapabilities:
 
     seller_standards: bool = True
     customer_service_metrics: bool = True
-    traffic_report: bool = True
+    # eBay documents traffic_report only for AU/FR/DE/GB/IT/ES/US.
+    traffic_report: bool = False
     feedback: bool = True
     fulfillment: bool = True
     finances: bool = False
@@ -55,8 +56,10 @@ class MarketplaceCapabilities:
 # Defaults assume broad US/EU support; override known gaps.
 # Finances often requires digital request signing outside a few marketplaces;
 # leave finances=False unless the marketplace is known to work without signing.
+# traffic_report is allowlisted explicitly (eBay AU/FR/DE/GB/IT/ES/US only).
 _DEFAULT_CAPS = MarketplaceCapabilities()
-_WITH_FINANCES = MarketplaceCapabilities(finances=True)
+_WITH_TRAFFIC = MarketplaceCapabilities(traffic_report=True)
+_WITH_FINANCES = MarketplaceCapabilities(finances=True, traffic_report=True)
 _NO_TRAFFIC = MarketplaceCapabilities(traffic_report=False)
 _LIMITED = MarketplaceCapabilities(
     traffic_report=False,
@@ -71,11 +74,11 @@ MARKETPLACE_CAPABILITIES: dict[str, MarketplaceCapabilities] = {
     "EBAY_AU": _WITH_FINANCES,
     "EBAY_AT": _DEFAULT_CAPS,
     "EBAY_BE": _NO_TRAFFIC,
-    "EBAY_FR": _DEFAULT_CAPS,
+    "EBAY_FR": _WITH_TRAFFIC,
     "EBAY_DE": _WITH_FINANCES,
-    "EBAY_IT": _DEFAULT_CAPS,
+    "EBAY_IT": _WITH_TRAFFIC,
     "EBAY_NL": _DEFAULT_CAPS,
-    "EBAY_ES": _DEFAULT_CAPS,
+    "EBAY_ES": _WITH_TRAFFIC,
     "EBAY_CH": _DEFAULT_CAPS,
     "EBAY_HK": _LIMITED,
     "EBAY_IN": _LIMITED,

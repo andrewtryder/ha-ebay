@@ -13,7 +13,7 @@ from typing import Any
 import aiohttp
 
 from .clients.account import AccountClientMixin
-from .clients.analytics import AnalyticsClientMixin
+from .clients.analytics import AnalyticsClientMixin, analytics_date_range_filter
 from .clients.endpoints import (
     EbayEndpoints,
     build_consent_url,
@@ -229,6 +229,7 @@ __all__ = [
     "_to_int",
     "_total_pages",
     "active_offers_by_item_id",
+    "analytics_date_range_filter",
     "analytics_views_by_item_id",
     "build_api_failure",
     "build_consent_url",
