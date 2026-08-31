@@ -16,12 +16,11 @@ the trademark notice in README.md.
 
 from __future__ import annotations
 
+import urllib.request
 from io import BytesIO
 from pathlib import Path
-import urllib.request
 
 from PIL import Image
-
 
 SOURCE_URL = "https://upload.wikimedia.org/wikipedia/commons/4/48/EBay_logo.png"
 BRAND_DIR = Path("custom_components/ebay/brand")
