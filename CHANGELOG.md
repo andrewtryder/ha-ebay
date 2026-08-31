@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/andrewtryder/ha-ebay/compare/v0.8.2...v0.8.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* format imports and set executable mode on brand assets script ([5ae9ce0](https://github.com/andrewtryder/ha-ebay/commit/5ae9ce062e3a0afe1993f937147ffa9156b4aeeb))
+
 ## [0.8.2](https://github.com/andrewtryder/ha-ebay/compare/v0.8.1...v0.8.2) (2026-07-29)
 
 
