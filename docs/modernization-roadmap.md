@@ -18,7 +18,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 |---|---|---|---|---|
 | **Pre-Phase** | Simplified OAuth Onboarding (BYO Credentials) | `feat/simplify-ebay-oauth-onboarding` | [#92](https://github.com/andrewtryder/ha-ebay/pull/92) | **Merged** |
 | **Milestone 0** | Complete GraphQL Phase 0 & Resolve OAuth Lifecycle Issues | `feat/ebay-graphql-transport` | [#94](https://github.com/andrewtryder/ha-ebay/pull/94) | **Merged** (`60f656f`) |
-| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | In Progress (Draft PR) | **In Review (Draft PR)** |
+| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **In Review (Draft PR)** |
 | **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | Planned (Blocked on Milestone 1 live run) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
 | **Milestone 4** | Bidding & Auction Activity Migration | `feat/ebay-graphql-bidding` | TBD | Planned |
@@ -58,10 +58,12 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 - **Read-Only Opt-In Validation Tool**:
   - Added [`custom_components/ebay/parsers/watchlist_parity.py`](../custom_components/ebay/parsers/watchlist_parity.py) and [`scripts/validate_watchlist_parity.py`](../scripts/validate_watchlist_parity.py).
   - Makes **zero network calls** unless `--live` is explicitly passed.
-  - Independently runs read-only Trading XML (`GetMyeBayBuying` `WatchList`) and read-only GraphQL contract probes (`Handshake`, `GetWatchListTotal`, `GetWatchListCountAlt`, `GetUserWatchList`, `GetUserWatchListAlt`, or a custom `--query-file`).
-  - Redacts all OAuth tokens, client secrets, item IDs, titles, prices, and URLs via `sanitize_parity_report()` before generating Markdown or JSON parity reports.
-- **Evidence-Based Watchlist Field Classification**:
+  - Independently runs read-only Trading XML (`GetMyeBayBuying` `WatchList`) and read-only GraphQL contract probes (`Handshake`, `GetWatchListTotal`, `GetWatchListCountAlt`, `GetUserWatchList`, `GetUserWatchListAlt`, or a custom `--query-file` + `--variables-file` with automatic single-operation inference).
+  - Preserves validated flat GraphQL diagnostic codes (`code`, `error_code`, `category`, `domain`) while stripping all raw error messages, OAuth tokens, client secrets, item IDs, titles, prices, and URLs via `sanitize_parity_report()`.
+- **Evidence-Based Watchlist Field Classification & Fail-Closed Completeness**:
   - Compares all 10 monitored Watchlist fields (`watched_count`, `item_id`, `title`, `current_price`, `currency`, `listing_type`, `end_time`, `url`, `image`, `bid_count`) using the 6 roadmap classifications (`exact_match`, `equivalent_after_normalization`, `different_semantics`, `missing_field`, `unverified`, `unsupported`).
+  - Fails closed (`status: "inconclusive"`, downgrading count and sample-matched fields to `unverified`) when either XML or GraphQL is truncated, only a partial page is retrieved, duplicate/missing item IDs occur, or non-null field coverage is partial (`both_absent_count > 0`).
+  - Handles XML or GraphQL failures resiliently without inventing parity results (`xml_available: False`).
 
 ---
 

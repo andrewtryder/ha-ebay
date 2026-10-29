@@ -220,7 +220,26 @@ Before migrating `WatchedItemData` or replacing `GetMyeBayBuying` in production 
 | `image` | `Item/PictureDetails/GalleryURL` | `image.imageUrl` / `galleryUrl` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Matches canonical eBay CDN asset hash across thumbnail resolutions (`s-l140` vs. `s-l500`). |
 | `bid_count` | `Item/SellingStatus/BidCount` | `bidCount` / `bids` | **Missing field / Unverified** (`missing_field` / `unverified`) | **[UNVERIFIED]** | Must verify live whether `userWatchList` exposes `bidCount` on watched auction items. |
 
-### 7.2 Running the Read-Only Validation Harness
+### 7.2 Completeness, Pagination, and Null-Coverage Safeguards
+
+**[LOCAL MOCK]** The Watchlist parity comparator (`custom_components/ebay/parsers/watchlist_parity.py`) enforces fail-closed evidence rules:
+
+1. **Sanitized Flat Error Reporting**:
+   - Reads the flattened diagnostic fields (`code`, `error_code`, `error_id`, `category`, `domain`) produced by `sanitize_graphql_errors()` (plus nested `extensions` fallback).
+   - Validates every diagnostic token against `^[A-Za-z0-9_.:-]{1,64}$` and strips all free-form `message` / `long_message` text so account names, item IDs, or tokens can never leak into reports.
+   - Explicitly classifies `validation_error` (`VALIDATION_ERROR`), `permission_or_scope_error` (`INSUFFICIENT_SCOPE` / HTTP `403`), `auth_error` (`UNAUTHENTICATED` / HTTP `401`), `rate_limit` (`RATE_LIMITED` / HTTP `429`), `parse_error`, and `transport_error`.
+2. **Completeness & Pagination Fail-Closed Rules**:
+   - Tracks `graphql_reported_total`, `graphql_raw_items_count`, `graphql_watched_count` (unique valid IDs), `duplicate_ids_count`, `missing_ids_count`, `graphql_truncated`, `graphql_complete`, and `pagination_status` (`complete`, `truncated`, `unverified`, `count_only`, `incomplete_identity`, `inconsistent_total`).
+   - A partial 1-page GraphQL response (e.g. `100` items fetched when `reported_total == 150`) is **never** classified as `equivalent_after_normalization` or `compared`. Instead, `status` is marked `inconclusive` and both `watched_count` and sample-matched item fields are downgraded to `unverified`.
+   - `xml_truncated=True` similarly blocks definitive parity conclusions.
+   - Built-in discovery probes execute a single page (`limit: 100, offset: 0`) to avoid uncontrolled pagination on unverified schemas. Once a paginated query contract is confirmed via `--query-file`, `--paginate-custom-query` enables bounded multi-page fetching (up to `MAX_PAGES`) that halts immediately if a page returns zero new unique IDs or encounters duplicate/missing IDs.
+3. **Missing-Field & Null-Coverage Evidence**:
+   - Items where a field is `null` in both Trading XML and GraphQL increment `both_absent_count` rather than `exact_match_count`.
+   - Each field reports `coverage` (`complete`, `partial`, or `none`). A field with partial non-null coverage (`both_absent_count > 0`) is downgraded to `unverified` so missing values never inflate parity confidence.
+4. **Resilient Partial-Source Failure Handling**:
+   - If the Trading XML `GetMyeBayBuying` call fails, the harness records `xml_available=False` and `xml_error_summary` without inventing parity results, while still running and reporting the GraphQL contract probes.
+
+### 7.3 Running the Read-Only Validation Harness & Explorer Custom Queries
 
 The validation harness (`scripts/validate_watchlist_parity.py`) makes **zero network calls** unless `--live` is explicitly supplied, and redacts all credentials, tokens, item IDs, titles, prices, and URLs from its output:
 
@@ -229,13 +248,36 @@ The validation harness (`scripts/validate_watchlist_parity.py`) makes **zero net
 uv run --python 3.14 --with-requirements requirements-ha-current.txt \
   python scripts/validate_watchlist_parity.py --synthetic-demo
 
-# 2. Live read-only validation using local .env credentials (maintainer opt-in):
-uv run --python 3.14 --with-requirements requirements-ha-current.txt \
-  python scripts/validate_watchlist_parity.py --live --output watchlist_parity.local.md
-
-# 3. Live read-only validation using an existing HA core.config_entries file (read-only):
+# 2. Recommended first live probe using a git-ignored .env.local file:
 uv run --python 3.14 --with-requirements requirements-ha-current.txt \
   python scripts/validate_watchlist_parity.py --live \
-  --ha-config-entries /path/to/.storage/core.config_entries \
+  --env-file .env.local \
   --output watchlist_parity.local.md
 ```
+
+#### Testing a Query from eBay's GraphQL Explorer (`--query-file` & `--variables-file`)
+
+If the built-in candidate probes return `VALIDATION_ERROR`, you can copy the working read-only query and variables directly from eBay's authenticated [GraphQL Explorer (`developer.ebay.com/my/api_test_tool`)](https://developer.ebay.com/my/api_test_tool):
+
+1. Save the query to a git-ignored file (e.g. `watchlist_query.local.graphql`). The query must select `userWatchList` at the top level (unaliased) to be eligible for field-by-field parity comparison, and must contain a single `query` operation (mutations and subscriptions are rejected before network dispatch).
+2. If the query uses GraphQL variables (e.g. `query GetWatchList($limit: Int!, $offset: Int)`), save the variables JSON object to `watchlist_vars.local.json` (e.g. `{"limit": 100, "offset": 0}`).
+3. Run the harness with `--query-file` and `--variables-file` (the single operation name is inferred automatically when `--operation-name` is omitted):
+
+```bash
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --live \
+  --env-file .env.local \
+  --query-file watchlist_query.local.graphql \
+  --variables-file watchlist_vars.local.json \
+  --output watchlist_parity.local.md
+```
+
+### 7.4 Credential Safety & Concurrent OAuth Refresh Considerations
+
+- **Never Commit Secrets or Fixtures**: `.env`, `.env.*`, `.storage/`, `*config_entries*`, `*.local.*`, and `watchlist_parity*.{md,json}` are git-ignored. Never commit or upload raw XML/GraphQL fixtures, `.env` files, or Home Assistant storage files.
+- **Preferred Local Credential Setup (`.env.local`)**:
+  - Prefer a dedicated git-ignored `.env.local` file containing either a short-lived `EBAY_ACCESS_TOKEN` (e.g. minted in the eBay Developer Portal / GraphQL Explorer, which avoids invoking any OAuth refresh call) or `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_REFRESH_TOKEN`, and `EBAY_SITE_ID`.
+- **Risks of Independent OAuth Token Refresh While Home Assistant Is Running**:
+  - Avoid pointing `--ha-config-entries` directly at a live, running Home Assistant `.storage/core.config_entries` directory as your primary workflow.
+  - Although the harness opens `core.config_entries` strictly read-only and never modifies the file, invoking an independent OAuth `refresh_token` grant outside Home Assistant cannot persist any rotated refresh token or new access token back into Home Assistant's `OAuth2Session`. While eBay's standard refresh-token flow normally returns a new `access_token` without invalidating the existing `refresh_token`, if eBay ever rotates the refresh token during a standalone run, the running Home Assistant instance would hold a stale refresh token and require reauthorization.
+  - If `--ha-config-entries` is used against an offline copy, the harness reuses any non-expired cached `access_token` (>6 minutes remaining) before falling back to a token refresh, and requires `--ha-entry-id <entry_id>` whenever multiple `ebay` entries exist.

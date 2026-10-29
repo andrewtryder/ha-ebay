@@ -8,15 +8,35 @@ or private account data.
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Iterable, Mapping
+import xml.etree.ElementTree as ET
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
-from ..clients.graphql import validate_read_only_query
+import aiohttp
+
+from ..clients.errors import (
+    EbayApiError,
+    EbayAuthError,
+    EbayAuthTransientError,
+    EbayError,
+    EbayGraphQLError,
+    EbayParseError,
+)
+from ..clients.graphql import (
+    _parse_graphql_definitions,
+    _strip_graphql_strings_and_comments,
+    is_graphql_permission_error,
+    is_graphql_rate_limit_error,
+    is_graphql_token_expired,
+    validate_read_only_query,
+)
 from .xml import (
+    MAX_PAGES,
     _to_float,
     _to_int,
     format_seconds,
@@ -62,7 +82,7 @@ FORBIDDEN_REPORT_KEYS: frozenset[str] = frozenset(
         "runame",
         "authorization",
         "authorization_code",
-        "code",
+        "auth_code",
         "token",
         "raw_xml",
         "raw_graphql",
@@ -73,6 +93,20 @@ _EBAY_TOKEN_PATTERN = re.compile(
     r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+)", re.IGNORECASE
 )
 _EBAY_IMAGE_ASSET_PATTERN = re.compile(r"/images/g/([^/]+)/s-l\d+\.[a-zA-Z0-9]+$")
+_SAFE_DIAGNOSTIC_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_VARIABLE_DECL_RE = re.compile(
+    r"\$([_A-Za-z][_0-9A-Za-z]*)\s*:\s*([^,=)]+?)(?:\s*=\s*([^,)]+))?(?=[,)])"
+)
+
+_VALIDATION_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "VALIDATION_ERROR",
+        "GRAPHQL_VALIDATION_FAILED",
+        "INVALID_QUERY",
+        "BAD_USER_INPUT",
+        "GRAPHQL_PARSE_FAILED",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -82,7 +116,7 @@ class WatchlistContractProbe:
     key: str
     description: str
     query: str
-    operation_name: str
+    operation_name: str | None = None
     variables: dict[str, Any] | None = None
 
 
@@ -170,7 +204,235 @@ WATCHLIST_CONTRACT_PROBES: tuple[WatchlistContractProbe, ...] = (
 def validate_all_contract_probes() -> None:
     """Verify every built-in contract probe passes strict read-only validation."""
     for probe in WATCHLIST_CONTRACT_PROBES:
-        validate_read_only_query(probe.query, operation_name=probe.operation_name)
+        infer_and_validate_query_operation(
+            probe.query,
+            operation_name=probe.operation_name,
+            variables=probe.variables,
+        )
+
+
+def infer_and_validate_query_operation(
+    query: str,
+    *,
+    operation_name: str | None = None,
+    variables: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Validate a read-only GraphQL query, its operation name, and required variables.
+
+    If ``operation_name`` is ``None``, infers the single query operation name
+    declared in the document (or ``None`` for an anonymous query).
+    """
+    validate_read_only_query(query, operation_name=operation_name)
+    if variables is not None and not isinstance(variables, Mapping):
+        raise ValueError("GraphQL variables must be a JSON object (mapping)")
+
+    cleaned = _strip_graphql_strings_and_comments(query).strip()
+    defs = _parse_graphql_definitions(cleaned)
+    query_ops = [name for def_type, name in defs if def_type == "query"]
+    resolved_operation_name = (
+        operation_name if operation_name is not None else query_ops[0]
+    )
+
+    # Check non-null variable definitions on the query operation header
+    header_part = cleaned.split("{", 1)[0]
+    if "(" in header_part and ")" in header_part:
+        var_block = header_part[header_part.find("(") : header_part.rfind(")") + 1]
+        for match in _VARIABLE_DECL_RE.finditer(var_block):
+            var_name = match.group(1)
+            var_type = match.group(2).strip()
+            default_val = match.group(3)
+            if (
+                var_type.endswith("!")
+                and default_val is None
+                and (
+                    not isinstance(variables, Mapping)
+                    or variables.get(var_name) is None
+                )
+            ):
+                raise ValueError(
+                    f"GraphQL query requires non-null variable '${var_name}' "
+                    f"({var_type}); provide it via --variables-file"
+                )
+
+    return resolved_operation_name
+
+
+def sanitize_diagnostic_token(value: Any) -> str | None:
+    """Validate and return a short diagnostic code/category/domain token.
+
+    Rejects free-form error messages, tokens, or long strings to guarantee
+    shareable reports cannot leak account details or credentials.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _EBAY_TOKEN_PATTERN.search(text):
+        return None
+    if not _SAFE_DIAGNOSTIC_TOKEN_RE.match(text):
+        return None
+    return text
+
+
+def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
+    """Return a sanitized, message-free diagnostic summary for an API/probe failure."""
+    if isinstance(exc, EbayGraphQLError):
+        error_codes: list[str] = []
+        categories: list[str] = []
+        domains: list[str] = []
+        sanitized_errors: list[dict[str, str | None]] = []
+        raw_err_dicts: list[dict[str, Any]] = []
+        status_codes: list[int] = []
+
+        for err in exc.errors:
+            if not isinstance(err, dict):
+                continue
+            raw_err_dicts.append(err)
+            ext = (
+                err.get("extensions") if isinstance(err.get("extensions"), dict) else {}
+            )
+            raw_code = (
+                err.get("code") if err.get("code") is not None else ext.get("code")
+            )
+            raw_error_id = (
+                err.get("error_id")
+                if err.get("error_id") is not None
+                else (
+                    err.get("errorId")
+                    if err.get("errorId") is not None
+                    else ext.get("errorId")
+                )
+            )
+            raw_error_code = (
+                err.get("error_code")
+                or ext.get("errorCode")
+                or raw_code
+                or raw_error_id
+            )
+            raw_category = err.get("category") or ext.get("category")
+            raw_domain = err.get("domain") or ext.get("domain")
+            raw_status = (
+                err.get("status_code")
+                if err.get("status_code") is not None
+                else ext.get("statusCode")
+            )
+            if isinstance(raw_status, int):
+                status_codes.append(raw_status)
+
+            code_tok = sanitize_diagnostic_token(raw_code)
+            err_code_tok = sanitize_diagnostic_token(raw_error_code) or code_tok
+            err_id_tok = sanitize_diagnostic_token(raw_error_id)
+            cat_tok = sanitize_diagnostic_token(raw_category)
+            dom_tok = sanitize_diagnostic_token(raw_domain)
+
+            for candidate_code in (err_code_tok, code_tok, err_id_tok):
+                if candidate_code and candidate_code not in error_codes:
+                    error_codes.append(candidate_code)
+            if cat_tok and cat_tok not in categories:
+                categories.append(cat_tok)
+            if dom_tok and dom_tok not in domains:
+                domains.append(dom_tok)
+
+            sanitized_errors.append(
+                {
+                    "code": code_tok,
+                    "error_code": err_code_tok,
+                    "error_id": err_id_tok,
+                    "category": cat_tok,
+                    "domain": dom_tok,
+                }
+            )
+
+        upper_codes = {c.upper() for c in error_codes}
+        is_validation = bool(upper_codes & _VALIDATION_ERROR_CODES)
+        is_perm = any(is_graphql_permission_error(e) for e in raw_err_dicts)
+        is_expired = any(is_graphql_token_expired(e) for e in raw_err_dicts)
+        is_rate_limit = any(is_graphql_rate_limit_error(e) for e in raw_err_dicts)
+
+        if is_validation:
+            failure_class = "validation_error"
+        elif is_perm:
+            failure_class = "permission_or_scope_error"
+        elif is_expired:
+            failure_class = "auth_error"
+        elif is_rate_limit:
+            failure_class = "rate_limit"
+        else:
+            failure_class = "graphql_error"
+
+        return {
+            "error_type": type(exc).__name__,
+            "failure_class": failure_class,
+            "http_status": status_codes[0] if status_codes else 200,
+            "code": error_codes[0] if error_codes else None,
+            "error_code": error_codes[0] if error_codes else None,
+            "category": categories[0] if categories else None,
+            "domain": domains[0] if domains else None,
+            "error_codes": error_codes,
+            "categories": categories,
+            "domains": domains,
+            "errors": sanitized_errors,
+            "is_validation_error": is_validation,
+            "is_auth_error": is_perm or is_expired,
+            "is_scope_or_permission_error": is_perm,
+            "is_rate_limit": is_rate_limit,
+        }
+
+    http_status = getattr(exc, "status", None)
+    if not isinstance(http_status, int):
+        http_status = None
+
+    is_perm = bool(getattr(exc, "is_permission_error", False)) or http_status == 403
+    is_auth = isinstance(exc, (EbayAuthError, EbayAuthTransientError)) or (
+        http_status in (401, 403)
+    )
+    exc_text_lower = str(exc).lower() if isinstance(exc, EbayApiError) else ""
+    is_rate_limit = (
+        http_status == 429 or "rate limit" in exc_text_lower or "429" in exc_text_lower
+    )
+    if http_status is None and "429" in exc_text_lower:
+        http_status = 429
+    elif http_status is None and is_perm:
+        http_status = 403
+
+    if is_perm:
+        failure_class = "permission_or_scope_error"
+    elif isinstance(exc, EbayAuthTransientError):
+        failure_class = "auth_transient_error"
+    elif is_auth:
+        failure_class = "auth_error"
+    elif is_rate_limit:
+        failure_class = "rate_limit"
+    elif isinstance(
+        exc,
+        (EbayParseError, ET.ParseError, json.JSONDecodeError, ValueError, TypeError),
+    ):
+        failure_class = "parse_error"
+    elif isinstance(exc, (aiohttp.ClientError, TimeoutError)):
+        failure_class = "transport_error"
+    elif isinstance(exc, EbayError):
+        failure_class = "api_error"
+    else:
+        failure_class = "unexpected_error"
+
+    return {
+        "error_type": type(exc).__name__,
+        "failure_class": failure_class,
+        "http_status": http_status,
+        "code": None,
+        "error_code": None,
+        "category": None,
+        "domain": None,
+        "error_codes": [],
+        "categories": [],
+        "domains": [],
+        "errors": [],
+        "is_validation_error": False,
+        "is_auth_error": is_auth,
+        "is_scope_or_permission_error": is_perm,
+        "is_rate_limit": is_rate_limit,
+    }
 
 
 def normalize_watchlist_item_id(raw_id: Any) -> tuple[str | None, str]:
@@ -328,69 +590,161 @@ def normalize_graphql_watchlist_item(raw_item: Mapping[str, Any]) -> dict[str, A
     }
 
 
-def normalize_graphql_watchlist_payload(
-    data: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """Normalize a GraphQL ``data`` payload containing ``userWatchList``."""
-    if not isinstance(data, Mapping):
-        raise TypeError("GraphQL Watchlist data must be a mapping")
-
-    container = data.get("userWatchList")
-    if not isinstance(container, Mapping):
-        raise ValueError("GraphQL payload is missing 'userWatchList' object")  # noqa: TRY004
-
-    total_field: str | None = None
-    reported_total: int | None = None
-    for candidate_total_key in ("total", "watchListCount", "totalCount"):
-        if candidate_total_key in container:
-            total_field = candidate_total_key
-            reported_total = _to_int(container.get(candidate_total_key))
-            break
-
-    items_field: str | None = None
-    raw_items: list[Any] | None = None
+def _extract_raw_items_from_container(
+    container: Mapping[str, Any],
+) -> tuple[str | None, list[Any] | None]:
+    """Return ``(items_field_name, raw_items_list)`` from a ``userWatchList`` mapping."""
     for candidate_items_key in ("items", "watchlistItems", "nodes"):
         candidate_val = container.get(candidate_items_key)
         if isinstance(candidate_val, list):
-            items_field = candidate_items_key
-            raw_items = candidate_val
-            break
+            return candidate_items_key, candidate_val
 
-    if raw_items is None and isinstance(container.get("edges"), list):
-        items_field = "edges"
-        raw_items = [
-            edge.get("node")
-            for edge in container["edges"]
-            if isinstance(edge, Mapping) and isinstance(edge.get("node"), Mapping)
+    if isinstance(container.get("edges"), list):
+        raw_edges = container["edges"]
+        extracted: list[Any] = [
+            edge.get("node") if isinstance(edge, Mapping) else None
+            for edge in raw_edges
         ]
+        return "edges", extracted
 
-    normalized_by_id: dict[str, dict[str, Any]] = {}
+    return None, None
+
+
+def _extract_has_next_page(container: Mapping[str, Any]) -> bool:
+    """Return True if the container explicitly signals more pages exist."""
+    if container.get("hasNextPage") is True or container.get("hasMore") is True:
+        return True
+    page_info = container.get("pageInfo")
+    return bool(isinstance(page_info, Mapping) and page_info.get("hasNextPage") is True)
+
+
+def merge_graphql_watchlist_pages(
+    pages: Sequence[Mapping[str, Any]],
+    *,
+    max_pages: int = MAX_PAGES,
+) -> dict[str, Any]:
+    """Normalize and merge one or more GraphQL ``userWatchList`` page payloads.
+
+    Tracks reported totals, raw vs. deduplicated item counts, missing/invalid item
+    identities, and truncation so partial pages are never mistaken for complete
+    collections.
+    """
+    if not isinstance(pages, Sequence) or isinstance(pages, (str, bytes)) or not pages:
+        raise TypeError("GraphQL Watchlist pages must be a non-empty sequence")
+
+    max_pages_reached = len(pages) > max_pages
+    bounded_pages = list(pages[:max_pages])
+
+    total_field: str | None = None
+    reported_total: int | None = None
+    inconsistent_total = False
+    items_field: str | None = None
+    items_list_present = False
+    raw_item_count = 0
     composite_id_count = 0
     duplicate_id_count = 0
+    missing_id_count = 0
+    normalized_by_id: dict[str, dict[str, Any]] = {}
+    container_keys_set: set[str] = set()
+    last_has_next_page = False
 
-    for entry in raw_items or []:
-        if not isinstance(entry, Mapping):
-            continue
-        normalized = normalize_graphql_watchlist_item(entry)
-        item_id = normalized.get("item_id")
-        if not item_id:
-            continue
-        if normalized.get("id_format") == "composite_v1":
-            composite_id_count += 1
-        if item_id in normalized_by_id:
-            duplicate_id_count += 1
-        normalized_by_id[item_id] = normalized
+    for page_data in bounded_pages:
+        if not isinstance(page_data, Mapping):
+            raise TypeError("GraphQL Watchlist data must be a mapping")
+        container = page_data.get("userWatchList")
+        if not isinstance(container, Mapping):
+            raise ValueError("GraphQL payload is missing 'userWatchList' object")  # noqa: TRY004
+
+        container_keys_set.update(str(k) for k in container)
+        last_has_next_page = _extract_has_next_page(container)
+
+        for candidate_total_key in ("total", "watchListCount", "totalCount"):
+            if candidate_total_key in container:
+                page_total = _to_int(container.get(candidate_total_key))
+                if total_field is None:
+                    total_field = candidate_total_key
+                    reported_total = page_total
+                elif page_total != reported_total:
+                    inconsistent_total = True
+                break
+
+        page_items_field, raw_items = _extract_raw_items_from_container(container)
+        if raw_items is not None:
+            items_list_present = True
+            if items_field is None:
+                items_field = page_items_field
+            raw_item_count += len(raw_items)
+            for entry in raw_items:
+                if not isinstance(entry, Mapping):
+                    missing_id_count += 1
+                    continue
+                normalized = normalize_graphql_watchlist_item(entry)
+                item_id = normalized.get("item_id")
+                if not item_id:
+                    missing_id_count += 1
+                    continue
+                if normalized.get("id_format") == "composite_v1":
+                    composite_id_count += 1
+                if item_id in normalized_by_id:
+                    duplicate_id_count += 1
+                normalized_by_id[item_id] = normalized
+
+    unique_count = len(normalized_by_id)
+
+    if not items_list_present:
+        graphql_truncated = bool(reported_total is not None and reported_total > 0)
+        graphql_complete = False
+        pagination_status = "count_only"
+    elif inconsistent_total:
+        graphql_truncated = False
+        graphql_complete = False
+        pagination_status = "inconsistent_total"
+    elif reported_total is None:
+        graphql_truncated = bool(last_has_next_page or max_pages_reached)
+        graphql_complete = False
+        pagination_status = "truncated" if graphql_truncated else "unverified"
+    elif max_pages_reached or last_has_next_page or raw_item_count < reported_total:
+        graphql_truncated = True
+        graphql_complete = False
+        pagination_status = "truncated"
+    elif duplicate_id_count > 0 or missing_id_count > 0:
+        graphql_truncated = unique_count < reported_total
+        graphql_complete = False
+        pagination_status = "incomplete_identity"
+    elif raw_item_count != reported_total or unique_count != reported_total:
+        graphql_truncated = False
+        graphql_complete = False
+        pagination_status = "inconsistent_total"
+    else:
+        graphql_truncated = False
+        graphql_complete = True
+        pagination_status = "complete"
 
     return {
         "items_by_id": normalized_by_id,
         "reported_total": reported_total,
+        "raw_item_count": raw_item_count,
         "total_field_name": total_field,
         "items_field_name": items_field,
-        "items_list_present": raw_items is not None,
+        "items_list_present": items_list_present,
         "composite_id_count": composite_id_count,
         "duplicate_id_count": duplicate_id_count,
-        "container_keys": sorted(str(k) for k in container),
+        "missing_id_count": missing_id_count,
+        "page_count": len(bounded_pages),
+        "graphql_truncated": graphql_truncated,
+        "graphql_complete": graphql_complete,
+        "pagination_status": pagination_status,
+        "container_keys": sorted(container_keys_set),
     }
+
+
+def normalize_graphql_watchlist_payload(
+    data: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Normalize a single GraphQL ``data`` payload containing ``userWatchList``."""
+    if not isinstance(data, Mapping):
+        raise TypeError("GraphQL Watchlist data must be a mapping")
+    return merge_graphql_watchlist_pages([data])
 
 
 def _urls_equivalent(url_a: str, url_b: str, item_id: str) -> bool:
@@ -431,14 +785,24 @@ def _compare_single_field(
     xml_items: Mapping[str, Mapping[str, Any]],
     gql_items: Mapping[str, Mapping[str, Any]],
     common_ids: list[str],
+    *,
+    collection_complete: bool = True,
 ) -> dict[str, Any]:
-    """Compare one monitored item field across all matched watched items."""
+    """Compare one monitored item field across matched watched items.
+
+    Tracks null-on-both-sides separately from exact matches and downgrades
+    definitive parity conclusions when coverage or collection pagination is
+    incomplete.
+    """
     if not common_ids:
         return {
             "field": field,
             "classification": PARITY_UNVERIFIED,
             "classification_label": PARITY_LABELS[PARITY_UNVERIFIED],
+            "coverage": "none",
             "compared_count": 0,
+            "both_present_count": 0,
+            "both_absent_count": 0,
             "exact_match_count": 0,
             "normalized_match_count": 0,
             "mismatch_count": 0,
@@ -450,21 +814,19 @@ def _compare_single_field(
     exact_count = 0
     normalized_count = 0
     mismatch_count = 0
+    both_present_count = 0
+    both_absent_count = 0
     xml_present_count = 0
     gql_present_count = 0
 
     for item_id in common_ids:
         xml_item = xml_items[item_id]
         gql_item = gql_items[item_id]
-        xml_val = xml_item.get(field)
-        gql_val = gql_item.get(field)
-
-        if xml_val is not None:
-            xml_present_count += 1
-        if gql_val is not None:
-            gql_present_count += 1
 
         if field == "item_id":
+            xml_present_count += 1
+            gql_present_count += 1
+            both_present_count += 1
             raw_gql_id = gql_item.get("raw_item_id")
             if raw_gql_id == item_id:
                 exact_count += 1
@@ -474,13 +836,23 @@ def _compare_single_field(
                 mismatch_count += 1
             continue
 
+        xml_val = xml_item.get(field)
+        gql_val = gql_item.get(field)
+
+        if xml_val is not None:
+            xml_present_count += 1
+        if gql_val is not None:
+            gql_present_count += 1
+
         if xml_val is None and gql_val is None:
-            exact_count += 1
+            both_absent_count += 1
             continue
 
         if xml_val is None or gql_val is None:
             mismatch_count += 1
             continue
+
+        both_present_count += 1
 
         if field == "current_price":
             if abs(float(xml_val) - float(gql_val)) <= 1e-6:
@@ -553,30 +925,53 @@ def _compare_single_field(
                 mismatch_count += 1
 
     total = len(common_ids)
+    if both_present_count == 0:
+        coverage = "none"
+    elif both_present_count == total:
+        coverage = "complete"
+    else:
+        coverage = "partial"
+
     if xml_present_count == 0 and gql_present_count == 0:
         classification = PARITY_UNVERIFIED
         notes = "Field was null in both XML and GraphQL across all compared items."
     elif xml_present_count > 0 and gql_present_count == 0:
         classification = PARITY_MISSING_FIELD
         notes = "Field is populated in Trading XML but missing/null in GraphQL."
-    elif mismatch_count == 0 and normalized_count == 0:
-        classification = PARITY_EXACT_MATCH
-        notes = "All compared items matched identically."
-    elif mismatch_count == 0 and normalized_count > 0:
-        classification = PARITY_EQUIVALENT_NORMALIZED
-        notes = "All compared items matched after canonical normalization."
-    else:
+    elif mismatch_count > 0:
         classification = PARITY_DIFFERENT_SEMANTICS
         notes = (
             f"{mismatch_count} of {total} compared items differed between "
             "Trading XML and GraphQL."
         )
+    elif both_absent_count > 0:
+        classification = PARITY_UNVERIFIED
+        notes = (
+            f"Matched on {both_present_count} of {total} items, but "
+            f"{both_absent_count} items were null in both sources "
+            "(partial coverage; full parity unverified)."
+        )
+    elif not collection_complete:
+        classification = PARITY_UNVERIFIED
+        notes = (
+            f"Matched on all {both_present_count} compared sample items, but "
+            "full Watchlist collection is truncated or unreconciled."
+        )
+    elif normalized_count == 0:
+        classification = PARITY_EXACT_MATCH
+        notes = "All compared items had non-null values and matched identically."
+    else:
+        classification = PARITY_EQUIVALENT_NORMALIZED
+        notes = "All compared items had non-null values and matched after canonical normalization."
 
     return {
         "field": field,
         "classification": classification,
         "classification_label": PARITY_LABELS[classification],
+        "coverage": coverage,
         "compared_count": total,
+        "both_present_count": both_present_count,
+        "both_absent_count": both_absent_count,
         "exact_match_count": exact_count,
         "normalized_match_count": normalized_count,
         "mismatch_count": mismatch_count,
@@ -586,59 +981,172 @@ def _compare_single_field(
     }
 
 
-def compare_watchlist_snapshots(
-    xml_watched: Mapping[str, Mapping[str, Any]],
-    graphql_payload: Mapping[str, Any] | None,
+def _unverified_fields_report(
     *,
+    reason: str,
+    xml_watched_count: int | None = None,
+    graphql_present_for_count: int = 0,
+) -> dict[str, dict[str, Any]]:
+    """Build an all-unverified field report dictionary when a source is unavailable."""
+    return {
+        field: {
+            "field": field,
+            "classification": PARITY_UNVERIFIED,
+            "classification_label": PARITY_LABELS[PARITY_UNVERIFIED],
+            "coverage": "none",
+            "compared_count": 0,
+            "both_present_count": 0,
+            "both_absent_count": 0,
+            "exact_match_count": 0,
+            "normalized_match_count": 0,
+            "mismatch_count": 0,
+            "xml_present_count": (
+                1 if field == "watched_count" and xml_watched_count is not None else 0
+            ),
+            "graphql_present_count": (
+                graphql_present_for_count if field == "watched_count" else 0
+            ),
+            "notes": reason,
+        }
+        for field in MONITORED_WATCHLIST_FIELDS
+    }
+
+
+def compare_watchlist_snapshots(
+    xml_watched: Mapping[str, Mapping[str, Any]] | None,
+    graphql_payload: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
+    *,
+    xml_available: bool = True,
+    xml_truncated: bool = False,
+    xml_error_summary: Mapping[str, Any] | None = None,
     graphql_error_summary: Mapping[str, Any] | None = None,
+    max_pages: int = MAX_PAGES,
 ) -> dict[str, Any]:
     """Compare normalized XML ``watched`` items against a GraphQL Watchlist payload.
 
     Returns a sanitized aggregate comparison dictionary with zero private item IDs,
-    titles, prices, or URLs.
+    titles, prices, or URLs. Fails closed when either source is unavailable,
+    truncated, or has incomplete pagination/identity reconciliation.
     """
-    xml_count = len(xml_watched)
+    normalized_gql: dict[str, Any] | None = None
+    if graphql_payload is not None:
+        if isinstance(graphql_payload, Mapping):
+            normalized_gql = merge_graphql_watchlist_pages(
+                [graphql_payload], max_pages=max_pages
+            )
+        else:
+            normalized_gql = merge_graphql_watchlist_pages(
+                graphql_payload, max_pages=max_pages
+            )
 
-    if graphql_payload is None:
-        fields_report = {
-            field: {
-                "field": field,
-                "classification": PARITY_UNVERIFIED,
-                "classification_label": PARITY_LABELS[PARITY_UNVERIFIED],
-                "compared_count": 0,
-                "exact_match_count": 0,
-                "normalized_match_count": 0,
-                "mismatch_count": 0,
-                "xml_present_count": xml_count if field == "watched_count" else 0,
-                "graphql_present_count": 0,
-                "notes": (
-                    "GraphQL Watchlist response unavailable; contract remains "
-                    "unverified."
-                ),
-            }
-            for field in MONITORED_WATCHLIST_FIELDS
-        }
+    if not xml_available or xml_watched is None:
+        gql_items = normalized_gql["items_by_id"] if normalized_gql else {}
+        gql_count = len(gql_items) if normalized_gql else None
+        reported_total = normalized_gql["reported_total"] if normalized_gql else None
+        gql_present_count = (
+            1
+            if normalized_gql
+            and (normalized_gql["items_list_present"] or reported_total is not None)
+            else 0
+        )
         return {
             "status": "unverified",
+            "xml_available": False,
+            "xml_truncated": xml_truncated,
+            "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
+            "xml_watched_count": None,
+            "graphql_watched_count": gql_count,
+            "graphql_raw_items_count": (
+                normalized_gql["raw_item_count"] if normalized_gql else None
+            ),
+            "graphql_reported_total": reported_total,
+            "graphql_complete": (
+                normalized_gql["graphql_complete"] if normalized_gql else False
+            ),
+            "graphql_truncated": (
+                normalized_gql["graphql_truncated"] if normalized_gql else False
+            ),
+            "pagination_status": (
+                normalized_gql["pagination_status"] if normalized_gql else "unverified"
+            ),
+            "common_items_count": 0,
+            "xml_only_count": None,
+            "graphql_only_count": gql_count if gql_count is not None else 0,
+            "composite_ids_normalized_count": (
+                normalized_gql["composite_id_count"] if normalized_gql else 0
+            ),
+            "duplicate_ids_count": (
+                normalized_gql["duplicate_id_count"] if normalized_gql else 0
+            ),
+            "missing_ids_count": (
+                normalized_gql["missing_id_count"] if normalized_gql else 0
+            ),
+            "graphql_schema_metadata": (
+                {
+                    "container_keys": normalized_gql["container_keys"],
+                    "total_field_name": normalized_gql["total_field_name"],
+                    "items_field_name": normalized_gql["items_field_name"],
+                    "page_count": normalized_gql["page_count"],
+                }
+                if normalized_gql
+                else None
+            ),
+            "graphql_error_summary": dict(graphql_error_summary)
+            if graphql_error_summary
+            else None,
+            "fields": _unverified_fields_report(
+                reason=(
+                    "Trading XML WatchList response unavailable; parity comparison "
+                    "could not be performed."
+                ),
+                xml_watched_count=None,
+                graphql_present_for_count=gql_present_count,
+            ),
+        }
+
+    xml_count = len(xml_watched)
+
+    if normalized_gql is None:
+        return {
+            "status": "unverified",
+            "xml_available": True,
+            "xml_truncated": xml_truncated,
+            "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
             "xml_watched_count": xml_count,
             "graphql_watched_count": None,
+            "graphql_raw_items_count": None,
             "graphql_reported_total": None,
+            "graphql_complete": False,
+            "graphql_truncated": False,
+            "pagination_status": "unverified",
             "common_items_count": 0,
             "xml_only_count": xml_count,
             "graphql_only_count": 0,
             "composite_ids_normalized_count": 0,
             "duplicate_ids_count": 0,
+            "missing_ids_count": 0,
             "graphql_schema_metadata": None,
             "graphql_error_summary": dict(graphql_error_summary)
             if graphql_error_summary
             else None,
-            "fields": fields_report,
+            "fields": _unverified_fields_report(
+                reason=(
+                    "GraphQL Watchlist response unavailable; contract remains "
+                    "unverified."
+                ),
+                xml_watched_count=xml_count,
+            ),
         }
 
-    normalized_gql = normalize_graphql_watchlist_payload(graphql_payload)
     gql_items = normalized_gql["items_by_id"]
     gql_count = len(gql_items)
+    raw_item_count = normalized_gql["raw_item_count"]
     reported_total = normalized_gql["reported_total"]
+    graphql_complete = normalized_gql["graphql_complete"]
+    graphql_truncated = normalized_gql["graphql_truncated"]
+    pagination_status = normalized_gql["pagination_status"]
+    duplicate_id_count = normalized_gql["duplicate_id_count"]
+    missing_id_count = normalized_gql["missing_id_count"]
 
     xml_ids = set(xml_watched.keys())
     gql_ids = set(gql_items.keys())
@@ -646,35 +1154,94 @@ def compare_watchlist_snapshots(
     xml_only_count = len(xml_ids - gql_ids)
     gql_only_count = len(gql_ids - xml_ids)
 
+    collection_reconciled = (
+        not xml_truncated
+        and graphql_complete
+        and not graphql_truncated
+        and duplicate_id_count == 0
+        and missing_id_count == 0
+        and xml_only_count == 0
+        and gql_only_count == 0
+        and xml_count == gql_count
+    )
+
     if not normalized_gql["items_list_present"]:
-        count_classification = (
-            PARITY_EXACT_MATCH
-            if reported_total is not None and reported_total == xml_count
-            else PARITY_UNVERIFIED
-        )
-        count_notes = "GraphQL response returned count metadata only (no items array)."
-    elif xml_count == gql_count and xml_only_count == 0 and gql_only_count == 0:
+        if (
+            reported_total is not None
+            and reported_total != xml_count
+            and not xml_truncated
+        ):
+            count_classification = PARITY_DIFFERENT_SEMANTICS
+            count_notes = (
+                f"GraphQL count-only response reported total={reported_total}, "
+                f"which differs from Trading XML count={xml_count}."
+            )
+        else:
+            count_classification = PARITY_UNVERIFIED
+            count_notes = (
+                "GraphQL response returned count metadata only (no items array); "
+                "item-level collection completeness is unverified."
+            )
+    elif collection_reconciled:
         count_classification = PARITY_EXACT_MATCH
-        count_notes = "XML and GraphQL returned the exact same watched item set."
-    elif reported_total == xml_count and gql_count != xml_count:
-        count_classification = PARITY_EQUIVALENT_NORMALIZED
         count_notes = (
-            "Reported total matches XML count, but page size differed from "
-            "fetched item count."
+            "XML and GraphQL returned the exact same complete watched item set."
         )
+    elif xml_truncated:
+        count_classification = PARITY_UNVERIFIED
+        count_notes = (
+            "Trading XML WatchList was truncated at MAX_PAGES; full collection "
+            "parity cannot be verified."
+        )
+    elif graphql_truncated:
+        count_classification = PARITY_UNVERIFIED
+        count_notes = (
+            f"GraphQL Watchlist response is truncated/partial "
+            f"(retrieved {gql_count} unique items of reported_total={reported_total}); "
+            "full collection parity is inconclusive until all pages are retrieved."
+        )
+    elif not graphql_complete:
+        if (
+            reported_total is not None
+            and reported_total != xml_count
+            and duplicate_id_count == 0
+            and missing_id_count == 0
+        ):
+            count_classification = PARITY_DIFFERENT_SEMANTICS
+            count_notes = (
+                f"XML returned {xml_count} items; GraphQL returned {gql_count} items "
+                f"(reported_total={reported_total}, pagination_status={pagination_status})."
+            )
+        else:
+            count_classification = PARITY_UNVERIFIED
+            count_notes = (
+                f"GraphQL pagination/completeness is '{pagination_status}' "
+                f"(retrieved={gql_count}, raw={raw_item_count}, "
+                f"reported_total={reported_total}, duplicates={duplicate_id_count}, "
+                f"missing_ids={missing_id_count}); full parity is inconclusive."
+            )
     else:
         count_classification = PARITY_DIFFERENT_SEMANTICS
         count_notes = (
             f"XML returned {xml_count} items; GraphQL returned {gql_count} items "
-            f"(reported_total={reported_total})."
+            f"(reported_total={reported_total}, xml_only={xml_only_count}, "
+            f"graphql_only={gql_only_count})."
         )
 
+    gql_count_present = (
+        1 if (normalized_gql["items_list_present"] or reported_total is not None) else 0
+    )
     fields_report: dict[str, dict[str, Any]] = {
         "watched_count": {
             "field": "watched_count",
             "classification": count_classification,
             "classification_label": PARITY_LABELS[count_classification],
+            "coverage": "complete"
+            if collection_reconciled
+            else ("partial" if gql_count_present else "none"),
             "compared_count": 1,
+            "both_present_count": 1 if gql_count_present else 0,
+            "both_absent_count": 0,
             "exact_match_count": 1 if count_classification == PARITY_EXACT_MATCH else 0,
             "normalized_match_count": 1
             if count_classification == PARITY_EQUIVALENT_NORMALIZED
@@ -683,9 +1250,7 @@ def compare_watchlist_snapshots(
             if count_classification == PARITY_DIFFERENT_SEMANTICS
             else 0,
             "xml_present_count": 1,
-            "graphql_present_count": 1
-            if (normalized_gql["items_list_present"] or reported_total is not None)
-            else 0,
+            "graphql_present_count": gql_count_present,
             "notes": count_notes,
         }
     }
@@ -694,25 +1259,43 @@ def compare_watchlist_snapshots(
         if field == "watched_count":
             continue
         fields_report[field] = _compare_single_field(
-            field, xml_watched, gql_items, common_ids
+            field,
+            xml_watched,
+            gql_items,
+            common_ids,
+            collection_complete=collection_reconciled,
         )
 
+    if not normalized_gql["items_list_present"]:
+        overall_status = "unverified"
+    elif collection_reconciled:
+        overall_status = "compared"
+    else:
+        overall_status = "inconclusive"
+
     return {
-        "status": "compared"
-        if common_ids or (xml_count == 0 and gql_count == 0)
-        else "partial",
+        "status": overall_status,
+        "xml_available": True,
+        "xml_truncated": xml_truncated,
+        "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
         "xml_watched_count": xml_count,
         "graphql_watched_count": gql_count,
+        "graphql_raw_items_count": raw_item_count,
         "graphql_reported_total": reported_total,
+        "graphql_complete": graphql_complete,
+        "graphql_truncated": graphql_truncated,
+        "pagination_status": pagination_status,
         "common_items_count": len(common_ids),
         "xml_only_count": xml_only_count,
         "graphql_only_count": gql_only_count,
         "composite_ids_normalized_count": normalized_gql["composite_id_count"],
-        "duplicate_ids_count": normalized_gql["duplicate_id_count"],
+        "duplicate_ids_count": duplicate_id_count,
+        "missing_ids_count": missing_id_count,
         "graphql_schema_metadata": {
             "container_keys": normalized_gql["container_keys"],
             "total_field_name": normalized_gql["total_field_name"],
             "items_field_name": normalized_gql["items_field_name"],
+            "page_count": normalized_gql["page_count"],
         },
         "graphql_error_summary": dict(graphql_error_summary)
         if graphql_error_summary
@@ -771,20 +1354,41 @@ def format_parity_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **Environment**: `{report.get('environment', 'unknown')}`",
         f"- **Site ID / Marketplace**: `{report.get('site_id', '0')}` (`{report.get('marketplace_id', 'EBAY_US')}`)",
         f"- **Comparison Status**: `{parity_status(report)}`",
+        f"- **Pagination / Completeness Status**: `{report.get('pagination_status', 'unverified')}`",
         "",
         "## Collection Summary",
         "",
         "| Metric | Value |",
         "|---|---|",
+        f"| Trading XML Available | `{report.get('xml_available', True)}` |",
+        f"| Trading XML Truncated | `{report.get('xml_truncated', False)}` |",
         f"| Trading XML Watched Items | `{report.get('xml_watched_count')}` |",
-        f"| GraphQL Watched Items | `{report.get('graphql_watched_count')}` |",
+        f"| GraphQL Unique Watched Items | `{report.get('graphql_watched_count')}` |",
+        f"| GraphQL Raw Items Retrieved | `{report.get('graphql_raw_items_count')}` |",
         f"| GraphQL Reported Total | `{report.get('graphql_reported_total')}` |",
+        f"| GraphQL Complete | `{report.get('graphql_complete', False)}` |",
+        f"| GraphQL Truncated | `{report.get('graphql_truncated', False)}` |",
         f"| Common Matched Item IDs | `{report.get('common_items_count')}` |",
         f"| XML-Only Item IDs | `{report.get('xml_only_count')}` |",
         f"| GraphQL-Only Item IDs | `{report.get('graphql_only_count')}` |",
         f"| Composite `v1|...|...` IDs Normalized | `{report.get('composite_ids_normalized_count')}` |",
+        f"| Duplicate GraphQL Item IDs | `{report.get('duplicate_ids_count', 0)}` |",
+        f"| Missing / Invalid GraphQL Item IDs | `{report.get('missing_ids_count', 0)}` |",
         "",
     ]
+
+    xml_err = report.get("xml_error_summary")
+    if isinstance(xml_err, Mapping) and xml_err:
+        lines.extend(
+            [
+                "## Trading XML Diagnostic Summary",
+                "",
+                f"- **Error Type**: `{xml_err.get('error_type')}`",
+                f"- **Failure Class**: `{xml_err.get('failure_class')}`",
+                f"- **HTTP Status**: `{xml_err.get('http_status')}`",
+                "",
+            ]
+        )
 
     probes = report.get("probes")
     if isinstance(probes, list) and probes:
@@ -810,8 +1414,8 @@ def format_parity_report_markdown(report: Mapping[str, Any]) -> str:
             [
                 "## Field-Level Parity Matrix",
                 "",
-                "| Field | Classification | Compared | Exact | Normalized | Mismatched | XML Present | GraphQL Present | Notes |",
-                "|---|---|---:|---:|---:|---:|---:|---:|---|",
+                "| Field | Classification | Coverage | Compared | Both Present | Both Absent | Exact | Normalized | Mismatched | XML Present | GraphQL Present | Notes |",
+                "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
             ]
         )
         for field_name in MONITORED_WATCHLIST_FIELDS:
@@ -820,7 +1424,10 @@ def format_parity_report_markdown(report: Mapping[str, Any]) -> str:
                 continue
             lines.append(
                 f"| `{field_name}` | **{row.get('classification_label')}** (`{row.get('classification')}`) "
+                f"| `{row.get('coverage', 'none')}` "
                 f"| {row.get('compared_count', 0)} "
+                f"| {row.get('both_present_count', 0)} "
+                f"| {row.get('both_absent_count', 0)} "
                 f"| {row.get('exact_match_count', 0)} "
                 f"| {row.get('normalized_match_count', 0)} "
                 f"| {row.get('mismatch_count', 0)} "
