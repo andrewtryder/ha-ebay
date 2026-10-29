@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -181,7 +182,11 @@ def test_sanitize_graphql_errors() -> None:
     """Test sanitization of GraphQL error arrays."""
     assert sanitize_graphql_errors(None) == []
     assert sanitize_graphql_errors([]) == []
-    assert sanitize_graphql_errors(["not a dict"]) == []  # type: ignore[list-item]
+
+    malformed = sanitize_graphql_errors(["not a dict"])  # type: ignore[list-item]
+    assert len(malformed) == 1
+    assert malformed[0]["message"] == "not a dict"
+    assert malformed[0]["error_code"] == "MALFORMED_ERROR"
 
     raw_errors = [
         {
@@ -486,6 +491,8 @@ def test_graphql_errors_with_auth_failure_triggers_auth_error() -> None:
             return _Context(_Response(status=200, json_payload=mock_payload))
 
     client = _make_client(MockSession())
+    client.async_refresh_access_token = AsyncMock(return_value="mock_refreshed_token")  # type: ignore[assignment]
+    client.async_get_access_token = AsyncMock(return_value="mock_refreshed_token")  # type: ignore[assignment]
 
     with pytest.raises(EbayAuthError, match="authentication error"):
         asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
@@ -851,3 +858,494 @@ def test_graphql_client_mixin_stubs() -> None:
         mixin._raise_partial_failure("test")
     with pytest.raises(NotImplementedError):
         mixin._record_partial_failure_detail({})
+
+
+# -----------------------------------------------------------------------------
+# 11. Security, Multi-Operation, and Review Regression Tests
+# -----------------------------------------------------------------------------
+
+
+def test_validate_read_only_rejects_multi_operation_documents() -> None:
+    """Multi-operation GraphQL documents are rejected before dispatch."""
+    with pytest.raises(
+        ValueError, match="Multi-operation GraphQL documents are not permitted"
+    ):
+        validate_read_only_query("query A { total } query B { total }")
+
+    with pytest.raises(ValueError, match="Mutations are strictly prohibited"):
+        validate_read_only_query("query Safe { total } mutation Unsafe { delete }")
+
+    with pytest.raises(ValueError, match="Mutations are strictly prohibited"):
+        validate_read_only_query("mutation Unsafe { delete } query Safe { total }")
+
+    with pytest.raises(ValueError, match="Subscriptions are strictly prohibited"):
+        validate_read_only_query("subscription OnUpdate { item }")
+
+
+def test_validate_read_only_operation_name_handling() -> None:
+    """operation_name must match the single named query and cannot select mutations."""
+    # Matching operation name passes
+    validate_read_only_query(
+        "query MyQuery { userWatchList { total } }", operation_name="MyQuery"
+    )
+
+    # Mismatched operation name rejected
+    with pytest.raises(ValueError, match="does not match query operation"):
+        validate_read_only_query(
+            "query MyQuery { userWatchList { total } }", operation_name="OtherQuery"
+        )
+
+    # Anonymous query with operation_name rejected
+    with pytest.raises(ValueError, match="provided for anonymous GraphQL query"):
+        validate_read_only_query(
+            "{ userWatchList { total } }", operation_name="NamedQuery"
+        )
+
+
+def test_validate_read_only_allows_strings_comments_fragments() -> None:
+    """Queries containing 'mutation' within strings, comments, or fragments pass validation."""
+    # Word 'mutation' in comment
+    validate_read_only_query(
+        "# Note: this does not perform a mutation\nquery Safe { userWatchList { total } }"
+    )
+
+    # Word 'mutation' in string literal
+    validate_read_only_query(
+        'query Safe { item(search: "this is a mutation test") { id } }'
+    )
+
+    # Word 'mutation' in block string
+    validate_read_only_query(
+        'query Safe { item(desc: """block string with mutation keyword""") { id } }'
+    )
+
+    # Query with leading fragment
+    validate_read_only_query(
+        "fragment ItemFields on Item { id title } query GetItems { items { ...ItemFields } }"
+    )
+
+    # Query with trailing fragment
+    validate_read_only_query(
+        "query GetItems { items { ...ItemFields } } fragment ItemFields on Item { id title }"
+    )
+
+
+def test_validate_read_only_rejects_before_network_dispatch() -> None:
+    """Unsafe queries raise ValueError immediately and never dispatch an HTTP request."""
+    post_called = False
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal post_called
+            post_called = True
+            return _Context(_Response(status=200, json_payload={"data": {}}))
+
+    client = _make_client(MockSession())
+
+    with pytest.raises(ValueError, match="Mutations are strictly prohibited"):
+        asyncio.run(
+            client.async_post_graphql(
+                "query Safe { total } mutation Dangerous { deleteEverything }"
+            )
+        )
+
+    assert post_called is False
+
+
+def test_graphql_200_token_expired_triggers_refresh_and_retry_success() -> None:
+    """HTTP 200 with token expired error triggers refresh and succeeds on retry."""
+    calls = 0
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _Context(
+                    _Response(
+                        status=200,
+                        json_payload={
+                            "errors": [
+                                {
+                                    "message": "Access Token is expired or invalid",
+                                    "extensions": {
+                                        "code": 1001,
+                                        "category": "REQUEST",
+                                    },
+                                }
+                            ]
+                        },
+                    )
+                )
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={"data": {"userWatchList": {"total": 12}}},
+                )
+            )
+
+    client = _make_client(MockSession())
+    refresh_called = False
+
+    async def _mock_refresh() -> str:
+        nonlocal refresh_called
+        refresh_called = True
+        client._access_token = "refreshed_token_val"
+        return "refreshed_token_val"
+
+    client.async_refresh_access_token = _mock_refresh  # type: ignore[assignment]
+    client.async_get_access_token = _mock_refresh  # type: ignore[assignment]
+
+    result = asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    assert calls == 2
+    assert refresh_called is True
+    assert result == {"userWatchList": {"total": 12}}
+
+
+def test_graphql_200_rate_limit_triggers_backoff_and_succeeds() -> None:
+    """HTTP 200 with RATE_LIMITED error backs off and succeeds on subsequent attempt."""
+    calls = 0
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _Context(
+                    _Response(
+                        status=200,
+                        json_payload={
+                            "errors": [
+                                {
+                                    "message": "You have exceeded the call limit for this operation.",
+                                    "extensions": {
+                                        "code": "RATE_LIMITED",
+                                        "category": "REQUEST",
+                                        "domain": "BUY_WATCHLIST",
+                                    },
+                                }
+                            ]
+                        },
+                    )
+                )
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={"data": {"userWatchList": {"total": 7}}},
+                )
+            )
+
+    client = _make_client(MockSession())
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = asyncio.run(
+            client.async_post_graphql("query { userWatchList { total } }")
+        )
+
+    assert calls == 2
+    assert mock_sleep.await_count == 1
+    assert result == {"userWatchList": {"total": 7}}
+
+
+def test_graphql_200_rate_limit_exhausted_raises_transient_api_error() -> None:
+    """HTTP 200 persistent rate limit raises EbayApiError with transient classification."""
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={
+                        "errors": [
+                            {
+                                "message": "Call limit exceeded",
+                                "extensions": {
+                                    "code": "RATE_LIMITED",
+                                    "category": "REQUEST",
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+
+    client = _make_client(MockSession())
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(EbayApiError, match="rate limit exceeded"):
+            asyncio.run(
+                client.async_post_graphql(
+                    "query { userWatchList { total } }",
+                    max_retries=2,
+                )
+            )
+
+        with pytest.raises(EbayPartialFailure) as exc_info:
+            asyncio.run(
+                client.async_post_graphql(
+                    "query { userWatchList { total } }",
+                    partial_category="buying",
+                    max_retries=2,
+                )
+            )
+
+    assert exc_info.value.category == "buying"
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.classification == "transient"
+
+
+def test_graphql_200_permanent_permission_error_does_not_retry() -> None:
+    """HTTP 200 with missing scope or permission denial raises immediately without retry."""
+    calls = 0
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal calls
+            calls += 1
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={
+                        "errors": [
+                            {
+                                "message": "Missing required scope https://api.ebay.com/oauth/api_scope/buy.watchlist",
+                                "extensions": {
+                                    "code": "INSUFFICIENT_SCOPE",
+                                    "category": "REQUEST",
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+
+    client = _make_client(MockSession())
+    refresh_called = False
+
+    async def _mock_refresh() -> str:
+        nonlocal refresh_called
+        refresh_called = True
+        return "fresh"
+
+    client.async_refresh_access_token = _mock_refresh  # type: ignore[assignment]
+
+    with pytest.raises(EbayAuthError, match="insufficient scope"):
+        asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    # Crucial: only 1 attempt dispatched; no token refresh attempted for permanent scope failure
+    assert calls == 1
+    assert refresh_called is False
+
+
+def test_graphql_403_forbidden_does_not_retry() -> None:
+    """HTTP 403 Forbidden raises EbayAuthError immediately without token refresh or retry."""
+    calls = 0
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal calls
+            calls += 1
+            return _Context(_Response(status=403, text="Forbidden"))
+
+    client = _make_client(MockSession())
+    refresh_called = False
+
+    async def _mock_refresh() -> str:
+        nonlocal refresh_called
+        refresh_called = True
+        return "fresh"
+
+    client.async_refresh_access_token = _mock_refresh  # type: ignore[assignment]
+
+    with pytest.raises(EbayAuthError, match="HTTP 403"):
+        asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    assert calls == 1
+    assert refresh_called is False
+
+
+def test_graphql_oauth2_session_force_refresh_avoids_stale_token_reuse() -> None:
+    """Ensure OAuth2Session integration requests a new token on 401 instead of reusing stale token."""
+    captured_tokens: list[str] = []
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            auth_header = kwargs.get("headers", {}).get("Authorization", "")
+            token = auth_header.replace("Bearer ", "")
+            captured_tokens.append(token)
+            if token == "stale_token_abc":
+                return _Context(_Response(status=401, text="Unauthorized"))
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={"data": {"userWatchList": {"total": 42}}},
+                )
+            )
+
+    client = _make_client(MockSession())
+
+    # Set up mock Home Assistant OAuth2Session
+    entry_data = {
+        "token": {
+            "access_token": "stale_token_abc",
+            "expires_at": time.time() + 3600,
+        }
+    }
+
+    class MockConfigEntry:
+        def __init__(self) -> None:
+            self.data = entry_data
+
+    class MockConfigEntries:
+        def async_update_entry(self, entry: Any, *, data: dict[str, Any]) -> None:
+            entry.data = data
+            entry_data.update(data)
+
+    class MockHass:
+        def __init__(self) -> None:
+            self.config_entries = MockConfigEntries()
+
+    class MockImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "access_token": "fresh_token_xyz",
+                "refresh_token": "new_refresh",
+                "expires_in": 7200,
+            }
+
+    class MockOAuth2Session:
+        def __init__(self) -> None:
+            self.config_entry = MockConfigEntry()
+            self.hass = MockHass()
+            self.implementation = MockImplementation()
+
+        @property
+        def token(self) -> dict[str, Any]:
+            return self.config_entry.data["token"]
+
+        async def async_ensure_token_valid(self) -> None:
+            pass
+
+    client._oauth_session = MockOAuth2Session()
+    client._access_token = None
+
+    result = asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    assert result == {"userWatchList": {"total": 42}}
+    assert len(captured_tokens) == 2
+    assert captured_tokens[0] == "stale_token_abc"
+    # Proof that the rejected token was NOT reused on the second attempt:
+    assert captured_tokens[1] == "fresh_token_xyz"
+
+
+def test_graphql_malformed_errors_array_non_object_fails_closed() -> None:
+    """Non-object items in errors array fail closed with EbayParseError."""
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={
+                        "data": {"userWatchList": None},
+                        "errors": ["not_a_valid_error_object"],
+                    },
+                )
+            )
+
+    client = _make_client(MockSession())
+
+    with pytest.raises(EbayParseError, match="must be objects"):
+        asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+
+def test_sanitize_graphql_errors_preserves_code_category_domain() -> None:
+    """Verify extensions.code, category, and domain match documented eBay structure."""
+    raw = [
+        {
+            "message": "Token expired",
+            "extensions": {
+                "code": 1001,
+                "category": "REQUEST",
+                "domain": "BUY_WATCHLIST",
+            },
+        },
+        {
+            "message": "Rate limit exceeded",
+            "extensions": {
+                "code": "RATE_LIMITED",
+                "category": "REQUEST",
+                "domain": "BUY_WATCHLIST",
+            },
+        },
+    ]
+
+    sanitized = sanitize_graphql_errors(raw)
+    assert len(sanitized) == 2
+    assert sanitized[0]["code"] == 1001
+    assert sanitized[0]["category"] == "REQUEST"
+    assert sanitized[0]["domain"] == "BUY_WATCHLIST"
+    assert sanitized[1]["code"] == "RATE_LIMITED"
+    assert sanitized[1]["category"] == "REQUEST"
+
+
+def test_validate_read_only_query_edge_cases() -> None:
+    """Test syntax error edge cases in validate_read_only_query."""
+    # Extra closing brace (negative brace depth)
+    with pytest.raises(ValueError, match="Unbalanced braces"):
+        validate_read_only_query("query Safe { total } }")
+
+    # Only comments
+    with pytest.raises(ValueError, match="must contain executable content"):
+        validate_read_only_query("# only comments\n")
+
+    # Unsupported definition type (schema definition)
+    with pytest.raises(ValueError, match="Unsupported definition type"):
+        validate_read_only_query("schema { query: Query }")
+
+    # Fragment only (no executable query)
+    with pytest.raises(ValueError, match="must contain a query operation"):
+        validate_read_only_query("fragment ItemFields on Item { id }")
+
+
+def test_graphql_200_null_data_system_error_triggers_retry_and_succeeds() -> None:
+    """HTTP 200 with null data and category SYSTEM triggers retry and succeeds."""
+    calls = 0
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _Context(
+                    _Response(
+                        status=200,
+                        json_payload={
+                            "data": None,
+                            "errors": [
+                                {
+                                    "message": "Internal system failure",
+                                    "extensions": {"category": "SYSTEM"},
+                                }
+                            ],
+                        },
+                    )
+                )
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={"data": {"userWatchList": {"total": 99}}},
+                )
+            )
+
+    client = _make_client(MockSession())
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        data = asyncio.run(
+            client.async_post_graphql("query { userWatchList { total } }")
+        )
+
+    assert calls == 2
+    assert mock_sleep.await_count == 1
+    assert data == {"userWatchList": {"total": 99}}

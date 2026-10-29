@@ -172,6 +172,51 @@ class RestClientMixin:
         self._access_token_expires_at = None
         # User id is account-scoped; clear so a reauth cannot reuse a stale handle.
         self._feedback_user_id = None
+        if self._oauth_session is not None and hasattr(self._oauth_session, "token"):
+            token = dict(self._oauth_session.token)
+            token["expires_at"] = 0
+            hass = getattr(self._oauth_session, "hass", None)
+            config_entry = getattr(self._oauth_session, "config_entry", None)
+            config_entries = getattr(hass, "config_entries", None)
+            if (
+                config_entries is not None
+                and config_entry is not None
+                and hasattr(config_entries, "async_update_entry")
+            ):
+                config_entries.async_update_entry(
+                    config_entry,
+                    data={**getattr(config_entry, "data", {}), "token": token},
+                )
+
+    async def async_refresh_access_token(self) -> str:
+        """Force a fresh access token from the OAuth provider."""
+        if self._oauth_session is not None:
+            try:
+                new_token = (
+                    await self._oauth_session.implementation.async_refresh_token(
+                        self._oauth_session.token
+                    )
+                )
+            except OAuth2TokenRequestReauthError as exc:
+                raise EbayAuthError("OAuth token refresh failed") from exc
+            except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
+                raise EbayAuthTransientError(
+                    "OAuth token refresh failed temporarily"
+                ) from exc
+            if hasattr(self._oauth_session, "hass") and hasattr(
+                self._oauth_session, "config_entry"
+            ):
+                self._oauth_session.hass.config_entries.async_update_entry(
+                    self._oauth_session.config_entry,
+                    data={**self._oauth_session.config_entry.data, "token": new_token},
+                )
+            access_token = new_token.get("access_token")
+            if not access_token:
+                raise EbayAuthError("OAuth token data does not include access token")
+            return access_token
+
+        self._clear_access_token()
+        return await self.async_get_access_token()
 
     async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
         headers = {

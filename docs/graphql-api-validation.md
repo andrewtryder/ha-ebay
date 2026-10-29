@@ -3,36 +3,33 @@
 > **Phase:** GraphQL Phase 0 — Transport and API Validation
 > **Repository:** `andrewtryder/ha-ebay`
 > **Status:** Transport implementation & API contract documentation
-> **Invariant:** Strictly read-only; no live Trading XML data sources replaced in this phase.
+> **Invariant:** Strictly read-only; no live Trading XML data sources replaced in this phase. No new mandatory OAuth scopes added to the integration.
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Verification Levels
 
-This document specifies the read-only eBay GraphQL transport layer introduced in `ha-ebay`. The transport layer provides an authenticated HTTP client for eBay's modernized GraphQL endpoint (`https://graphqlapi.ebay.com/graphql`) while preserving 100% of existing Home Assistant entities, sensor states, event telemetry, and Trading XML integrations.
+This document establishes the architecture for the read-only eBay GraphQL transport layer introduced in `ha-ebay`. The transport layer provides an authenticated, resilient HTTP client for eBay's modernized GraphQL endpoint while maintaining 100% backward compatibility with existing Home Assistant entities, unique IDs, sensor states, event telemetry, and Trading XML polling coordinators.
 
-eBay's GraphQL APIs modernize four key traditional Trading XML operational areas:
-1. **Watch List API (`userWatchList`)** — replaces `GetMyeBayBuying` (`WatchList`)
-2. **Auction API (`userBiddingActivity`)** — replaces `GetMyeBayBuying` (`BidList`)
-3. **Listing API (`sellerListingSearch` / `sellerListings`)** — replaces `GetMyeBaySelling` (`ActiveList`, `SoldList`, `UnsoldList`) and `GetSellerList`
-4. **Offer API (`sellerNegotiationHistory`)** — replaces `GetBestOffers`
+To ensure technical rigor, all statements and specifications in this document are categorized into four distinct verification levels:
 
-In this initial transport phase (Phase 0), we validate and establish the HTTP transport, error handling, partial-failure protections, and query contracts without altering any production polling loops or Home Assistant entity coordinators.
+1. **[OFFICIAL SPEC] Officially Documented API Behavior**: Backed by eBay's official documentation ([Using eBay GraphQL APIs](https://developer.ebay.com/develop/guides/sell/using-ebay-graphql-apis)).
+2. **[LOCAL MOCK] Verified by Local Automated Tests**: Tested against mock aiohttp sessions in `tests/test_graphql_transport.py` (validating transport error paths, backoff loops, token refresh lifecycles, and query parsing).
+3. **[LIVE TESTED] Verified Against Real Authenticated eBay API**: Directly verified against eBay production servers with valid credentials (none in Phase 0; scheduled for Phase 1).
+4. **[UNVERIFIED] Unverified Assumptions**: Plausible schemas or behaviors requiring live API confirmation in Phase 1.
 
 ---
 
-## 2. Verified Endpoints and HTTP Specifications
+## 2. HTTP Transport and Endpoint Specifications
 
 ### 2.1 Endpoint URLs
 
-| Environment | Endpoint URL | Protocol & Method | Auth Header |
+| Environment | Endpoint URL | Status | Details & Reference |
 |---|---|---|---|
-| **Production** | `https://graphqlapi.ebay.com/graphql` | HTTP `POST` | `Authorization: Bearer <user_access_token>` |
-| **Sandbox** | `https://graphqlapi.sandbox.ebay.com/graphql` | HTTP `POST` | `Authorization: Bearer <user_access_token>` |
+| **Production** | `https://graphqlapi.ebay.com/graphql` | **[OFFICIAL SPEC]** | Documented in [Using eBay GraphQL APIs](https://developer.ebay.com/develop/guides/sell/using-ebay-graphql-apis). Single GraphQL HTTP POST endpoint. |
+| **Sandbox** | `https://graphqlapi.sandbox.ebay.com/graphql` | **[UNVERIFIED]** | Configured as candidate endpoint in `EbayEndpoints`. eBay documentation specifically highlights production GraphQL Explorer; sandbox GraphQL routing and resolver parity remain **UNVERIFIED**. |
 
-Both endpoints are configured in [`EbayEndpoints`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/endpoints.py#L12-L28) via `endpoints_for(environment).graphql`.
-
-### 2.2 Required HTTP Headers
+### 2.2 Required HTTP Request Headers
 
 ```http
 POST /graphql HTTP/1.1
@@ -44,29 +41,83 @@ X-EBAY-C-MARKETPLACE-ID: EBAY_US
 Accept-Language: en-US
 ```
 
-- **`Authorization`**: OAuth 2.0 User Access Token obtained via Authorization Code Grant (`Bearer <token>`). Tokens may be up to 4,000 characters long in Federated GraphQL (FGQL).
-- **`X-EBAY-C-MARKETPLACE-ID`**: **Mandatory.** Identifies the marketplace context for the query (e.g. `EBAY_US`, `EBAY_GB`, `EBAY_DE`, `EBAY_AU`). Mapped from the integration's stored `site_id` via [`marketplace_id_for_site()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/marketplace.py#L128-L131). Defaults to `EBAY_US` if site ID is unmapped.
-- **`Accept-Language`**: Optional locale header derived from locale-specific site IDs (e.g. `fr-CA` for Canada French, `nl-BE` for Belgium Dutch) via [`accept_language_for_site()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/marketplace.py#L133-L136).
-- **`Content-Type`** and **`Accept`**: `application/json`.
+- **`Authorization`** (`Bearer <access_token>`): **[OFFICIAL SPEC]** OAuth 2.0 User Access Token. eBay notes that modern public GraphQL (FGQL) tokens can stretch up to **4,000 characters** in length.
+- **`X-EBAY-C-MARKETPLACE-ID`**: **[OFFICIAL SPEC]** Mandatory header specifying the target marketplace context (e.g. `EBAY_US`, `EBAY_GB`, `EBAY_DE`). Dynamically mapped in `ha-ebay` from the user's configured Site ID.
+- **`Accept-Language`**: **[OFFICIAL SPEC]** Optional locale language header (e.g. `fr-CA`, `de-DE`) derived from locale-specific marketplaces.
+- **`Content-Type` & `Accept`**: **[OFFICIAL SPEC]** Must be `application/json`. All GraphQL requests are delivered via HTTP POST with JSON body `{"query": "...", "variables": {...}}`.
 
 ### 2.3 Strict Read-Only Mutation Rejection
 
-In adherence to project philosophy, mutations are strictly prohibited:
-```python
-def validate_read_only_query(query: str) -> None:
-    # Strips comments and rejects any query starting with 'mutation'
-```
-Any attempt to execute a mutation through [`async_post_graphql()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/graphql.py#L152-L245) or [`async_execute_graphql()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/graphql.py#L247-L270) raises a `ValueError` immediately before any HTTP request is dispatched.
+**[LOCAL MOCK]** Enforced in [`validate_read_only_query()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/graphql.py#L133):
+- Rejects any document containing a `mutation` or `subscription` definition anywhere in the document, regardless of position.
+- Rejects multi-operation documents (only single-query documents are permitted).
+- Validates `operation_name` against the declared query operation, rejecting mismatched names or anonymous queries with an operation name.
+- Permits fragments alongside the single query (`fragment ... on ...`).
+- Safely ignores `mutation` keywords when enclosed in double-quoted strings (`"..."`), block strings (`"""..."""`), or comments (`# ...`).
+- Unsafe operations raise `ValueError` before any network dispatch occurs.
 
 ---
 
-## 3. Verified Read-Only Operations and Query Contracts
+## 3. Error Handling and Token Lifecycle Architecture
 
-### 3.1 Watch List API (`userWatchList`)
+### 3.1 Documented eBay GraphQL Error Shape
 
-- **Operation Name**: `userWatchList` (read-only query)
-- **Purpose**: Retrieve the authenticated buyer's default watched items.
-- **Query Structure**:
+**[OFFICIAL SPEC]** eBay GraphQL returns errors within an `errors` array inside a standard JSON response ([Using eBay GraphQL APIs](https://developer.ebay.com/develop/guides/sell/using-ebay-graphql-apis)):
+
+```json
+{
+  "errors": [
+    {
+      "message": "Access Token is expired or invalid",
+      "locations": [{"line": 2, "column": 3}],
+      "path": ["userWatchList"],
+      "extensions": {
+        "code": 1001,
+        "category": "REQUEST",
+        "domain": "BUY_WATCHLIST"
+      }
+    }
+  ]
+}
+```
+
+- **`extensions.code`**: Numeric or string error identifier (e.g. `1001`, `"RATE_LIMITED"`, `"UNAUTHENTICATED"`).
+- **`extensions.category`**:
+  - `REQUEST`: Issue originated with client input, malformed syntax, expired token, or rate limiting.
+  - `APPLICATION`: Application runtime exception.
+  - `SYSTEM`: Backend infrastructure or upstream service failure.
+- **`extensions.domain`**: Functional service domain (e.g. `BUY_WATCHLIST`).
+- **No Root Extensions**: Root-level `extensions` are not used by eBay for error reporting; error metadata is strictly nested within `errors[].extensions`.
+
+### 3.2 Response Processing & Error Classification Matrix
+
+| Condition | Response HTTP Status | Body Structure | Client Action | Verification Level |
+|---|---|---|---|---|
+| **Success** | `200 OK` | `data: {...}, errors: null` | Return `data` mapping. | **[LOCAL MOCK]** |
+| **Token Expired** | `401 Unauthorized` OR `200 OK` with auth expired code/message | `errors[].extensions.code in (1001, "UNAUTHENTICATED", "TOKEN_EXPIRED")` | Force-refresh OAuth access token via `OAuth2Session` / refresh endpoint; retry request once. | **[LOCAL MOCK]** |
+| **Permission Denied / Missing Scope** | `403 Forbidden` OR `200 OK` with permission error | `errors[].extensions.code in ("FORBIDDEN", "ACCESS_DENIED", "INSUFFICIENT_SCOPE")` | **Do NOT refresh token.** Raise `EbayAuthError` immediately without retry. | **[LOCAL MOCK]** |
+| **Rate Limited** | `429 Too Many Requests` OR `200 OK` with rate limit error | `errors[].extensions.code == "RATE_LIMITED"` | Parse `Retry-After` (if present) or apply exponential backoff (`0.5 * 2^attempt`), retrying up to 3 times. Classify as `transient`. | **[LOCAL MOCK]** |
+| **System / 5xx Error** | `5xx` OR `200 OK` with `data: null` & `category: "SYSTEM"` | `errors[].extensions.category == "SYSTEM"` | Exponential backoff retry up to 3 times. Classify as `transient`. | **[LOCAL MOCK]** |
+| **Partial Collection Failure** | `200 OK` | `data: {"userWatchList": null}, errors: [...]` | **[CRITICAL SAFEGUARD]** When `allow_partial_data=False` (default), raise `EbayGraphQLError`. **Never return null/missing collections as `[]`.** | **[LOCAL MOCK]** |
+| **Malformed Response** | Any | Empty text, non-JSON, or `errors` array containing non-objects (e.g. `["error"]`) | Raise `EbayParseError`. Fail closed. | **[LOCAL MOCK]** |
+
+### 3.3 Home Assistant `OAuth2Session` Integration
+
+**[LOCAL MOCK]** When integrated with Home Assistant's `OAuth2Session`:
+- Standard `async_ensure_token_valid()` evaluates token expiry against local clock (`valid_token`). If eBay prematurely revokes or rejects a token with HTTP 401, `valid_token` remains `True` and reusing `async_ensure_token_valid()` would retransmit the identical rejected token.
+- `ha-ebay` implements `async_refresh_access_token()` which invokes `self._oauth_session.implementation.async_refresh_token(self._oauth_session.token)` directly and updates `self.hass.config_entries.async_update_entry(...)`.
+- `_clear_access_token()` sets `expires_at = 0` on the session token dictionary.
+- The retry attempt retrieves the newly refreshed token and transmits it in the `Authorization: Bearer` header.
+
+---
+
+## 4. Operation Query Contracts [UNVERIFIED]
+
+The following query schemas represent candidate models based on eBay public developer references, but remain **[UNVERIFIED]** until authenticated live queries are executed in Phase 1:
+
+### 4.1 Watch List API (`userWatchList`) — [UNVERIFIED]
+
+- **Candidate Query Structure**:
   ```graphql
   query GetUserWatchList($limit: Int, $offset: Int) {
     userWatchList(limit: $limit, offset: $offset) {
@@ -88,20 +139,15 @@ Any attempt to execute a mutation through [`async_post_graphql()`](file:///Users
     }
   }
   ```
-- **Inputs**:
-  - `limit` (`Int`): Number of items per page (typically 50; max 100).
-  - `offset` (`Int`): 0-based start index.
-- **Output Fields**:
-  - `total` (`Int`): Total count of items on the watchlist.
-  - `items` (`[WatchListItem]`): Array of watched listings.
-- **Companion Query**: `userCustomLists` (retrieves user-created custom lists; not required for default watchlist telemetry).
-- **Mutations (Forbidden in ha-ebay)**: `addToWatchList`, `removeFromWatchList`, `removeAllFromWatchList`.
+- **Unverified Assumptions**:
+  - Exact pagination variable names (`limit`/`offset` vs. cursor `first`/`after`).
+  - Field naming for price (`price.value` vs. `currentPrice.value`).
+  - Availability of `bidCount` for watched auction listings.
+  - Required OAuth scope: Whether covered under base `https://api.ebay.com/oauth/api_scope` or strictly requiring `https://api.ebay.com/oauth/api_scope/buy.watchlist`.
 
-### 3.2 Auction API (`userBiddingActivity`)
+### 4.2 Bidding Activity API (`userBiddingActivity`) — [UNVERIFIED]
 
-- **Operation Name**: `userBiddingActivity` (read-only query)
-- **Purpose**: Retrieve the authenticated buyer's bidding activity on auctions.
-- **Query Structure**:
+- **Candidate Query Structure**:
   ```graphql
   query GetUserBiddingActivity($limit: Int, $offset: Int) {
     userBiddingActivity(limit: $limit, offset: $offset) {
@@ -125,148 +171,30 @@ Any attempt to execute a mutation through [`async_post_graphql()`](file:///Users
     }
   }
   ```
-- **Inputs**:
-  - `limit` (`Int`): Page size.
-  - `offset` (`Int`): 0-based offset.
-- **Data Access Restrictions**: eBay returns full bidding details when querying the authenticated user's own activity, but redacts competitor buyer identifiers.
-- **Companion Query**: `itemBiddingActivity` (inspects bid history for a single auction listing).
-- **Mutations (Forbidden in ha-ebay)**: `placeProxyBid`.
-
-### 3.3 Listing API (`sellerListingSearch` and `sellerListings`)
-
-- **Operation Name**: `sellerListingSearch` (read-only query)
-- **Purpose**: Search and paginate active, ended, or scheduled listings for the authenticated seller.
-- **Query Structure**:
-  ```graphql
-  query SearchSellerListings($limit: Int, $offset: Int, $filter: SellerListingSearchFilter) {
-    sellerListingSearch(limit: $limit, offset: $offset, filter: $filter) {
-      total
-      listings {
-        listingId
-        title
-        formatType
-        endTime
-        pricingSummary {
-          price {
-            value
-            currency
-          }
-        }
-        quantity
-        quantitySold
-        quantityAvailable
-        watchCount
-      }
-    }
-  }
-  ```
-- **Mutations (Forbidden in ha-ebay)**: `createListing`, `updateListing`, `endListing`, `withdrawListing`.
-
-### 3.4 Offer API (`sellerNegotiationHistory`)
-
-- **Operation Name**: `sellerNegotiationHistory` (read-only query)
-- **Purpose**: Retrieve buyer best offers on seller listings.
-- **Mutations (Forbidden in ha-ebay)**: `acceptOffer`, `counterOffer`, `declineOffer`, `makeOffer`.
+- **Unverified Assumptions**:
+  - Exact query name (`userBiddingActivity` vs. `userBids`).
+  - Active vs. ended auction filtering parameters.
+  - Required OAuth scope (`buy.bidding` vs. `buy.auction` vs. base scope).
 
 ---
 
-## 4. OAuth Scope Requirements
+## 5. Scope Compatibility Policy
 
-### 4.1 Scope Matrix
+### 5.1 Zero Scope Disruption Guarantee
 
-| GraphQL Operation | Required Scope | Token Grant Type | Can Use Base Scope? |
-|---|---|---|---|
-| `userWatchList` | `https://api.ebay.com/oauth/api_scope/buy.watchlist` | Authorization Code | Yes (under `https://api.ebay.com/oauth/api_scope`) |
-| `userBiddingActivity` | `https://api.ebay.com/oauth/api_scope/buy.auction` | Authorization Code | Yes (under `https://api.ebay.com/oauth/api_scope`) |
-| `sellerListingSearch` | `https://api.ebay.com/oauth/api_scope/sell.inventory.readonly` | Authorization Code | Yes (under `https://api.ebay.com/oauth/api_scope`) |
-| `sellerNegotiationHistory`| `https://api.ebay.com/oauth/api_scope/sell.negotiation` | Authorization Code | Yes (under `https://api.ebay.com/oauth/api_scope`) |
-
-### 4.2 Non-Breaking Compatibility Rule
-
-Existing `ha-ebay` users authorized with the core Trading API scope (`https://api.ebay.com/oauth/api_scope`).
-**Safeguard:** In Phase 0 and subsequent phases, no new mandatory OAuth scopes are added to [`CORE_SCOPE`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/scopes.py#L22). Existing user tokens remain fully valid.
+- **[OFFICIAL POLICY]** No new mandatory OAuth scopes are added in Phase 0.
+- Existing user installations use `https://api.ebay.com/oauth/api_scope`.
+- In Phase 1, before any live coordinator migration occurs, live testing will verify whether the base scope grants access to `userWatchList`. If granular scopes (e.g. `buy.watchlist`) are required by eBay, they will be introduced with an explicit, backward-compatible reauthorization flow rather than breaking existing installations.
 
 ---
 
-## 5. Pagination Contracts and Limits
+## 6. Live-Contract Validation Checklist (Phase 1 Prerequisites)
 
-1. **Variables Requirement**: eBay GraphQL strictly enforces query variables for pagination arguments. Inline literals (e.g. `userWatchList(limit: 50)`) are rejected by eBay's query validator. All pagination arguments must be passed in the `variables` JSON object.
-2. **Page Sizing**:
-   - Trading XML allowed `EntriesPerPage = 200`.
-   - GraphQL queries enforce smaller maximums: typically `limit: 50` or `limit: 100`.
-3. **Truncation Safeguard**:
-   - `ha-ebay` enforces a maximum fetch cap of `MAX_PAGES = 20` pages.
-   - If `offset + limit < total` after 20 pages, `buying_truncated = True` or `selling_truncated = True` must be set in coordinator fetch results.
+Before migrating `WatchedItemData` or replacing `GetMyeBayBuying` in production coordinators, the following live checks must be executed against production eBay using real developer credentials:
 
----
-
-## 6. Error Handling and Classification
-
-### 6.1 HTTP Status Handling
-
-- **401 Unauthorized**: Access token expired or invalid. Clears cached token (`_clear_access_token()`) and retries once with a refreshed token. Raises `EbayAuthError` if the second attempt fails.
-- **403 Forbidden**: Insufficient permissions, missing scope, or unauthorized account. Raises `EbayAuthError`.
-- **429 Too Many Requests**: Rate limit reached. Inspects `Retry-After` header (up to 30s) or applies exponential backoff (`0.5 * 2^attempt`), retrying up to 3 times. Raises `EbayApiError` (or `EbayPartialFailure` if `partial_category` is provided).
-- **5xx Server Errors (500, 502, 503, 504)**: Upstream eBay server failure. Applies exponential backoff and retries up to 3 times. Raises `EbayApiError` (or `EbayPartialFailure`).
-- **Network / Transport Failures (`aiohttp.ClientError`, `TimeoutError`)**: Retries up to 3 times with backoff, then raises `EbayApiError` (or `EbayPartialFailure`).
-
-### 6.2 GraphQL Response Body Parsing
-
-- **`EbayParseError`**: Raised on non-JSON response bodies, empty text bodies, JSON arrays/primitives, responses missing both `data` and `errors`, or malformed `data`/`errors` structures.
-- **Top-Level `errors`**: When `data` is `null` and `errors` is non-empty, raises [`EbayGraphQLError`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/errors.py#L48-L62).
-- **Authentication Errors inside `errors`**: Scans `errors[].extensions` for `statusCode in {401, 403}` or `errorCode in {UNAUTHENTICATED, UNAUTHORIZED, ACCESS_DENIED, FORBIDDEN, INVALID_TOKEN, TOKEN_EXPIRED}` and message text. Raises `EbayAuthError` to trigger the token refresh loop.
-- **Crucial Partial-Failure Safeguard (`allow_partial_data=False`)**:
-  - When `data` contains fields but `errors` is non-empty, standard GraphQL resolver failures leave failed sub-trees as `null`.
-  - In `ha-ebay`, treating a `null` collection as an empty list `[]` would wipe out entity state and trigger false deletion events (`watched_item_removed`, `item_disappeared_unknown`).
-  - By default, [`async_post_graphql()`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/graphql.py#L152-L245) raises [`EbayGraphQLError`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/errors.py#L48-L62) whenever `errors` is present, guaranteeing that partial collections are never misidentified as empty.
-
----
-
-## 7. Confirmed Field Mappings
-
-### 7.1 Watchlist (`userWatchList` $\rightarrow$ `WatchedItemData`)
-
-| Target Field | GraphQL Source Path | Type | Normalization Rule |
-|---|---|---|---|
-| `item_id` | `items[].itemId` | `str` | Strip composite REST prefixes (e.g. `v1\|123456789012\|0` $\rightarrow$ `123456789012`) |
-| `title` | `items[].title` | `str` | String title, fallback `"Unknown Item"` |
-| `current_price` | `items[].price.value` | `float` | Parse decimal number to `float` |
-| `currency` | `items[].price.currency` | `str` | ISO 4217 currency code (default `"USD"`) |
-| `end_time` | `items[].itemEndDate` | `str \| None` | ISO 8601 UTC timestamp |
-| `item_url` | `items[].itemWebUrl` | `str \| None` | Listing URL |
-| `image_url` | `items[].image.imageUrl` | `str \| None` | Thumbnail gallery URL |
-| `listing_type` | `items[].formatType` | `str` | Map `AUCTION` $\rightarrow$ `"Auction"`, `FIXED_PRICE` $\rightarrow$ `"FixedPriceItem"` |
-
-### 7.2 Bidding Activity (`userBiddingActivity` $\rightarrow$ `BiddingItemData`)
-
-| Target Field | GraphQL Source Path | Type | Normalization Rule |
-|---|---|---|---|
-| `item_id` | `items[].itemId` | `str` | Normalize composite IDs to legacy numeric ID string |
-| `title` | `items[].title` | `str` | Listing title |
-| `current_price` | `items[].currentPrice.value` | `float` | Current high bid amount |
-| `currency` | `items[].currentPrice.currency` | `str` | ISO 4217 currency code |
-| `bids` | `items[].bidCount` | `int` | Integer bid count |
-| `max_bid` | `items[].maxBidAmount.value` | `float` | User's maximum proxy bid |
-| `end_time` | `items[].itemEndDate` | `str \| None` | ISO 8601 UTC timestamp |
-| `winning` | `items[].currentHighestBidder` | `bool` | `True` if user currently holds high bid; filter ended auctions |
-
----
-
-## 8. Unverified Capabilities and Blockers
-
-The following items cannot be fully verified without an active, authenticated eBay developer account and live GraphQL queries:
-
-1. **Schema Introspection**: Confirmed **unsupported** by eBay's GraphQL server. Dynamic introspection queries (`__schema`, `__type`) return an error. Schemas must be referenced from developer portal documentation or interactively queried in the eBay GraphQL Explorer.
-2. **Auction Bid Count on Watched Items**: Whether `userWatchList` directly exposes `bidCount` for auction listings, or if a secondary query or Browse API call is needed to retrieve bid counts on watched auctions.
-3. **Filtering Ended Auctions in `userBiddingActivity`**: Whether the query's input filter accepts status parameters (e.g. `status: ACTIVE`) to exclude ended auctions, or if client-side filtering (`end_time > now`) is required to avoid keeping ended auctions in active state.
-4. **Sandbox Resolver Parity**: Whether Sandbox (`graphqlapi.sandbox.ebay.com`) has full resolver parity with Production for `userWatchList` and `userBiddingActivity`.
-
----
-
-## 9. Next Steps (Phase 1 Roadmap)
-
-1. Review and merge this transport layer PR (`feat/ebay-graphql-transport`).
-2. Implement Milestone 1 (Watchlist API migration):
-   - Add GraphQL query builders for `userWatchList`.
-   - Add response parser normalizing GraphQL watchlist items into `WatchedItemData`.
-   - Implement optional feature flag / coordinator toggle while retaining `GetMyeBayBuying` fallback.
+- [ ] **GraphQL Introspection Check**: Confirm server returns introspection disabled error for `__schema`.
+- [ ] **Production URL Handshake**: Execute minimal `{ __typename }` query against `https://graphqlapi.ebay.com/graphql` with `X-EBAY-C-MARKETPLACE-ID: EBAY_US`.
+- [ ] **Base Scope Access Verification**: Test `userWatchList` query using an access token with only `https://api.ebay.com/oauth/api_scope`. Determine if eBay accepts base scope or returns `INSUFFICIENT_SCOPE`.
+- [ ] **Watchlist Schema & Pagination Verification**: Run live `userWatchList(limit: 5)` query via GraphQL Explorer. Validate exact field names (`total`, `items`, `itemId`, `price`, `itemEndDate`, `image`).
+- [ ] **Bid Count Availability on Watchlist**: Check whether `bidCount` exists on auction items returned by `userWatchList` to avoid telemetry regression compared to `GetMyeBayBuying`.
+- [ ] **Sandbox Endpoint Accessibility**: Verify whether `https://graphqlapi.sandbox.ebay.com/graphql` responds to requests or if GraphQL is production-only.

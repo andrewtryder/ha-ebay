@@ -50,7 +50,10 @@ from .clients.graphql import (
     GraphQLClientMixin,
     GraphQLResponse,
     is_graphql_auth_error,
+    is_graphql_permission_error,
     is_graphql_rate_limit_error,
+    is_graphql_system_error,
+    is_graphql_token_expired,
     validate_read_only_query,
 )
 from .clients.http import TOKEN_REFRESH_MARGIN, RestClientMixin
@@ -268,7 +271,10 @@ __all__ = [
     "format_seconds",
     "has_core_scope",
     "is_graphql_auth_error",
+    "is_graphql_permission_error",
     "is_graphql_rate_limit_error",
+    "is_graphql_system_error",
+    "is_graphql_token_expired",
     "join_scopes",
     "map_rest_failure_category",
     "merge_partial_failure_details",
