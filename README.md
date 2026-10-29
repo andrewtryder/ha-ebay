@@ -30,7 +30,7 @@ Requires Home Assistant `2026.3.0+`.
 1. In HACS, add `https://github.com/andrewtryder/ha-ebay` as a custom **Integration** repository.
 2. Install **eBay**.
 3. Restart Home Assistant.
-4. Go to **Settings → Devices & services → Add integration → eBay**.
+4. Click **[Add eBay to Home Assistant](https://my.home-assistant.io/redirect/config_flow_start/?domain=ebay)** to start setup, or go to **Settings → Devices & services → Add integration → eBay**.
 
 A full Home Assistant restart is required after updating the integration through HACS.
 
