@@ -625,6 +625,45 @@ class GraphQLClientMixin:
                             error_json = await response.json(content_type=None)
                         except (aiohttp.ContentTypeError, json.JSONDecodeError):
                             error_json = None
+
+                        # Distinguish GraphQL syntax/schema validation errors (HTTP 400 with errors payload)
+                        if response.status == 400 and isinstance(error_json, dict):
+                            raw_errors = error_json.get("errors")
+                            if isinstance(raw_errors, list):
+                                sanitized = sanitize_graphql_errors(raw_errors)
+                                for err in sanitized:
+                                    if not err.get("code") and not err.get(
+                                        "error_code"
+                                    ):
+                                        err["code"] = "VALIDATION_ERROR"
+                                        err["error_code"] = "VALIDATION_ERROR"
+                                    if not err.get("category"):
+                                        err["category"] = "REQUEST"
+                                classification = classify_rest_status(
+                                    400, error_json, partial_category or "graphql"
+                                )
+                                mapped = map_rest_failure_category(
+                                    partial_category or "graphql",
+                                    400,
+                                    error_json,
+                                    classification=classification,
+                                )
+                                failure = build_api_failure(
+                                    op,
+                                    url,
+                                    400,
+                                    error_json,
+                                    mapped,
+                                    classification,
+                                )
+                                if partial_category:
+                                    self._raise_partial_failure(mapped, failure=failure)
+                                raise EbayGraphQLError(
+                                    f"eBay GraphQL query validation failed (HTTP 400) for {op}",
+                                    errors=sanitized,
+                                    status=400,
+                                )
+
                         classification = classify_rest_status(
                             response.status, error_json, partial_category or "graphql"
                         )
@@ -714,6 +753,8 @@ class GraphQLClientMixin:
                                     is_expired=True,
                                     is_permission_error=False,
                                     failed_token=access_token,
+                                    errors=sanitized_errors,
+                                    status=200,
                                 )
 
                         # 2. Check for permanent scope or permission error (no refresh/retry)
@@ -727,6 +768,8 @@ class GraphQLClientMixin:
                                     f"eBay GraphQL permission error (insufficient scope): {err.get('message')}",
                                     is_expired=False,
                                     is_permission_error=True,
+                                    errors=sanitized_errors,
+                                    status=200,
                                 )
 
                         # 3. Check for rate limit / throttling (transient)

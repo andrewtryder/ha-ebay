@@ -827,21 +827,26 @@ def test_graphql_null_data_with_partial_category_raises_partial_failure() -> Non
 
 
 def test_graphql_http_400_raises_api_error_or_partial_failure() -> None:
-    """HTTP 400 Bad Request raises EbayPartialFailure or EbayApiError."""
+    """HTTP 400 Bad Request raises EbayGraphQLError (or EbayPartialFailure if partial_category is set)."""
 
     class MockSession:
         def post(self, url: str, **kwargs: Any) -> _Context:
             return _Context(
                 _Response(
                     status=400,
-                    json_payload={"errors": [{"message": "Malformed syntax"}]},
+                    json_payload={
+                        "errors": [{"message": "Field 'total' is undefined"}]
+                    },
                 )
             )
 
     client = _make_client(MockSession())
 
-    with pytest.raises(EbayApiError, match="HTTP 400"):
+    with pytest.raises(EbayGraphQLError, match="HTTP 400") as exc_info:
         asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+    assert exc_info.value.status == 400
+    assert exc_info.value.errors[0]["code"] == "VALIDATION_ERROR"
+    assert exc_info.value.errors[0]["category"] == "REQUEST"
 
     with pytest.raises(EbayPartialFailure):
         asyncio.run(
@@ -849,6 +854,17 @@ def test_graphql_http_400_raises_api_error_or_partial_failure() -> None:
                 "query { userWatchList { total } }",
                 partial_category="buying",
             )
+        )
+
+    # Generic non-GraphQL 400 (no errors key) raises EbayApiError
+    class MockNonGraphQL400Session:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(_Response(status=400, text="Bad Request"))
+
+    client_generic = _make_client(MockNonGraphQL400Session())
+    with pytest.raises(EbayApiError, match="HTTP 400"):
+        asyncio.run(
+            client_generic.async_post_graphql("query { userWatchList { total } }")
         )
 
 

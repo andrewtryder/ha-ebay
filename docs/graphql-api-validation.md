@@ -283,3 +283,44 @@ uv run --python 3.14 --with-requirements requirements-ha-current.txt \
   - Avoid pointing `--ha-config-entries` directly at a live, running Home Assistant `.storage/core.config_entries` directory as your primary workflow.
   - Although the harness opens `core.config_entries` strictly read-only and never modifies the file, invoking an independent OAuth `refresh_token` grant outside Home Assistant cannot persist any rotated refresh token or new access token back into Home Assistant's `OAuth2Session`. While eBay's standard refresh-token flow normally returns a new `access_token` without invalidating the existing `refresh_token`, if eBay ever rotates the refresh token during a standalone run, the running Home Assistant instance would hold a stale refresh token and require reauthorization.
   - If `--ha-config-entries` is used against an offline copy, the harness reuses any non-expired cached `access_token` (>6 minutes remaining) before falling back to a token refresh, and requires `--ha-entry-id <entry_id>` whenever multiple `ebay` entries exist.
+
+---
+
+## 8. Live Production Validation Findings (October 29, 2026)
+
+On October 29, 2026, the maintainer completed the first authenticated read-only live validation run against eBay's production environment using `scripts/validate_watchlist_parity.py --live`.
+
+### 8.1 Observed Live Results vs. Assumptions
+
+To maintain strict scientific and engineering rigor, all observations are separated from working assumptions:
+
+| Test / Probe | Observed Fact | Working Assumption / Hypothesis | Verification Level |
+|---|---|---|---|
+| **GraphQL Handshake (`query Handshake { __typename }`)** | **HTTP 200 OK**, payload `{"data": {"__typename": "Query"}}`. | Handshake confirms endpoint URL (`https://graphqlapi.ebay.com/graphql`), OAuth Bearer token acceptance, and `X-EBAY-C-MARKETPLACE-ID: EBAY_US` header routing in production. | **[LIVE TESTED]** |
+| **Trading XML (`GetMyeBayBuying` `WatchList`)** | **Success**, `19` items returned, `xml_truncated: False`. | Trading XML remains fully operational and authoritative for the user's account under standard OAuth scopes. | **[LIVE TESTED]** |
+| **Count Schema Probe (`userWatchList { watchListCount watchListMaximum }`)** | **Schema Accepted (HTTP 200)**, but resolver returned `extensions: {"errorCode": "FORBIDDEN"}`. | `userWatchList` exists on `Query`, and `watchListCount` + `watchListMaximum` are real schema fields (matching eBay Watch List API documentation). However, resolver execution is forbidden for the current application/token. | **[LIVE TESTED]** |
+| **Candidate Item Probes (`total`, `items`, `watchlistItems`, pagination args)** | **HTTP 400 Bad Request**, payload `{"errors": [...]}`. | `total`, `items`, and `watchlistItems` are rejected by GraphQL schema validation on `WatchListOutput`. | **[LIVE TESTED]** |
+| **Item Collection & Field Parity** | **Unavailable**. All 10 parity fields (`watched_count`, `item_id`, `title`, `current_price`, `currency`, `listing_type`, `end_time`, `url`, `image`, `bid_count`) evaluated to **Unverified (`unverified`)** with `coverage: none`. | Parity between XML and GraphQL cannot be established while GraphQL resolver execution is forbidden. | **[LIVE TESTED]** |
+
+### 8.2 Watch List API Architecture & OAuth Scope Investigation
+
+1. **Official Watch List API Architecture**:
+   - Official eBay Developer documentation identifies the modernized Watch List API as the designated successor to Trading API `GetMyeBayBuying` (`WatchList`).
+   - The query `userWatchList` provides read access to a user's default watchlist.
+   - The fields `watchListCount` (integer count of items currently on the watchlist) and `watchListMaximum` (upper ceiling, typically 400 items) are documented companion fields on `userWatchList`, directly aligning with our live HTTP 200 schema acceptance.
+2. **OAuth Scope Investigation**:
+   - The candidate scope `https://api.ebay.com/oauth/api_scope/buy.watchlist.read` is documented in eBay developer documentation for **Watchlist Revision notifications** (specifically subscribing to the `WATCHLIST_REVISION` topic via the Commerce Notification API).
+   - **Candidate Only**: `buy.watchlist.read` is treated **strictly as a candidate for further investigation**, NOT as a verified scope for the GraphQL `userWatchList` query.
+   - **No Speculative Scope Additions**: Adding new OAuth scopes to the integration without verified necessity carries severe compatibility implications (requiring reauthorization of all existing users or risking token invalidation). No scopes will be added until eBay Developer documentation or Explorer tests confirm exact requirements.
+3. **Why Did `userWatchList` Return `FORBIDDEN`?**:
+   - Hypotheses under evaluation:
+     1. The `userWatchList` resolver requires an additional read scope beyond the base `https://api.ebay.com/oauth/api_scope` (e.g., `buy.watchlist.read` or another buyer-specific scope).
+     2. The `userWatchList` query is gated behind eBay Developer Program application tier permissions or partner entitlements.
+     3. The query requires specific input arguments or headers not yet identified.
+
+### 8.3 Architectural Conclusion & Roadmap Impact
+
+1. **No GraphQL Cutover Justified**: Because GraphQL item collection is unavailable and resolver execution is forbidden, **no data-source cutover is justified**.
+2. **Trading XML Remains Authoritative**: Existing Trading XML `GetMyeBayBuying` remains the sole authoritative data source for the Watchlist sensor and event entities.
+3. **Milestone 2 Blocked / Deferred**: Milestone 2 (GraphQL Watchlist Migration) is **BLOCKED** until the maintainer verifies authorization requirements in eBay's GraphQL Explorer or through official support.
+4. **Fail-Closed Verification**: The Milestone 1 parity harness successfully protected the integration from migrating to a broken or unauthorized GraphQL endpoint, proving the fail-closed design of the modernization roadmap.

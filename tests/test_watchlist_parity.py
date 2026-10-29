@@ -17,6 +17,7 @@ import pytest
 import scripts.validate_watchlist_parity as cli_harness
 from custom_components.ebay.clients.errors import (
     EbayApiError,
+    EbayAuthError,
     EbayAuthTransientError,
     EbayGraphQLError,
     EbayParseError,
@@ -334,6 +335,51 @@ def test_diagnostic_privacy_allowlist_redacts_item_ids_accounts_and_secrets() ->
     assert report["manual_error"]["code"] == "UNKNOWN_CODE"
     assert report["manual_error"]["error_code"] == "UNKNOWN_CODE"
     assert report["manual_error"]["domain"] == "UNKNOWN_DOMAIN"
+
+
+def test_summarize_probe_exception_http_400_and_resolver_forbidden() -> None:
+    """HTTP 400 validation errors and HTTP 200 resolver FORBIDDEN errors are accurately classified."""
+    # 1. HTTP 400 validation error (GraphQL schema rejection)
+    err_400 = EbayGraphQLError(
+        "eBay GraphQL query validation failed (HTTP 400) for GetWatchListTotal",
+        errors=[
+            {
+                "code": "VALIDATION_ERROR",
+                "error_code": "VALIDATION_ERROR",
+                "category": "REQUEST",
+                "domain": None,
+            }
+        ],
+        status=400,
+    )
+    summary_400 = summarize_probe_exception(err_400)
+    assert summary_400["error_type"] == "EbayGraphQLError"
+    assert summary_400["failure_class"] == "validation_error"
+    assert summary_400["http_status"] == 400
+    assert summary_400["code"] == "VALIDATION_ERROR"
+    assert summary_400["is_validation_error"] is True
+
+    # 2. HTTP 200 with resolver FORBIDDEN error (EbayAuthError with errors and status=200)
+    err_forbidden = EbayAuthError(
+        "eBay GraphQL permission error (insufficient scope): Access denied",
+        is_expired=False,
+        is_permission_error=True,
+        errors=[
+            {
+                "code": "FORBIDDEN",
+                "error_code": "FORBIDDEN",
+                "category": None,
+                "domain": None,
+            }
+        ],
+        status=200,
+    )
+    summary_forbidden = summarize_probe_exception(err_forbidden)
+    assert summary_forbidden["error_type"] == "EbayAuthError"
+    assert summary_forbidden["failure_class"] == "permission_or_scope_error"
+    assert summary_forbidden["http_status"] == 200
+    assert summary_forbidden["code"] == "FORBIDDEN"
+    assert summary_forbidden["is_scope_or_permission_error"] is True
 
 
 def test_completeness_and_pagination_fail_closed_and_bounded_multi_page() -> None:

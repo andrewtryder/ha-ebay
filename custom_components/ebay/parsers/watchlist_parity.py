@@ -380,7 +380,10 @@ def sanitize_diagnostic_token(
 
 def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
     """Return a sanitized, message-free diagnostic summary for an API/probe failure."""
-    if isinstance(exc, EbayGraphQLError):
+    raw_exc_errors = getattr(exc, "errors", None)
+    if isinstance(exc, EbayGraphQLError) or (
+        isinstance(exc, EbayAuthError) and bool(raw_exc_errors)
+    ):
         error_codes: list[str] = []
         categories: list[str] = []
         domains: list[str] = []
@@ -392,7 +395,7 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
         unrecognized_domain_count = 0
         raw_upper_codes: set[str] = set()
 
-        for err in exc.errors:
+        for err in raw_exc_errors or []:
             if not isinstance(err, dict):
                 continue
             raw_err_dicts.append(err)
@@ -464,10 +467,33 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
                 }
             )
 
-        is_validation = bool(raw_upper_codes & _VALIDATION_ERROR_CODES)
-        is_perm = any(is_graphql_permission_error(e) for e in raw_err_dicts)
-        is_expired = any(is_graphql_token_expired(e) for e in raw_err_dicts)
-        is_rate_limit = any(is_graphql_rate_limit_error(e) for e in raw_err_dicts)
+        exc_status = getattr(exc, "status", None)
+        inferred_status = (
+            exc_status
+            if isinstance(exc_status, int)
+            else (status_codes[0] if status_codes else 200)
+        )
+
+        is_validation = (
+            bool(raw_upper_codes & _VALIDATION_ERROR_CODES) or inferred_status == 400
+        )
+        is_perm = (
+            bool(getattr(exc, "is_permission_error", False))
+            or any(is_graphql_permission_error(e) for e in raw_err_dicts)
+            or inferred_status == 403
+        )
+        is_expired = (
+            bool(
+                getattr(exc, "is_expired", False)
+                and not getattr(exc, "is_permission_error", False)
+            )
+            or any(is_graphql_token_expired(e) for e in raw_err_dicts)
+            or inferred_status == 401
+        )
+        is_rate_limit = (
+            any(is_graphql_rate_limit_error(e) for e in raw_err_dicts)
+            or inferred_status == 429
+        )
 
         if is_validation:
             failure_class = "validation_error"
@@ -483,7 +509,7 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
         return {
             "error_type": type(exc).__name__,
             "failure_class": failure_class,
-            "http_status": status_codes[0] if status_codes else 200,
+            "http_status": inferred_status,
             "error_count": len(raw_err_dicts),
             "unrecognized_code_count": unrecognized_code_count,
             "unrecognized_category_count": unrecognized_category_count,

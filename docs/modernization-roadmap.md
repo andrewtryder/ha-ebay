@@ -18,8 +18,8 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 |---|---|---|---|---|
 | **Pre-Phase** | Simplified OAuth Onboarding (BYO Credentials) | `feat/simplify-ebay-oauth-onboarding` | [#92](https://github.com/andrewtryder/ha-ebay/pull/92) | **Merged** |
 | **Milestone 0** | Complete GraphQL Phase 0 & Resolve OAuth Lifecycle Issues | `feat/ebay-graphql-transport` | [#94](https://github.com/andrewtryder/ha-ebay/pull/94) | **Merged** (`60f656f`) |
-| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **In Review (Draft PR)** |
-| **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | Planned (Blocked on Milestone 1 live run) |
+| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Live Run Complete (Draft PR)** |
+| **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | **BLOCKED / DEFERRED** (GraphQL resolver `FORBIDDEN`; Trading XML authoritative) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
 | **Milestone 4** | Bidding & Auction Activity Migration | `feat/ebay-graphql-bidding` | TBD | Planned |
 | **Milestone 5** | Active Seller Listings Migration | `feat/ebay-graphql-selling-active` | TBD | Planned |
@@ -68,10 +68,17 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 
 ---
 
-## Open Blockers & Unverified Contracts for Milestone 2
+## Open Blockers & Live Findings for Milestone 2
 
-1. **Maintainer-Participated Authenticated Live Validation Run**:
-   - Per project policy, authenticated live tests against the maintainer's real eBay account are never executed without explicit maintainer participation.
-   - Until the maintainer runs `scripts/validate_watchlist_parity.py --live` (or inspects the `userWatchList` schema in eBay's GraphQL Explorer), the exact live `userWatchList` field names (`items` vs. `watchlistItems`, `total` vs. `watchListCount`, `bidCount` availability) and OAuth scope acceptance (`https://api.ebay.com/oauth/api_scope` vs. `https://api.ebay.com/oauth/api_scope/buy.watchlist`) remain **[UNVERIFIED]** in production.
-2. **Sandbox GraphQL Availability**:
+1. **Live Production Validation Results (October 29, 2026)**:
+   - **Production Endpoint Handshake**: `query Handshake { __typename }` returned **HTTP 200 OK** (`{"data": {"__typename": "Query"}}`), live-verifying that `https://graphqlapi.ebay.com/graphql` accepts the user access token and marketplace headers in production.
+   - **Trading XML Authoritative**: `GetMyeBayBuying` (`WatchList`) returned **19 watched items** (complete, not truncated).
+   - **GraphQL Schema Validation**: `userWatchList { watchListCount watchListMaximum }` passed schema validation (HTTP 200), confirming field names match official Watch List API documentation. Candidate `total`, `items`, and pagination field layouts were rejected during schema validation (HTTP 400).
+   - **Resolver Authorization**: The `userWatchList` resolver returned `errorCode: "FORBIDDEN"`, indicating that `userWatchList` is not authorized for the user's current token/application credentials.
+   - **Parity Status**: All 10 monitored Watchlist fields remain **Unverified** (`unverified`).
+   - **Architectural Gate Result**: No GraphQL data-source cutover is justified. Trading XML `GetMyeBayBuying` remains authoritative. Milestone 2 (GraphQL Watchlist Migration) is **BLOCKED / DEFERRED** until scope/entitlement requirements are identified.
+2. **OAuth Scope & Entitlement Investigation**:
+   - The candidate scope `https://api.ebay.com/oauth/api_scope/buy.watchlist.read` is documented for Watchlist Revision notifications via Commerce Notification API. It is treated **strictly as a candidate for investigation**, NOT as a verified GraphQL query scope.
+   - Adding speculative OAuth scopes without verified necessity is prohibited because it carries breaking compatibility implications for existing users.
+3. **Sandbox GraphQL Availability**:
    - `https://graphqlapi.sandbox.ebay.com/graphql` remains **[UNVERIFIED]** until probed with sandbox credentials.

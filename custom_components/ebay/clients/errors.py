@@ -27,11 +27,15 @@ class EbayAuthError(EbayError):
         is_expired: bool = True,
         is_permission_error: bool = False,
         failed_token: str | None = None,
+        errors: list[dict[str, Any]] | None = None,
+        status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.is_expired = is_expired
         self.is_permission_error = is_permission_error
         self.failed_token = failed_token
+        self.errors = list(errors) if errors else []
+        self.status = status
 
 
 class EbayAuthTransientError(EbayError):
@@ -72,11 +76,13 @@ class EbayGraphQLError(EbayApiError):
         errors: list[dict[str, Any]] | None = None,
         data: dict[str, Any] | None = None,
         extensions: dict[str, Any] | None = None,
+        status: int | None = None,
     ) -> None:
         super().__init__(message)
-        self.errors = errors or []
+        self.errors = list(errors) if errors else []
         self.data = data
         self.extensions = extensions or {}
+        self.status = 200 if status is None else status
 
 
 _ELIGIBILITY_OR_PERMISSION_MARKERS = (
