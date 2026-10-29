@@ -43,8 +43,8 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - `_async_update_listener` compares `_loaded_config_snapshot(entry)` against the snapshot captured at setup (`coordinator._loaded_config`), excluding the **entire** OAuth `token` dictionary (`access_token`, `refresh_token`, `expires_in`, `expires_at`) and in-flight `pending_options` drafts so routine OAuth renewals—even if eBay rotates `refresh_token`—trigger zero reloads.
   - Explicit user-completed reauthorizations increment a nonsecret `reauth_generation` marker in `EbayConfigFlow._finish_reauth()`. Any completed reauthorization (even with unchanged credentials and options), credential/marketplace/scope change, or committed option change triggers a single reload, while legacy entries without `reauth_generation` default cleanly to generation `0`.
   - *Cross-Account Reauthorization Note*: While `reauth_generation` reloads the integration and resets in-memory client/coordinator caches (such as `_feedback_user_id`), config entries are currently keyed by `{environment}:{client_id}` rather than eBay `userId`. Enforcing account-identity continuity across reauth when a user signs into a different eBay account under the same developer app keyset is tracked under Milestone 9 (`feat/ebay-multiple-accounts`).
-- **Home Assistant Version Compatibility (2026.3.1 vs. 2026.7.2+)**:
-  - `ConfigEntry.async_start_reauth_if_available(hass)` is available in Home Assistant 2026.7.2+, whereas Home Assistant 2026.3.1 provides `ConfigEntry.async_start_reauth(hass)`. Forced refresh error handling supports both with graceful fallback.
+- **Home Assistant Version Baseline (2026.8.0+)**:
+  - `ConfigEntry.async_start_reauth_if_available(hass)` is standard across supported Home Assistant versions (2026.8.0+). Forced refresh error handling uses it directly with defensive fallback.
 - **REST Invariant**: `RestClientMixin._clear_access_token()` strictly clears in-memory cached token state and never writes to the Home Assistant config entry.
 
 ### 2. eBay GraphQL Transport (Milestone 0)

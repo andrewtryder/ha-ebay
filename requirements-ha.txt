@@ -1,5 +1,6 @@
 # Local/devcontainer alias of the current CI harness.
-# CI matrix also installs requirements-ha-min.txt (HA 2026.3.1) and
-# requirements-ha-current.txt (HA 2026.7.2). Declared HACS minimum remains
-# homeassistant>=2026.3.0 (requires Python >=3.14.2).
-pytest-homeassistant-custom-component==0.13.346
+# CI matrix also installs requirements-ha-min.txt (HA 2026.8.0) and
+# requirements-ha-current.txt (HA 2026.9.2). Declared HACS minimum remains
+# homeassistant>=2026.8.0 (requires Python >=3.14.2).
+pytest-homeassistant-custom-component==0.13.365
+voluptuous-serialize>=2.6.0

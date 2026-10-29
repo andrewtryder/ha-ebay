@@ -1501,8 +1501,8 @@ def test_graphql_refresh_reauth_triggers_ha_reauth() -> None:
     assert reauth_started is True
 
 
-def test_graphql_refresh_reauth_triggers_ha_2026_3_fallback() -> None:
-    """When async_start_reauth_if_available is absent (HA 2026.3), async_start_reauth is called."""
+def test_graphql_refresh_reauth_triggers_legacy_reauth_fallback() -> None:
+    """When async_start_reauth_if_available is absent, async_start_reauth is called as defensive fallback."""
     reauth_started = False
 
     class MockConfigEntry:

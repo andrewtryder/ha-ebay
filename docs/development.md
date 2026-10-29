@@ -1,7 +1,7 @@
 # Development environment
 
 This repository includes a devcontainer and two Home Assistant test modes.
-The integration targets Home Assistant `2026.3.0+`.
+The integration targets Home Assistant `2026.8.0+`.
 
 ## Open the devcontainer
 
@@ -20,7 +20,7 @@ The devcontainer includes:
 ## Local Python 3.14 environment
 
 The repository targets Python 3.14, matching CI, the devcontainer, and Home
-Assistant `2026.3.0+` (requires Python `>=3.14.2`). On macOS with Homebrew
+Assistant `2026.8.0+` (requires Python `>=3.14.2`). On macOS with Homebrew
 Python installed:
 
 ```bash
@@ -62,10 +62,10 @@ branches. The pre-push hook fails the push if coverage drops below the floor.
 
 CI runs `pre-commit run --all-files` (current leg only) plus `ruff` /
 `compileall` / `pytest` on Python 3.14 against two Home Assistant harnesses:
-minimum (`requirements-ha-min.txt` → `pytest-homeassistant-custom-component==0.13.317`
-→ Home Assistant `2026.3.1`) and current (`requirements-ha-current.txt` →
-`0.13.346` → `2026.7.2`). Local installs can keep using `requirements-ha.txt`
-(alias of current). The HACS minimum remains `2026.3.0` for runtime/docker.
+minimum (`requirements-ha-min.txt` → `pytest-homeassistant-custom-component==0.13.354`
+→ Home Assistant `2026.8.0`) and current (`requirements-ha-current.txt` →
+`0.13.365` → `2026.9.2`). Local installs can keep using `requirements-ha.txt`
+(alias of current). The HACS minimum remains `2026.8.0` for runtime/docker.
 
 ### Conventional commits and Release Please
 
@@ -134,7 +134,7 @@ full callback URL when available so OAuth state validation is exercised.
 
 This starts Home Assistant without mounting the local integration, installs HACS into the dev config volume, and lets you test the user-facing HACS install path.
 
-The dev Home Assistant image is pinned to `2026.3.0` to match the integration baseline in `hacs.json`.
+The dev Home Assistant image is pinned to `2026.8.0` to match the integration baseline in `hacs.json`.
 
 ```bash
 .devcontainer/start-ha-hacs.sh
@@ -200,7 +200,7 @@ Release Please owns the release version. It updates `version.txt` as the primary
 
 **Squash-merge only** for feature and fix PRs, with the squash commit title matching the semantic PR title. Regular merge commits can repeat the PR's conventional commit title in the merge commit body, which makes Release Please list the same change twice in the generated changelog. Do not rewrite historical changelog entries to undo past duplicates.
 
-Home Assistant `2026.3.0+` loads local custom integration brand assets from:
+Home Assistant `2026.8.0+` loads local custom integration brand assets from:
 
 ```text
 custom_components/ebay/brand/

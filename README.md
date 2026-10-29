@@ -12,7 +12,7 @@ through sensors, event entities, calendars, and automations.
 > This is an unofficial community integration. It is not affiliated with, endorsed by,
 > or sponsored by eBay Inc.
 
-Requires Home Assistant `2026.3.0+`.
+Requires Home Assistant `2026.8.0+`.
 
 ## Features
 

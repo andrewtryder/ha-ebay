@@ -16,13 +16,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Declared HACS minimum is 2026.3.0; first published harness on that
-          # train is 0.13.317 → homeassistant==2026.3.1.
+          # Declared HACS minimum is 2026.8.0 (pytest-homeassistant-custom-component==0.13.354).
           - python-version: "3.14"
-            ha-label: "2026.3.1-minimum"
+            ha-label: "2026.8.0-minimum"
             requirements-ha: requirements-ha-min.txt
           - python-version: "3.14"
-            ha-label: "2026.7.2-current"
+            ha-label: "2026.9.2-current"
             requirements-ha: requirements-ha-current.txt
 
     steps:
@@ -51,7 +50,7 @@ jobs:
           fi
 
       - name: Pre-commit (all files)
-        if: matrix.ha-label == '2026.7.2-current'
+        if: matrix.ha-label == '2026.9.2-current'
         run: pre-commit run --all-files
 
       - name: Ruff
