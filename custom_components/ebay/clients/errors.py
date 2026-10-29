@@ -20,6 +20,19 @@ class EbayError(Exception):
 class EbayAuthError(EbayError):
     """Authentication or authorization failed."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        is_expired: bool = True,
+        is_permission_error: bool = False,
+        failed_token: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.is_expired = is_expired
+        self.is_permission_error = is_permission_error
+        self.failed_token = failed_token
+
 
 class EbayAuthTransientError(EbayError):
     """Authentication refresh failed temporarily."""
@@ -47,6 +60,23 @@ class EbayPartialFailure(EbayError):
 
 class EbayParseError(EbayError):
     """eBay response could not be parsed."""
+
+
+class EbayGraphQLError(EbayApiError):
+    """eBay GraphQL query returned top-level or unhandled partial errors."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        errors: list[dict[str, Any]] | None = None,
+        data: dict[str, Any] | None = None,
+        extensions: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.errors = errors or []
+        self.data = data
+        self.extensions = extensions or {}
 
 
 _ELIGIBILITY_OR_PERMISSION_MARKERS = (
@@ -117,6 +147,71 @@ def sanitize_ebay_rest_errors(
             or entry["category"]
         ):
             sanitized.append(entry)
+        if len(sanitized) >= _PARTIAL_FAILURE_ERRORS_MAX:
+            break
+    return sanitized
+
+
+def sanitize_graphql_errors(
+    errors: list[Any] | None,
+) -> list[dict[str, Any]]:
+    """Extract sanitized message/path/extensions from a GraphQL errors array."""
+    if not isinstance(errors, list):
+        return []
+    sanitized: list[dict[str, Any]] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            entry = {
+                "message": _sanitize_warning_text(str(err)),
+                "path": None,
+                "locations": None,
+                "code": "MALFORMED_ERROR",
+                "error_id": None,
+                "error_code": "MALFORMED_ERROR",
+                "domain": None,
+                "category": None,
+                "status_code": None,
+            }
+            sanitized.append(entry)
+            if len(sanitized) >= _PARTIAL_FAILURE_ERRORS_MAX:
+                break
+            continue
+        message = err.get("message")
+        extensions = (
+            err.get("extensions") if isinstance(err.get("extensions"), dict) else {}
+        )
+        code = extensions.get("code")
+        error_id = extensions.get("errorId")
+        if error_id is None and isinstance(code, (int, str)):
+            error_id = code
+        error_code = extensions.get("errorCode")
+        if error_code is None and code is not None:
+            error_code = code
+
+        entry = {
+            "message": _sanitize_warning_text(
+                str(message) if message is not None else None
+            ),
+            "path": err.get("path") if isinstance(err.get("path"), list) else None,
+            "locations": (
+                err.get("locations") if isinstance(err.get("locations"), list) else None
+            ),
+            "code": code,
+            "error_id": error_id,
+            "error_code": str(error_code) if error_code is not None else None,
+            "domain": (
+                extensions.get("domain")
+                if isinstance(extensions.get("domain"), str)
+                else None
+            ),
+            "category": (
+                extensions.get("category")
+                if isinstance(extensions.get("category"), str)
+                else None
+            ),
+            "status_code": extensions.get("statusCode"),
+        }
+        sanitized.append(entry)
         if len(sanitized) >= _PARTIAL_FAILURE_ERRORS_MAX:
             break
     return sanitized

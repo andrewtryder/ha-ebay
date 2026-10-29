@@ -173,6 +173,99 @@ class RestClientMixin:
         # User id is account-scoped; clear so a reauth cannot reuse a stale handle.
         self._feedback_user_id = None
 
+    @property
+    def _refresh_lock(self) -> asyncio.Lock:
+        """Return the client-level token refresh lock, creating if needed."""
+        if not hasattr(self, "_token_refresh_lock") or self._token_refresh_lock is None:
+            self._token_refresh_lock = asyncio.Lock()
+        return self._token_refresh_lock
+
+    async def async_refresh_access_token(
+        self, *, failed_token: str | None = None
+    ) -> str:
+        """Force a fresh access token from the OAuth provider with locking and deduplication."""
+        if self._oauth_session is not None:
+            token_lock = getattr(self._oauth_session, "_token_lock", None)
+            async with self._refresh_lock:
+                if isinstance(token_lock, asyncio.Lock):
+                    async with token_lock:
+                        return await self._async_refresh_oauth2_session(
+                            failed_token=failed_token
+                        )
+                return await self._async_refresh_oauth2_session(
+                    failed_token=failed_token
+                )
+
+        async with self._refresh_lock:
+            # If another coroutine already refreshed the token, return it
+            if (
+                failed_token is not None
+                and self._access_token
+                and self._access_token != failed_token
+                and not self._access_token_expiring()
+            ):
+                return self._access_token
+            self._clear_access_token()
+            return await self.async_get_access_token()
+
+    async def _async_refresh_oauth2_session(
+        self, *, failed_token: str | None = None
+    ) -> str:
+        """Execute OAuth2Session token refresh under lock with double-checked caching."""
+        token_data = getattr(self._oauth_session, "token", None)
+        current_token = (
+            token_data.get("access_token") if isinstance(token_data, dict) else None
+        )
+        if failed_token is not None and current_token and current_token != failed_token:
+            return str(current_token)
+
+        self._clear_access_token()
+        try:
+            new_token = await self._oauth_session.implementation.async_refresh_token(
+                self._oauth_session.token
+            )
+        except OAuth2TokenRequestReauthError as exc:
+            config_entry = getattr(self._oauth_session, "config_entry", None)
+            hass = getattr(self._oauth_session, "hass", None)
+            if config_entry is not None and hass is not None:
+                if hasattr(config_entry, "async_start_reauth_if_available"):
+                    config_entry.async_start_reauth_if_available(hass)
+                elif hasattr(config_entry, "async_start_reauth"):
+                    config_entry.async_start_reauth(hass)
+            raise EbayAuthError("OAuth token refresh failed") from exc
+        except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
+            raise EbayAuthTransientError(
+                "OAuth token refresh failed temporarily"
+            ) from exc
+
+        if not isinstance(new_token, dict) or not new_token.get("access_token"):
+            raise EbayAuthError("OAuth token data does not include access token")
+
+        persisted_token = (
+            {**token_data, **new_token}
+            if isinstance(token_data, dict)
+            else dict(new_token)
+        )
+        if "expires_at" not in persisted_token and "expires_in" in persisted_token:
+            expires_in = _to_int(persisted_token.get("expires_in")) or 0
+            persisted_token["expires_in"] = expires_in
+            persisted_token["expires_at"] = time.time() + expires_in
+
+        hass = getattr(self._oauth_session, "hass", None)
+        config_entry = getattr(self._oauth_session, "config_entry", None)
+        config_entries = getattr(hass, "config_entries", None)
+        if (
+            config_entries is not None
+            and config_entry is not None
+            and hasattr(config_entries, "async_update_entry")
+        ):
+            config_entries.async_update_entry(
+                config_entry,
+                data={**getattr(config_entry, "data", {}), "token": persisted_token},
+            )
+
+        return str(persisted_token["access_token"])
+
     async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
         headers = {
             "Authorization": _basic_auth_header(self.client_id, self._client_secret),
