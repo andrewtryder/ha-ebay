@@ -740,13 +740,33 @@ def test_update_listener_cancelled_or_failed_reauth_preserves_live_config() -> N
     assert entry.options == {"feedback_enabled": False}
 
 
-def test_update_listener_reloads_when_refresh_token_rotates_on_reauth() -> None:
-    """Reauthorizing with the same app credentials but a new refresh_token reloads once."""
+def test_update_listener_routine_oauth2_session_refresh_with_refresh_token_rotation_does_not_reload() -> (
+    None
+):
+    """Routine OAuth2Session refresh that rotates both access_token and refresh_token triggers 0 reloads."""
+    import time
+
+    from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
+
+    from custom_components.ebay.const import CONF_REAUTH_GENERATION
+
     hass = Mock()
     hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
     hass.config_entries.async_reload = AsyncMock(return_value=True)
 
-    entry = _mock_entry(version=4)
+    # Legacy entry without CONF_REAUTH_GENERATION and with an expired token
+    entry = _mock_entry(
+        version=4,
+        data=_entry_data(
+            token={
+                "access_token": "expired-access",
+                "refresh_token": "initial-refresh",
+                "expires_at": time.time() - 60,
+            }
+        ),
+    )
+    assert CONF_REAUTH_GENERATION not in entry.data
+
     listeners: list[Any] = []
     entry.add_update_listener = Mock(
         side_effect=lambda cb: (listeners.append(cb), (lambda: None))[1]
@@ -758,13 +778,238 @@ def test_update_listener_reloads_when_refresh_token_rotates_on_reauth() -> None:
         assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
 
     listener = listeners[0]
+
+    class _RotatingImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            return {
+                **token,
+                "access_token": "rotated-access-token",
+                "refresh_token": "rotated-refresh-token",
+                "expires_in": 7200,
+                "expires_at": time.time() + 7200,
+            }
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> bool:
+        if "data" in kwargs:
+            target.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            target.options = dict(kwargs["options"])
+        return True
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_async_update_entry)
+    oauth_session = OAuth2Session(
+        hass,
+        entry,
+        _RotatingImplementation(),  # type: ignore[arg-type]
+    )
+
+    asyncio.run(oauth_session.async_ensure_token_valid())
+    asyncio.run(listener(hass, entry))
+
+    assert entry.data["token"]["access_token"] == "rotated-access-token"
+    assert entry.data["token"]["refresh_token"] == "rotated-refresh-token"
+    assert CONF_REAUTH_GENERATION not in entry.data
+    assert hass.config_entries.async_reload.await_count == 0
+
+
+def test_update_listener_graphql_forced_refresh_with_refresh_token_rotation_does_not_reload() -> (
+    None
+):
+    """GraphQL forced refresh rotating refresh_token triggers 0 reloads."""
+    import time
+
+    from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
+
+    from custom_components.ebay.api import EbayApiClient
+    from custom_components.ebay.const import CONF_REAUTH_GENERATION
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    entry = _mock_entry(
+        version=4,
+        data=_entry_data(
+            token={
+                "access_token": "rejected-access",
+                "refresh_token": "initial-refresh",
+                "expires_at": time.time() + 3600,
+            }
+        ),
+    )
+    assert CONF_REAUTH_GENERATION not in entry.data
+
+    listeners: list[Any] = []
+    entry.add_update_listener = Mock(
+        side_effect=lambda cb: (listeners.append(cb), (lambda: None))[1]
+    )
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    listener = listeners[0]
+
+    class _RotatingImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "access_token": "graphql-new-access",
+                "refresh_token": "graphql-rotated-refresh",
+                "expires_in": 7200,
+                "token_type": "Bearer",
+            }
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> bool:
+        if "data" in kwargs:
+            target.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            target.options = dict(kwargs["options"])
+        return True
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_async_update_entry)
+    oauth_session = OAuth2Session(
+        hass,
+        entry,
+        _RotatingImplementation(),  # type: ignore[arg-type]
+    )
+    client = EbayApiClient(
+        Mock(),
+        environment="production",
+        client_id="client",
+        client_secret="secret",
+        runame="runame",
+        refresh_token=None,
+        site_id="0",
+        oauth_session=oauth_session,
+    )
+
+    refreshed = asyncio.run(
+        client.async_refresh_access_token(failed_token="rejected-access")
+    )
+    asyncio.run(listener(hass, entry))
+
+    assert refreshed == "graphql-new-access"
+    assert entry.data["token"]["access_token"] == "graphql-new-access"
+    assert entry.data["token"]["refresh_token"] == "graphql-rotated-refresh"
+    assert CONF_REAUTH_GENERATION not in entry.data
+    assert hass.config_entries.async_reload.await_count == 0
+
+
+def test_update_listener_explicit_reauth_with_unchanged_credentials_and_options_reloads_once() -> (
+    None
+):
+    """Explicit successful reauth with identical credentials/options increments reauth_generation and reloads once."""
+    from homeassistant import config_entries
+
+    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.config_flow import EbayConfigFlow
+    from custom_components.ebay.const import CONF_REAUTH_GENERATION
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    # Start with a legacy config entry that has no CONF_REAUTH_GENERATION marker
+    entry = _mock_entry(version=4)
+    assert CONF_REAUTH_GENERATION not in entry.data
+
+    listeners: list[Any] = []
+    entry.add_update_listener = Mock(
+        side_effect=lambda cb: (listeners.append(cb), (lambda: None))[1]
+    )
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    listener = listeners[0]
+
+    flow = EbayConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    # Identical app credentials, RuName, marketplace, environment, scopes, and options
+    flow._data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_RUNAME: "runame",
+        CONF_SITE_ID: "0",
+    }
+    flow._requested_scopes = DEFAULT_SCOPE
+
+    def _update_and_abort(
+        target_entry: Any,
+        *,
+        data: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        if data is not None:
+            target_entry.data = dict(data)
+        if options is not None:
+            target_entry.options = dict(options)
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    with (
+        patch.object(flow, "_get_reauth_entry", return_value=entry),
+        patch.object(flow, "async_update_and_abort", side_effect=_update_and_abort),
+    ):
+        result = asyncio.run(
+            flow.async_oauth_create_entry(
+                {
+                    "auth_implementation": "ebay",
+                    "token": {
+                        "access_token": "reauth-access-1",
+                        "refresh_token": "reauth-refresh-1",
+                        "expires_in": 7200,
+                        "token_type": "Bearer",
+                    },
+                }
+            )
+        )
+    asyncio.run(listener(hass, entry))
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert entry.data[CONF_REAUTH_GENERATION] == 1
+    assert hass.config_entries.async_reload.await_count == 1
+
+    # Routine token rotation after reauth must NOT reload
     entry.data = {
         **entry.data,
         "token": {
-            "access_token": "new-access",
-            "refresh_token": "new-refresh-token-from-reauth",
+            "access_token": "rotated-access-after-reauth",
+            "refresh_token": "rotated-refresh-after-reauth",
+            "expires_in": 7200,
             "expires_at": 9999999999,
+            "token_type": "Bearer",
         },
     }
     asyncio.run(listener(hass, entry))
     assert hass.config_entries.async_reload.await_count == 1
+
+    # A second explicit reauth increments reauth_generation to 2 and reloads once more
+    with (
+        patch.object(flow, "_get_reauth_entry", return_value=entry),
+        patch.object(flow, "async_update_and_abort", side_effect=_update_and_abort),
+    ):
+        asyncio.run(
+            flow.async_oauth_create_entry(
+                {
+                    "auth_implementation": "ebay",
+                    "token": {
+                        "access_token": "reauth-access-2",
+                        "refresh_token": "reauth-refresh-2",
+                        "expires_in": 7200,
+                        "token_type": "Bearer",
+                    },
+                }
+            )
+        )
+    asyncio.run(listener(hass, entry))
+    assert entry.data[CONF_REAUTH_GENERATION] == 2
+    assert hass.config_entries.async_reload.await_count == 2

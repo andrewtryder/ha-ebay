@@ -43,6 +43,7 @@ from .const import (
     CONF_PINNED_ITEM_IDS,
     CONF_PINNED_ITEM_PRICE_TARGETS,
     CONF_POLL_INTERVAL,
+    CONF_REAUTH_GENERATION,
     CONF_RUNAME,
     CONF_SELLER_STANDARDS_ENABLED,
     CONF_SELLING_ENABLED,
@@ -218,6 +219,13 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             for key, value in entry_data.items()
             if key != CONF_PENDING_OPTIONS and key != "manual_authorization"
         }
+        raw_generation = entry.data.get(CONF_REAUTH_GENERATION)
+        previous_generation = (
+            raw_generation
+            if isinstance(raw_generation, int) and not isinstance(raw_generation, bool)
+            else 0
+        )
+        cleaned[CONF_REAUTH_GENERATION] = previous_generation + 1
         if isinstance(pending, dict):
             return self.async_update_and_abort(
                 entry, data=cleaned, options=dict(pending)

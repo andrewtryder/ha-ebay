@@ -13,6 +13,7 @@ from .const import (
     CONF_ENVIRONMENT,
     CONF_OAUTH_SCOPES,
     CONF_PENDING_OPTIONS,
+    CONF_REAUTH_GENERATION,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     CONF_SITE_ID,
@@ -232,19 +233,23 @@ def _loaded_config_snapshot(
 ) -> dict[str, Any]:
     """Return a comparable snapshot of reload-relevant entry data and options.
 
-    Ephemeral OAuth token fields (``access_token``, ``expires_at``, ``expires_in``)
-    and in-flight ``pending_options`` drafts are excluded so routine token
-    refreshes and cancelled reauth flows do not trigger integration reloads.
+    The entire OAuth ``token`` dictionary (including ``access_token``,
+    ``refresh_token``, ``expires_at``, and ``expires_in``) and in-flight
+    ``pending_options`` drafts are excluded so routine token refreshes—even
+    when eBay rotates the refresh token—and cancelled reauth flows do not
+    trigger integration reloads. Explicit user-completed reauthorizations are
+    tracked via the nonsecret ``reauth_generation`` counter recorded by
+    ``EbayConfigFlow._finish_reauth``.
     """
     raw_data = dict(getattr(entry, "data", None) or {})
     raw_data.pop(CONF_PENDING_OPTIONS, None)
     raw_data.pop("manual_authorization", None)
-    token = raw_data.pop("token", None)
-    has_token = isinstance(token, dict)
-    refresh_token = (
-        token.get("refresh_token")
-        if isinstance(token, dict) and token.get("refresh_token")
-        else None
+    raw_data.pop("token", None)
+    raw_generation = raw_data.pop(CONF_REAUTH_GENERATION, 0)
+    reauth_generation = (
+        raw_generation
+        if isinstance(raw_generation, int) and not isinstance(raw_generation, bool)
+        else 0
     )
     resolved_options = (
         dict(options)
@@ -253,8 +258,7 @@ def _loaded_config_snapshot(
     )
     return {
         "data": raw_data,
-        "has_token": has_token,
-        "refresh_token": refresh_token,
+        "reauth_generation": reauth_generation,
         "options": resolved_options,
     }
 
@@ -265,13 +269,7 @@ def _config_snapshot_changed(loaded: dict[str, Any], current: dict[str, Any]) ->
         return True
     if loaded.get("data") != current.get("data"):
         return True
-    if loaded.get("has_token") != current.get("has_token"):
-        return True
-    loaded_refresh = loaded.get("refresh_token")
-    current_refresh = current.get("refresh_token")
-    return bool(
-        loaded_refresh and current_refresh and loaded_refresh != current_refresh
-    )
+    return loaded.get("reauth_generation", 0) != current.get("reauth_generation", 0)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
