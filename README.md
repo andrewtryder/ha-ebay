@@ -163,6 +163,17 @@ Import-ready blueprints cover several of these flows; see
   cleanup (or use the cleanup button to remove them immediately)
 - Recent activity on event entities is memory-only and resets on restart or reload
 - Optional features need matching OAuth scopes; enabling them triggers reauthorization
+- **GraphQL Watchlist is experimental and blocked (`FORBIDDEN`):**
+  - Live authenticated testing of eBay's modern GraphQL endpoint confirmed that while the
+    `userWatchList` query schema was accepted, the resolver returned `FORBIDDEN`.
+  - The exact required OAuth scope or developer application entitlement is still unknown.
+    `buy.watchlist.read` remains an unverified candidate, not a confirmed requirement.
+  - Production Watchlist monitoring still uses Trading XML (`GetMyeBayBuying`) and remains
+    fully operational.
+  - Existing users should **not** delete/re-add the integration or attempt reauthorization to
+    troubleshoot this experimental GraphQL limitation.
+  - Detailed contract findings and parity matrices are documented in
+    **[docs/graphql-api-validation.md](docs/graphql-api-validation.md)**.
 
 ## Removal
 
@@ -199,6 +210,11 @@ See **[PRIVACY.md](PRIVACY.md)** for the project privacy statement.
   scopes, an invalid Site ID, repeated partial failures, or consistently truncated collections.
 - **Partial data:** enable the diagnostic entities and download integration diagnostics for
   technical detail beyond Repairs. Diagnostics may include a sanitized `last_api_failure`.
+- **GraphQL Watchlist / `FORBIDDEN` error:** experimental GraphQL Watchlist queries are not used in
+  production and currently return `FORBIDDEN` pending eBay scope/entitlement verification. Do not
+  delete, re-add, or reauthorize your account to resolve this; production Watchlist monitoring
+  continues using Trading XML and remains operational. See
+  **[docs/graphql-api-validation.md](docs/graphql-api-validation.md)**.
 
 Report reproducible problems through **[GitHub Issues](https://github.com/andrewtryder/ha-ebay/issues)**.
 Do not include client secrets, OAuth codes, access tokens, or refresh tokens.
