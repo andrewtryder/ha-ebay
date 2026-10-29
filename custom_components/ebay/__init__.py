@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
@@ -12,6 +12,7 @@ from .const import (
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
     CONF_OAUTH_SCOPES,
+    CONF_PENDING_OPTIONS,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     CONF_SITE_ID,
@@ -70,6 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         oauth_session=oauth_session,
     )
     coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
+    coordinator._loaded_config = _loaded_config_snapshot(entry, options)
     coordinator._repair_streaks = await async_load_repair_streaks(hass, entry.entry_id)
     coordinator._fired_ending_soon = await async_load_ending_soon_fired(
         hass, entry.entry_id
@@ -78,6 +80,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, entry.entry_id
     )
     await coordinator.async_config_entry_first_refresh()
+    coordinator._loaded_config = _loaded_config_snapshot(entry, options)
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(
         entry, [Platform(platform) for platform in PLATFORMS]
@@ -224,14 +227,74 @@ def _renamed_sensor_unique_id(entry_id: str, unique_id: str) -> str | None:
     return None
 
 
+def _loaded_config_snapshot(
+    entry: ConfigEntry, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return a comparable snapshot of reload-relevant entry data and options.
+
+    Ephemeral OAuth token fields (``access_token``, ``expires_at``, ``expires_in``)
+    and in-flight ``pending_options`` drafts are excluded so routine token
+    refreshes and cancelled reauth flows do not trigger integration reloads.
+    """
+    raw_data = dict(getattr(entry, "data", None) or {})
+    raw_data.pop(CONF_PENDING_OPTIONS, None)
+    raw_data.pop("manual_authorization", None)
+    token = raw_data.pop("token", None)
+    has_token = isinstance(token, dict)
+    refresh_token = (
+        token.get("refresh_token")
+        if isinstance(token, dict) and token.get("refresh_token")
+        else None
+    )
+    resolved_options = (
+        dict(options)
+        if options is not None
+        else {**DEFAULT_OPTIONS, **dict(getattr(entry, "options", None) or {})}
+    )
+    return {
+        "data": raw_data,
+        "has_token": has_token,
+        "refresh_token": refresh_token,
+        "options": resolved_options,
+    }
+
+
+def _config_snapshot_changed(loaded: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Return whether a config entry update changed reload-relevant state."""
+    if loaded.get("options") != current.get("options"):
+        return True
+    if loaded.get("data") != current.get("data"):
+        return True
+    if loaded.get("has_token") != current.get("has_token"):
+        return True
+    loaded_refresh = loaded.get("refresh_token")
+    current_refresh = current.get("refresh_token")
+    return bool(
+        loaded_refresh and current_refresh and loaded_refresh != current_refresh
+    )
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload after options change."""
+    """Reload after configuration, credential, or options change."""
     coordinator = getattr(entry, "runtime_data", None)
-    if coordinator is not None and hasattr(coordinator, "options"):
-        current_options = {**DEFAULT_OPTIONS, **entry.options}
-        if current_options == coordinator.options:
+    if coordinator is not None:
+        current_snapshot = _loaded_config_snapshot(entry)
+        loaded_snapshot = getattr(coordinator, "_loaded_config", None)
+        if (
+            not isinstance(loaded_snapshot, dict)
+            and hasattr(coordinator, "options")
+            and not getattr(entry, "data", None)
+        ):
+            loaded_snapshot = _loaded_config_snapshot(
+                entry, options=dict(coordinator.options)
+            )
+        if isinstance(loaded_snapshot, dict) and not _config_snapshot_changed(
+            loaded_snapshot, current_snapshot
+        ):
             _LOGGER.debug(
-                "Skipping reload for entry %s: options have not changed", entry.entry_id
+                "Skipping reload for entry %s: configuration and options have not changed",
+                entry.entry_id,
             )
             return
+        coordinator._loaded_config = current_snapshot
     await hass.config_entries.async_reload(entry.entry_id)

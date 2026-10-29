@@ -459,3 +459,312 @@ def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
 
     assert captured.get("refresh_token") == "legacy-refresh"
     assert captured.get("oauth_session") is None
+
+
+def test_update_listener_skips_token_only_refresh_and_reloads_on_credential_reauth() -> (
+    None
+):
+    """Token-only refresh triggers 0 reloads; credential reauth with unchanged options triggers 1."""
+    from homeassistant import config_entries
+
+    from custom_components.ebay.api import CORE_SCOPE
+    from custom_components.ebay.config_flow import EbayConfigFlow
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    entry = _mock_entry(version=4)
+    listeners: list[Any] = []
+
+    def _add_listener(listener: Any) -> Any:
+        listeners.append(listener)
+        return lambda: None
+
+    entry.add_update_listener = Mock(side_effect=_add_listener)
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    assert len(listeners) == 1
+    listener = listeners[0]
+
+    # 1. Simulate OAuth2Session routine token refresh (only access_token / expires_at change)
+    entry.data = {
+        **entry.data,
+        "token": {
+            "access_token": "refreshed-access-token",
+            "refresh_token": "refresh",
+            "expires_in": 7200,
+            "expires_at": 9999999999,
+            "token_type": "Bearer",
+        },
+    }
+    asyncio.run(listener(hass, entry))
+    assert hass.config_entries.async_reload.await_count == 0
+
+    # 2. Simulate realistic reauth completion with changed credentials and UNCHANGED options
+    flow = EbayConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client",
+        CONF_CLIENT_SECRET: "rotated-client-secret",
+        CONF_RUNAME: "updated-runame",
+        CONF_SITE_ID: "3",  # Changed marketplace (EBAY_GB)
+    }
+    flow._requested_scopes = CORE_SCOPE
+
+    def _update_and_abort(
+        target_entry: Any,
+        *,
+        data: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        if data is not None:
+            target_entry.data = dict(data)
+        if options is not None:
+            target_entry.options = dict(options)
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    with (
+        patch.object(flow, "_get_reauth_entry", return_value=entry),
+        patch.object(flow, "async_update_and_abort", side_effect=_update_and_abort),
+    ):
+        result = asyncio.run(
+            flow.async_oauth_create_entry(
+                {
+                    "auth_implementation": "ebay:production:client",
+                    "token": {
+                        "access_token": "new-access",
+                        "refresh_token": "refresh",
+                        "expires_in": 7200,
+                        "token_type": "Bearer",
+                    },
+                }
+            )
+        )
+    asyncio.run(listener(hass, entry))
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert hass.config_entries.async_reload.await_count == 1
+    assert entry.data[CONF_CLIENT_SECRET] == "rotated-client-secret"
+    assert entry.data[CONF_SITE_ID] == "3"
+
+
+def test_update_listener_reauth_with_pending_options_reloads_once() -> None:
+    """Staging pending options triggers 0 reloads; completing reauth triggers 1 reload."""
+    from homeassistant import config_entries
+
+    from custom_components.ebay.api import scopes_for_options
+    from custom_components.ebay.config_flow import EbayConfigFlow
+    from custom_components.ebay.const import CONF_OAUTH_SCOPES, CONF_PENDING_OPTIONS
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    entry = _mock_entry(version=4)
+    entry.options = {"feedback_enabled": False, "poll_interval": 30}
+    listeners: list[Any] = []
+
+    def _add_listener(listener: Any) -> Any:
+        listeners.append(listener)
+        return lambda: None
+
+    entry.add_update_listener = Mock(side_effect=_add_listener)
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    listener = listeners[0]
+    pending = {"feedback_enabled": True, "poll_interval": 45}
+
+    # 1. Stage pending options in entry.data (as EbayOptionsFlow._store_pending_options does)
+    entry.data = {**entry.data, CONF_PENDING_OPTIONS: pending}
+    asyncio.run(listener(hass, entry))
+    assert hass.config_entries.async_reload.await_count == 0
+
+    # 2. Complete reauth committing pending options and expanded scopes
+    flow = EbayConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_RUNAME: "runame",
+        CONF_SITE_ID: "0",
+    }
+    flow._requested_scopes = scopes_for_options(pending)
+
+    def _update_and_abort(
+        target_entry: Any,
+        *,
+        data: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        if data is not None:
+            target_entry.data = dict(data)
+        if options is not None:
+            target_entry.options = dict(options)
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    with (
+        patch.object(flow, "_get_reauth_entry", return_value=entry),
+        patch.object(flow, "async_update_and_abort", side_effect=_update_and_abort),
+    ):
+        result = asyncio.run(
+            flow.async_oauth_create_entry(
+                {
+                    "auth_implementation": "ebay",
+                    "token": {
+                        "access_token": "new-access",
+                        "refresh_token": "refresh",
+                        "expires_in": 7200,
+                        "token_type": "Bearer",
+                    },
+                }
+            )
+        )
+    asyncio.run(listener(hass, entry))
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert hass.config_entries.async_reload.await_count == 1
+    assert CONF_PENDING_OPTIONS not in entry.data
+    assert entry.options == pending
+    assert "commerce.feedback" in entry.data[CONF_OAUTH_SCOPES]
+
+
+def test_update_listener_cancelled_or_failed_reauth_preserves_live_config() -> None:
+    """Failed or cancelled reauth does not replace live credentials or reload."""
+    from homeassistant import config_entries
+
+    from custom_components.ebay.api import EbayAuthError
+    from custom_components.ebay.config_flow import EbayConfigFlow
+    from custom_components.ebay.const import CONF_PENDING_OPTIONS
+
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    entry = _mock_entry(version=4)
+    entry.options = {"feedback_enabled": False}
+    listeners: list[Any] = []
+
+    def _add_listener(listener: Any) -> Any:
+        listeners.append(listener)
+        return lambda: None
+
+    entry.add_update_listener = Mock(side_effect=_add_listener)
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    listener = listeners[0]
+
+    def _async_update_entry(target: Any, **kwargs: Any) -> bool:
+        if "data" in kwargs:
+            target.data = dict(kwargs["data"])
+        if "options" in kwargs:
+            target.options = dict(kwargs["options"])
+        asyncio.run(listener(hass, target))
+        return True
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_async_update_entry)
+
+    # 1. Stage pending options
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_PENDING_OPTIONS: {"feedback_enabled": True}}
+    )
+    assert hass.config_entries.async_reload.await_count == 0
+
+    # 2. Start reauth, enter different credentials in form, fail manual exchange, then cancel
+    flow = EbayConfigFlow()
+    flow.hass = hass
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = {
+        CONF_ENVIRONMENT: "sandbox",
+        CONF_CLIENT_ID: "unverified-client-id",
+        CONF_CLIENT_SECRET: "unverified-secret",
+        CONF_RUNAME: "unverified-runame",
+        CONF_SITE_ID: "77",
+    }
+
+    mock_client = Mock()
+    mock_client.async_exchange_authorization_code = AsyncMock(
+        side_effect=EbayAuthError("invalid_grant")
+    )
+    with (
+        patch.object(flow, "_get_reauth_entry", return_value=entry),
+        patch(
+            "custom_components.ebay.config_flow.EbayApiClient",
+            return_value=mock_client,
+        ),
+        patch(
+            "custom_components.ebay.config_flow.async_get_clientsession",
+            return_value=Mock(),
+        ),
+    ):
+        form_res = asyncio.run(flow.async_step_manual({"authorization_code": "bad"}))
+        assert form_res["type"] == "form"
+        assert form_res["errors"] == {"base": "cannot_connect"}
+        flow.async_remove()
+
+    # Live entry credentials and options must remain unchanged, with 0 reloads
+    assert hass.config_entries.async_reload.await_count == 0
+    assert CONF_PENDING_OPTIONS not in entry.data
+    assert entry.data[CONF_ENVIRONMENT] == "production"
+    assert entry.data[CONF_CLIENT_ID] == "client"
+    assert entry.data[CONF_CLIENT_SECRET] == "secret"
+    assert entry.data[CONF_RUNAME] == "runame"
+    assert entry.data[CONF_SITE_ID] == "0"
+    assert entry.options == {"feedback_enabled": False}
+
+
+def test_update_listener_reloads_when_refresh_token_rotates_on_reauth() -> None:
+    """Reauthorizing with the same app credentials but a new refresh_token reloads once."""
+    hass = Mock()
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_reload = AsyncMock(return_value=True)
+
+    entry = _mock_entry(version=4)
+    listeners: list[Any] = []
+    entry.add_update_listener = Mock(
+        side_effect=lambda cb: (listeners.append(cb), (lambda: None))[1]
+    )
+    coordinator = Mock()
+    coordinator.async_config_entry_first_refresh = AsyncMock()
+
+    with _patch_setup(coordinator=coordinator):
+        assert asyncio.run(ebay_integration.async_setup_entry(hass, entry)) is True
+
+    listener = listeners[0]
+    entry.data = {
+        **entry.data,
+        "token": {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh-token-from-reauth",
+            "expires_at": 9999999999,
+        },
+    }
+    asyncio.run(listener(hass, entry))
+    assert hass.config_entries.async_reload.await_count == 1

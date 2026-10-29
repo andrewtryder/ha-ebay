@@ -86,6 +86,9 @@ def _strip_graphql_strings_and_comments(query: str) -> str:
     return _STRIP_GRAPHQL_LITERALS_RE.sub(" ", query)
 
 
+_GRAPHQL_NAME_RE = re.compile(r"^[_A-Za-z][_0-9A-Za-z]*$")
+
+
 def _parse_graphql_definitions(cleaned: str) -> list[tuple[str, str | None]]:
     """Parse top-level definition tokens at depth 0 from a stripped GraphQL document."""
     defs: list[tuple[str, str | None]] = []
@@ -108,6 +111,7 @@ def _parse_graphql_definitions(cleaned: str) -> list[tuple[str, str | None]]:
                         len(tokens) > 1
                         and not tokens[1].startswith("(")
                         and not tokens[1].startswith("@")
+                        and _GRAPHQL_NAME_RE.match(tokens[1])
                     ):
                         name = tokens[1]
                     defs.append((first, name))
@@ -122,11 +126,17 @@ def _parse_graphql_definitions(cleaned: str) -> list[tuple[str, str | None]]:
                 if cur_token:
                     tokens.append("".join(cur_token))
                     cur_token = []
+                if c in "(@":
+                    tokens.append(c)
             else:
                 cur_token.append(c)
 
     if brace_depth != 0:
         raise ValueError("Unbalanced braces in GraphQL document")
+    if cur_token:
+        tokens.append("".join(cur_token).strip())
+    if tokens:
+        raise ValueError("Unexpected trailing tokens in GraphQL document")
     return defs
 
 

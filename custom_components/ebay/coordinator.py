@@ -128,9 +128,12 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
         api: EbayApiClient,
         options: dict[str, Any],
     ) -> None:
+        from . import _loaded_config_snapshot
+
         self.entry = entry
         self.api = api
         self.options = options
+        self._loaded_config: dict[str, Any] = _loaded_config_snapshot(entry, options)
         self.previous_payload: dict[str, Any] | None = None
         self.last_error_category: str | None = None
         self.last_attempt_at: datetime | None = None
