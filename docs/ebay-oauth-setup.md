@@ -32,16 +32,15 @@ eBay test accounts and test data.
 | App ID / Client ID | App ID (Client ID) | Public application identifier |
 | Cert ID / Client secret | Cert ID (Client Secret) | Secret belonging to the same keyset |
 | RuName | RuName (eBay Redirect URL name) | Identifier generated for the redirect configuration |
-| eBay Site ID | Site ID | Use `0` for eBay United States |
+| eBay marketplace | Site ID | Select your marketplace (default: eBay United States) |
 | Callback URL | Your auth accepted/declined URL | Browser return URL supplied by Home Assistant |
 
 ## 1. Start setup in Home Assistant
 
 1. Go to **Settings → Devices & services**.
 2. Select **Add integration** and search for **eBay**.
-3. Choose **Automatic callback — Recommended**.
-4. Leave the setup window open.
-5. Copy the OAuth callback URL displayed by Home Assistant.
+3. Home Assistant displays the setup screen with your OAuth callback URL and credential fields.
+4. Copy the OAuth callback URL displayed on the setup screen and leave the window open.
 
 You will paste that exact callback URL into the eBay developer portal. Do not
 substitute your Home Assistant local URL or external URL.
@@ -174,7 +173,10 @@ Return to the Home Assistant setup window and enter:
 | App ID / Client ID | The App ID from that environment's keyset |
 | Cert ID / Client secret | The Cert ID from the same keyset |
 | RuName | The generated eBay Redirect URL name |
-| eBay Site ID | `0` for eBay United States |
+| eBay marketplace | Select your marketplace (default: eBay United States) |
+
+Leave **Manual authorization (troubleshooting fallback)** unchecked for standard
+automatic setup.
 
 Continue after checking that all three eBay identifiers came from the same
 Production or Sandbox configuration.
@@ -214,14 +216,22 @@ and configure it with a different Client ID.
 
 ## Manual authorization fallback
 
-Use **Manual authorization — Advanced troubleshooting** only when the automatic
-browser callback does not complete.
+Use manual authorization only when your browser environment cannot complete the
+automatic callback (e.g. strict firewall rules, remote VPN configurations, or issues
+redirecting back from `my.home-assistant.io`).
 
-1. Restart the eBay setup flow and select the manual option.
-2. Open the consent URL shown by Home Assistant.
-3. Sign in with the regular eBay account you want to monitor.
-4. Approve the read-only access request.
-5. Paste the complete final callback URL into Home Assistant.
+Enable the **Manual authorization (troubleshooting fallback)** checkbox on the initial
+credentials setup screen. Home Assistant will present a consent URL and a text input
+to paste the final callback URL or authorization code directly.
+
+Transient token exchange errors (such as upstream eBay API outages or invalid credentials)
+will abort the flow normally so that transient network problems can be resolved directly
+without forcing manual code pasting.
+
+1. Open the consent URL shown by Home Assistant.
+2. Sign in with the regular eBay account you want to monitor.
+3. Approve the read-only access request.
+4. Paste the complete final callback URL into Home Assistant.
 
 Pasting the complete callback URL allows Home Assistant to verify the OAuth
 state. Paste only the authorization code when the full callback URL is not
@@ -235,7 +245,7 @@ available.
 | Authorization reports an invalid redirect or RuName | Enter the generated RuName, not the Display Title or callback URL |
 | OAuth or API calls fail immediately | Confirm that the selected environment matches the Production or Sandbox keyset |
 | Setup used a token copied from the developer portal | Restart setup and authorize from Home Assistant instead |
-| US account data is missing or incorrect | Confirm that Site ID is `0` |
+| US account data is missing or incorrect | Confirm that the marketplace is set to eBay United States |
 | Sell Analytics 30-day views are unavailable | Reauthorize so consent includes `sell.analytics.readonly`, or disable analytics in the integration options |
 | Browser does not return to Home Assistant | Use the manual authorization fallback and paste the complete final callback URL |
 

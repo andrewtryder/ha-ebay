@@ -31,6 +31,36 @@ SITE_ID_TO_MARKETPLACE: dict[str, str] = {
     "216": "EBAY_SG",
 }
 
+MARKETPLACE_NAMES: dict[str, str] = {
+    "0": "eBay United States (EBAY_US)",
+    "2": "eBay Canada - English (EBAY_CA)",
+    "3": "eBay United Kingdom (EBAY_GB)",
+    "15": "eBay Australia (EBAY_AU)",
+    "16": "eBay Austria (EBAY_AT)",
+    "23": "eBay Belgium - Dutch (EBAY_BE)",
+    "71": "eBay France (EBAY_FR)",
+    "77": "eBay Germany (EBAY_DE)",
+    "101": "eBay Italy (EBAY_IT)",
+    "123": "eBay Belgium - French (EBAY_BE)",
+    "146": "eBay Netherlands (EBAY_NL)",
+    "186": "eBay Spain (EBAY_ES)",
+    "193": "eBay Switzerland (EBAY_CH)",
+    "201": "eBay Hong Kong (EBAY_HK)",
+    "203": "eBay India (EBAY_IN)",
+    "205": "eBay Ireland (EBAY_IE)",
+    "207": "eBay Malaysia (EBAY_MY)",
+    "210": "eBay Canada - French (EBAY_CA)",
+    "211": "eBay Philippines (EBAY_PH)",
+    "212": "eBay Poland (EBAY_PL)",
+    "216": "eBay Singapore (EBAY_SG)",
+}
+
+
+def marketplace_display_name(site_id: str) -> str:
+    """Return a human-readable display name for a Trading Site ID."""
+    return MARKETPLACE_NAMES.get(str(site_id), f"Site ID {site_id}")
+
+
 SITE_ID_TO_ACCEPT_LANGUAGE: dict[str, str] = {
     "2": "en-CA",
     "210": "fr-CA",

@@ -30,7 +30,7 @@ Requires Home Assistant `2026.3.0+`.
 1. In HACS, add `https://github.com/andrewtryder/ha-ebay` as a custom **Integration** repository.
 2. Install **eBay**.
 3. Restart Home Assistant.
-4. Go to **Settings → Devices & services → Add integration → eBay**.
+4. Click **[Add eBay to Home Assistant](https://my.home-assistant.io/redirect/config_flow_start/?domain=ebay)** to start setup, or go to **Settings → Devices & services → Add integration → eBay**.
 
 A full Home Assistant restart is required after updating the integration through HACS.
 
@@ -42,10 +42,10 @@ You need an eBay Developer Program application with:
 - Cert ID / Client secret
 - RuName
 - Production or Sandbox environment
-- Site ID (`0` for eBay US)
+- eBay marketplace selection (e.g. eBay United States)
 
-Start the integration setup in Home Assistant first, copy the callback URL it provides,
-and register that URL in the matching eBay application keyset.
+Start the integration setup in Home Assistant first, copy the callback URL it provides
+on the setup screen, and register that URL in the matching eBay application keyset.
 
 See the illustrated **[eBay OAuth setup guide](docs/ebay-oauth-setup.md)** for the complete walkthrough.
 

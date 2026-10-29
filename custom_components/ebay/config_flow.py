@@ -58,6 +58,7 @@ from .const import (
     OAUTH_MODE_CALLBACK,
     OAUTH_MODE_MANUAL,
 )
+from .marketplace import MARKETPLACE_NAMES, is_known_site_id
 from .oauth2 import (
     DEVELOPER_CONSOLE_URL,
     OAUTH_SETUP_GUIDE_URL,
@@ -100,37 +101,28 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Start the guided setup flow."""
-        return self.async_show_menu(
-            step_id="user",
-            menu_options=["automatic", "manual"],
-        )
+        """Start the guided setup flow, defaulting directly to automatic callback."""
+        self._oauth_mode = OAUTH_MODE_CALLBACK
+        return await self.async_step_credentials(user_input)
 
     async def async_step_authorization_method(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Choose automatic callback or manual authorization."""
+        """Backward-compatible alias for the initial credentials step."""
         return await self.async_step_user(user_input)
 
     async def async_step_automatic(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Use Home Assistant's native OAuth callback."""
+        """Use Home Assistant's native OAuth callback directly."""
         self._oauth_mode = OAUTH_MODE_CALLBACK
-        return await self.async_step_prepare_application()
+        return await self.async_step_credentials(user_input)
 
     async def async_step_prepare_application(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Show eBay developer-console setup instructions before credentials."""
-        if user_input is not None:
-            return await self.async_step_credentials()
-
-        return self.async_show_form(
-            step_id="prepare_application",
-            data_schema=vol.Schema({}),
-            description_placeholders=self._setup_description_placeholders(),
-        )
+        """Backward-compatible alias for the credentials step."""
+        return await self.async_step_credentials(user_input)
 
     async def async_step_credentials(
         self, user_input: dict[str, Any] | None = None
@@ -138,11 +130,18 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         """Collect eBay app settings."""
         if user_input is not None:
             self._data, errors = _normalize_credentials(user_input)
+            if user_input.get("manual_authorization") is not None:
+                self._oauth_mode = (
+                    OAUTH_MODE_MANUAL
+                    if user_input["manual_authorization"]
+                    else OAUTH_MODE_CALLBACK
+                )
             if errors:
                 return self.async_show_form(
                     step_id="credentials",
                     data_schema=self._credentials_schema(self._data),
                     errors=errors,
+                    description_placeholders=self._setup_description_placeholders(),
                 )
             await self.async_set_unique_id(
                 f"{self._data[CONF_ENVIRONMENT]}:{self._data[CONF_CLIENT_ID]}"
@@ -169,6 +168,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         return self.async_show_form(
             step_id="credentials",
             data_schema=self._credentials_schema(defaults),
+            description_placeholders=self._setup_description_placeholders(),
         )
 
     async def async_oauth_create_entry(
@@ -216,13 +216,13 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         cleaned = {
             key: value
             for key, value in entry_data.items()
-            if key != CONF_PENDING_OPTIONS
+            if key != CONF_PENDING_OPTIONS and key != "manual_authorization"
         }
         if isinstance(pending, dict):
-            return self.async_update_reload_and_abort(
+            return self.async_update_and_abort(
                 entry, data=cleaned, options=dict(pending)
             )
-        return self.async_update_reload_and_abort(entry, data=cleaned)
+        return self.async_update_and_abort(entry, data=cleaned)
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
@@ -308,6 +308,18 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
 
     def _credentials_schema(self, defaults: dict[str, Any]) -> vol.Schema:
         """Return the eBay application credential schema."""
+        current_site_id = str(defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID))
+        options = [
+            selector.SelectOptionDict(value=site_id, label=name)
+            for site_id, name in MARKETPLACE_NAMES.items()
+        ]
+        if current_site_id and current_site_id not in MARKETPLACE_NAMES:
+            options.append(
+                selector.SelectOptionDict(
+                    value=current_site_id, label=f"Site ID {current_site_id}"
+                )
+            )
+
         return vol.Schema(
             {
                 vol.Required(
@@ -325,8 +337,19 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                 ): str,
                 vol.Required(
                     CONF_SITE_ID,
-                    default=defaults.get(CONF_SITE_ID, DEFAULT_SITE_ID),
-                ): str,
+                    default=current_site_id,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    "manual_authorization",
+                    default=defaults.get(
+                        "manual_authorization", self._oauth_mode == OAUTH_MODE_MANUAL
+                    ),
+                ): bool,
             }
         )
 
@@ -920,6 +943,7 @@ def _normalize_credentials(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Normalize credential form input and report blank required fields."""
     data = dict(user_input)
+    data.pop("manual_authorization", None)
     errors: dict[str, str] = {}
     for field in (
         CONF_CLIENT_ID,
@@ -932,4 +956,10 @@ def _normalize_credentials(
         data[field] = value
         if not value:
             errors[field] = "required"
+    if (
+        CONF_SITE_ID in data
+        and data[CONF_SITE_ID]
+        and not is_known_site_id(data[CONF_SITE_ID])
+    ):
+        errors[CONF_SITE_ID] = "invalid_site_id"
     return data, errors
