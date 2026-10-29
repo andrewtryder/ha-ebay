@@ -381,6 +381,61 @@ def test_summarize_probe_exception_http_400_and_resolver_forbidden() -> None:
     assert summary_forbidden["code"] == "FORBIDDEN"
     assert summary_forbidden["is_scope_or_permission_error"] is True
 
+    # 3. HTTP 400 with FORBIDDEN / scope denial (not classified as validation error)
+    err_400_forbidden = EbayAuthError(
+        "eBay GraphQL forbidden with HTTP 400: insufficient scope or permissions for userWatchList",
+        is_expired=False,
+        is_permission_error=True,
+        errors=[
+            {
+                "code": "FORBIDDEN",
+                "error_code": "FORBIDDEN",
+                "category": "REQUEST",
+                "domain": "SECURITY",
+            }
+        ],
+        status=400,
+    )
+    summary_400_forbidden = summarize_probe_exception(err_400_forbidden)
+    assert summary_400_forbidden["error_type"] == "EbayAuthError"
+    assert summary_400_forbidden["failure_class"] == "permission_or_scope_error"
+    assert summary_400_forbidden["http_status"] == 400
+    assert summary_400_forbidden["code"] == "FORBIDDEN"
+    assert summary_400_forbidden["is_scope_or_permission_error"] is True
+    assert summary_400_forbidden["is_validation_error"] is False
+
+    # 4. HTTP 400 unclassified bad request with missing error code
+    err_400_unclassified = EbayGraphQLError(
+        "eBay GraphQL request failed with HTTP 400 for userWatchList",
+        errors=[
+            {
+                "message": "Something went wrong",
+                "code": None,
+                "error_code": None,
+                "category": None,
+                "domain": None,
+            }
+        ],
+        status=400,
+    )
+    summary_400_unclassified = summarize_probe_exception(err_400_unclassified)
+    assert summary_400_unclassified["error_type"] == "EbayGraphQLError"
+    assert summary_400_unclassified["failure_class"] == "bad_request"
+    assert summary_400_unclassified["http_status"] == 400
+    assert summary_400_unclassified["code"] is None
+    assert summary_400_unclassified["error_codes"] == []
+    assert summary_400_unclassified["is_validation_error"] is False
+
+    # 5. HTTP 400 malformed / non-GraphQL response raising EbayApiError
+    err_400_malformed = EbayApiError(
+        "eBay GraphQL request failed with HTTP 400", status=400
+    )
+    summary_400_malformed = summarize_probe_exception(err_400_malformed)
+    assert summary_400_malformed["error_type"] == "EbayApiError"
+    assert summary_400_malformed["failure_class"] == "bad_request"
+    assert summary_400_malformed["http_status"] == 400
+    assert summary_400_malformed["is_validation_error"] is False
+
 
 def test_completeness_and_pagination_fail_closed_and_bounded_multi_page() -> None:
     """Partial pages, >100 items, duplicate/missing IDs, and XML truncation are handled safely."""

@@ -45,6 +45,15 @@ class EbayAuthTransientError(EbayError):
 class EbayApiError(EbayError):
     """eBay API returned an error."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+
 
 class EbayPartialFailure(EbayError):
     """Optional eBay API section failed."""
@@ -78,11 +87,10 @@ class EbayGraphQLError(EbayApiError):
         extensions: dict[str, Any] | None = None,
         status: int | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, status=200 if status is None else status)
         self.errors = list(errors) if errors else []
         self.data = data
         self.extensions = extensions or {}
-        self.status = 200 if status is None else status
 
 
 _ELIGIBILITY_OR_PERMISSION_MARKERS = (

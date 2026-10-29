@@ -842,11 +842,13 @@ def test_graphql_http_400_raises_api_error_or_partial_failure() -> None:
 
     client = _make_client(MockSession())
 
-    with pytest.raises(EbayGraphQLError, match="HTTP 400") as exc_info:
+    with pytest.raises(
+        EbayGraphQLError, match="query validation failed \\(HTTP 400\\)"
+    ) as exc_info:
         asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
     assert exc_info.value.status == 400
-    assert exc_info.value.errors[0]["code"] == "VALIDATION_ERROR"
-    assert exc_info.value.errors[0]["category"] == "REQUEST"
+    assert exc_info.value.errors[0]["code"] is None
+    assert exc_info.value.errors[0]["category"] is None
 
     with pytest.raises(EbayPartialFailure):
         asyncio.run(
@@ -862,10 +864,130 @@ def test_graphql_http_400_raises_api_error_or_partial_failure() -> None:
             return _Context(_Response(status=400, text="Bad Request"))
 
     client_generic = _make_client(MockNonGraphQL400Session())
-    with pytest.raises(EbayApiError, match="HTTP 400"):
+    with pytest.raises(EbayApiError, match="HTTP 400") as exc_generic:
         asyncio.run(
             client_generic.async_post_graphql("query { userWatchList { total } }")
         )
+    assert exc_generic.value.status == 400
+
+
+def test_graphql_http_400_explicit_validation_error() -> None:
+    """HTTP 400 with explicit VALIDATION_ERROR code preserves server code."""
+
+    class MockValidationSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=400,
+                    json_payload={
+                        "errors": [
+                            {
+                                "message": "Unknown field 'foo' on type 'UserWatchList'",
+                                "extensions": {
+                                    "code": "VALIDATION_ERROR",
+                                    "errorCode": "VALIDATION_ERROR",
+                                    "category": "REQUEST",
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+
+    client = _make_client(MockValidationSession())
+    with pytest.raises(
+        EbayGraphQLError, match="query validation failed \\(HTTP 400\\)"
+    ) as exc_info:
+        asyncio.run(client.async_post_graphql("query { userWatchList { foo } }"))
+    assert exc_info.value.status == 400
+    assert exc_info.value.errors[0]["code"] == "VALIDATION_ERROR"
+    assert exc_info.value.errors[0]["error_code"] == "VALIDATION_ERROR"
+    assert exc_info.value.errors[0]["category"] == "REQUEST"
+
+
+def test_graphql_http_400_permission_error_does_not_refresh_token() -> None:
+    """HTTP 400 with explicit FORBIDDEN/scope error raises EbayAuthError without token refresh."""
+    refresh_mock = AsyncMock()
+
+    class MockForbiddenSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=400,
+                    json_payload={
+                        "errors": [
+                            {
+                                "message": "Access denied: missing required OAuth scope",
+                                "extensions": {
+                                    "code": "FORBIDDEN",
+                                    "errorCode": "FORBIDDEN",
+                                    "category": "REQUEST",
+                                    "domain": "SECURITY",
+                                },
+                            }
+                        ]
+                    },
+                )
+            )
+
+    client = _make_client(MockForbiddenSession())
+    client._refresh_and_clear_token = refresh_mock
+
+    with pytest.raises(EbayAuthError, match="forbidden with HTTP 400") as exc_info:
+        asyncio.run(client.async_post_graphql("query { userWatchList { items } }"))
+    assert exc_info.value.status == 400
+    assert exc_info.value.is_permission_error is True
+    assert exc_info.value.is_expired is False
+    assert exc_info.value.errors[0]["code"] == "FORBIDDEN"
+    refresh_mock.assert_not_called()
+
+
+def test_graphql_http_400_missing_error_code_does_not_manufacture_validation() -> None:
+    """HTTP 400 with unclassified errors does not manufacture VALIDATION_ERROR."""
+
+    class MockUnclassifiedSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=400,
+                    json_payload={
+                        "errors": [
+                            {
+                                "message": "Unexpected operational error occurred",
+                            }
+                        ]
+                    },
+                )
+            )
+
+    client = _make_client(MockUnclassifiedSession())
+    with pytest.raises(
+        EbayGraphQLError, match="request failed with HTTP 400"
+    ) as exc_info:
+        asyncio.run(client.async_post_graphql("query { userWatchList { items } }"))
+    assert exc_info.value.status == 400
+    assert "query validation failed" not in str(exc_info.value)
+    assert exc_info.value.errors[0]["code"] is None
+    assert exc_info.value.errors[0]["error_code"] is None
+    assert exc_info.value.errors[0]["category"] is None
+
+
+def test_graphql_http_400_malformed_errors_raises_api_error() -> None:
+    """HTTP 400 with non-list errors field raises EbayApiError with status 400."""
+
+    class MockMalformedSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(
+                _Response(
+                    status=400,
+                    json_payload={"errors": "string_instead_of_list"},
+                )
+            )
+
+    client = _make_client(MockMalformedSession())
+    with pytest.raises(EbayApiError, match="HTTP 400") as exc_info:
+        asyncio.run(client.async_post_graphql("query { userWatchList { items } }"))
+    assert exc_info.value.status == 400
 
 
 def test_graphql_client_mixin_stubs() -> None:

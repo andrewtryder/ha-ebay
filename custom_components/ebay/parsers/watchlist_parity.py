@@ -28,11 +28,13 @@ from ..clients.errors import (
     EbayParseError,
 )
 from ..clients.graphql import (
+    _VALIDATION_ERROR_CODES,
     _parse_graphql_definitions,
     _strip_graphql_strings_and_comments,
     is_graphql_permission_error,
     is_graphql_rate_limit_error,
     is_graphql_token_expired,
+    is_graphql_validation_error,
     validate_read_only_query,
 )
 from .xml import (
@@ -97,20 +99,12 @@ _VARIABLE_DECL_RE = re.compile(
     r"\$([_A-Za-z][_0-9A-Za-z]*)\s*:\s*([^,=)]+?)(?:\s*=\s*([^,)]+))?(?=[,)])"
 )
 
-_VALIDATION_ERROR_CODES: frozenset[str] = frozenset(
-    {
-        "VALIDATION_ERROR",
-        "GRAPHQL_VALIDATION_FAILED",
-        "INVALID_QUERY",
-        "BAD_USER_INPUT",
-        "GRAPHQL_PARSE_FAILED",
-    }
-)
-
 ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
     {
         "VALIDATION_ERROR",
         "GRAPHQL_VALIDATION_FAILED",
+        "GRAPHQL_VALIDATION_ERROR",
+        "FIELD_UNDEFINED",
         "GRAPHQL_PARSE_FAILED",
         "INVALID_QUERY",
         "BAD_USER_INPUT",
@@ -474,8 +468,8 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
             else (status_codes[0] if status_codes else 200)
         )
 
-        is_validation = (
-            bool(raw_upper_codes & _VALIDATION_ERROR_CODES) or inferred_status == 400
+        is_validation = bool(raw_upper_codes & _VALIDATION_ERROR_CODES) or any(
+            is_graphql_validation_error(e) for e in raw_err_dicts
         )
         is_perm = (
             bool(getattr(exc, "is_permission_error", False))
@@ -495,14 +489,16 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
             or inferred_status == 429
         )
 
-        if is_validation:
-            failure_class = "validation_error"
-        elif is_perm:
+        if is_perm:
             failure_class = "permission_or_scope_error"
         elif is_expired:
             failure_class = "auth_error"
         elif is_rate_limit:
             failure_class = "rate_limit"
+        elif is_validation:
+            failure_class = "validation_error"
+        elif inferred_status == 400:
+            failure_class = "bad_request"
         else:
             failure_class = "graphql_error"
 
@@ -560,6 +556,8 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
         failure_class = "parse_error"
     elif isinstance(exc, (aiohttp.ClientError, TimeoutError)):
         failure_class = "transport_error"
+    elif http_status == 400:
+        failure_class = "bad_request"
     elif isinstance(exc, EbayError):
         failure_class = "api_error"
     else:

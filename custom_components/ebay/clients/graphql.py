@@ -61,6 +61,18 @@ _SYSTEM_ERROR_CODES = {
     "SYSTEM_ERROR",
 }
 
+_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "VALIDATION_ERROR",
+        "GRAPHQL_VALIDATION_FAILED",
+        "GRAPHQL_VALIDATION_ERROR",
+        "INVALID_QUERY",
+        "BAD_USER_INPUT",
+        "GRAPHQL_PARSE_FAILED",
+        "FIELD_UNDEFINED",
+    }
+)
+
 _STRIP_GRAPHQL_LITERALS_RE = re.compile(
     r'"""(?:\\"""|[\s\S])*?"""|"(?:\\.|[^"\\])*"|#[^\r\n]*'
 )
@@ -192,13 +204,16 @@ def is_graphql_token_expired(error: dict[str, Any]) -> bool:
     """Return True if error represents an expired or invalid token eligible for refresh."""
     if is_graphql_permission_error(error):
         return False
+    ext = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
     status_code = error.get("status_code")
-    if status_code == 401:
+    if status_code == 401 or ext.get("statusCode") == 401:
         return True
-    code = error.get("code")
+    code = error.get("code") or ext.get("code")
     if code == 1001 or code == "1001":
         return True
-    error_code = str(error.get("error_code") or code or "").upper()
+    error_code = str(
+        error.get("error_code") or ext.get("errorCode") or code or ""
+    ).upper()
     if error_code in _AUTH_EXPIRED_CODES:
         return True
     message = str(error.get("message") or "").lower()
@@ -217,11 +232,14 @@ def is_graphql_token_expired(error: dict[str, Any]) -> bool:
 
 def is_graphql_permission_error(error: dict[str, Any]) -> bool:
     """Return True if error represents permanent permission, scope, or access denial."""
+    ext = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
     status_code = error.get("status_code")
-    if status_code == 403:
+    if status_code == 403 or ext.get("statusCode") == 403:
         return True
-    code = error.get("code")
-    error_code = str(error.get("error_code") or code or "").upper()
+    code = error.get("code") or ext.get("code")
+    error_code = str(
+        error.get("error_code") or ext.get("errorCode") or code or ""
+    ).upper()
     if error_code in _AUTH_PERMISSION_CODES:
         return True
     message = str(error.get("message") or "").lower()
@@ -241,11 +259,14 @@ def is_graphql_permission_error(error: dict[str, Any]) -> bool:
 
 def is_graphql_rate_limit_error(error: dict[str, Any]) -> bool:
     """Return True if error represents a rate-limiting / throttling issue."""
+    ext = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
     status_code = error.get("status_code")
-    if status_code == 429:
+    if status_code == 429 or ext.get("statusCode") == 429:
         return True
-    code = error.get("code")
-    error_code = str(error.get("error_code") or code or "").upper()
+    code = error.get("code") or ext.get("code")
+    error_code = str(
+        error.get("error_code") or ext.get("errorCode") or code or ""
+    ).upper()
     if error_code in _RATE_LIMIT_CODES:
         return True
     message = str(error.get("message") or "").lower()
@@ -258,6 +279,33 @@ def is_graphql_rate_limit_error(error: dict[str, Any]) -> bool:
             "too many requests",
             "call limit",
             "exceeded the call limit",
+        )
+    )
+
+
+def is_graphql_validation_error(error: dict[str, Any]) -> bool:
+    """Return True if error represents a GraphQL syntax, parse, or schema validation error."""
+    ext = error.get("extensions") if isinstance(error.get("extensions"), dict) else {}
+    code = error.get("code") or ext.get("code")
+    error_code = str(
+        error.get("error_code") or ext.get("errorCode") or code or ""
+    ).upper()
+    if error_code in _VALIDATION_ERROR_CODES:
+        return True
+    message = str(error.get("message") or "").lower()
+    return any(
+        marker in message
+        for marker in (
+            "validation error",
+            "cannot query field",
+            "field undefined",
+            "is undefined",
+            "undefined field",
+            "syntax error",
+            "unknown argument",
+            "variable not defined",
+            "type mismatch",
+            "graphql validation",
         )
     )
 
@@ -584,7 +632,8 @@ class GraphQLClientMixin:
                                 partial_category, failure=failure
                             )
                         raise EbayApiError(
-                            f"eBay GraphQL rate limit exceeded (HTTP 429) for {op}"
+                            f"eBay GraphQL rate limit exceeded (HTTP 429) for {op}",
+                            status=429,
                         )
 
                     # 5xx Server Errors
@@ -615,7 +664,8 @@ class GraphQLClientMixin:
                                 partial_category, failure=failure
                             )
                         raise EbayApiError(
-                            f"eBay GraphQL server error HTTP {response.status} for {op}"
+                            f"eBay GraphQL server error HTTP {response.status} for {op}",
+                            status=response.status,
                         )
 
                     # Other 4xx errors
@@ -626,19 +676,94 @@ class GraphQLClientMixin:
                         except (aiohttp.ContentTypeError, json.JSONDecodeError):
                             error_json = None
 
-                        # Distinguish GraphQL syntax/schema validation errors (HTTP 400 with errors payload)
+                        # Distinguish GraphQL syntax/schema validation, permission, and bad-request errors (HTTP 400 with errors payload)
                         if response.status == 400 and isinstance(error_json, dict):
                             raw_errors = error_json.get("errors")
                             if isinstance(raw_errors, list):
                                 sanitized = sanitize_graphql_errors(raw_errors)
-                                for err in sanitized:
-                                    if not err.get("code") and not err.get(
-                                        "error_code"
-                                    ):
-                                        err["code"] = "VALIDATION_ERROR"
-                                        err["error_code"] = "VALIDATION_ERROR"
-                                    if not err.get("category"):
-                                        err["category"] = "REQUEST"
+
+                                # 1. Explicit permission or scope error on HTTP 400 (no token refresh)
+                                if any(
+                                    is_graphql_permission_error(err)
+                                    for err in sanitized
+                                ):
+                                    _LOGGER.debug(
+                                        "GraphQL forbidden status=400 operation=%s duration_ms=%.1f",
+                                        op,
+                                        _duration_ms(start),
+                                    )
+                                    raise EbayAuthError(
+                                        f"eBay GraphQL forbidden with HTTP 400: insufficient scope or permissions for {op}",
+                                        is_expired=False,
+                                        is_permission_error=True,
+                                        errors=sanitized,
+                                        status=400,
+                                    )
+
+                                # 2. Explicit token expiration on HTTP 400 (eligible for refresh)
+                                if any(
+                                    is_graphql_token_expired(err) for err in sanitized
+                                ):
+                                    _LOGGER.debug(
+                                        "GraphQL auth token expired status=400 operation=%s duration_ms=%.1f",
+                                        op,
+                                        _duration_ms(start),
+                                    )
+                                    raise EbayAuthError(
+                                        f"eBay GraphQL auth failed with HTTP 400 for {op}",
+                                        is_expired=True,
+                                        is_permission_error=False,
+                                        failed_token=access_token,
+                                        errors=sanitized,
+                                        status=400,
+                                    )
+
+                                # 3. Rate limiting on HTTP 400
+                                if any(
+                                    is_graphql_rate_limit_error(err)
+                                    for err in sanitized
+                                ):
+                                    retry_after = response.headers.get("Retry-After")
+                                    sleep_s = 0.5 * (2**retry)
+                                    if retry_after is not None:
+                                        try:
+                                            sleep_s = min(int(retry_after), 30)
+                                        except (TypeError, ValueError):
+                                            pass
+                                    _LOGGER.debug(
+                                        "GraphQL rate-limited status=400 retry=%d/%d sleep=%.1fs operation=%s",
+                                        retry + 1,
+                                        max_retries,
+                                        sleep_s,
+                                        op,
+                                    )
+                                    if retry < max_retries - 1:
+                                        await asyncio.sleep(sleep_s)
+                                        continue
+                                    classification = "transient"
+                                    failure = build_api_failure(
+                                        op,
+                                        url,
+                                        400,
+                                        error_json,
+                                        partial_category or "graphql",
+                                        classification,
+                                    )
+                                    if partial_category:
+                                        self._raise_partial_failure(
+                                            partial_category, failure=failure
+                                        )
+                                    raise EbayGraphQLError(
+                                        f"eBay GraphQL rate limit exceeded (HTTP 400) for {op}",
+                                        errors=sanitized,
+                                        status=400,
+                                    )
+
+                                # 4. Validation error vs. unclassified bad request (preserve actual server-provided codes)
+                                is_validation = any(
+                                    is_graphql_validation_error(err)
+                                    for err in sanitized
+                                )
                                 classification = classify_rest_status(
                                     400, error_json, partial_category or "graphql"
                                 )
@@ -658,8 +783,15 @@ class GraphQLClientMixin:
                                 )
                                 if partial_category:
                                     self._raise_partial_failure(mapped, failure=failure)
+
+                                if is_validation:
+                                    raise EbayGraphQLError(
+                                        f"eBay GraphQL query validation failed (HTTP 400) for {op}",
+                                        errors=sanitized,
+                                        status=400,
+                                    )
                                 raise EbayGraphQLError(
-                                    f"eBay GraphQL query validation failed (HTTP 400) for {op}",
+                                    f"eBay GraphQL request failed with HTTP 400 for {op}",
                                     errors=sanitized,
                                     status=400,
                                 )
@@ -684,7 +816,8 @@ class GraphQLClientMixin:
                         if partial_category:
                             self._raise_partial_failure(mapped, failure=failure)
                         raise EbayApiError(
-                            f"eBay GraphQL request failed with HTTP {response.status} for {op}"
+                            f"eBay GraphQL request failed with HTTP {response.status} for {op}",
+                            status=response.status,
                         )
 
                     # 200 OK — parse GraphQL response body
