@@ -224,19 +224,21 @@ Before migrating `WatchedItemData` or replacing `GetMyeBayBuying` in production 
 
 **[LOCAL MOCK]** The Watchlist parity comparator (`custom_components/ebay/parsers/watchlist_parity.py`) enforces fail-closed evidence rules:
 
-1. **Sanitized Flat Error Reporting**:
+1. **Allowlist-Based Diagnostic Error Reporting**:
    - Reads the flattened diagnostic fields (`code`, `error_code`, `error_id`, `category`, `domain`) produced by `sanitize_graphql_errors()` (plus nested `extensions` fallback).
-   - Validates every diagnostic token against `^[A-Za-z0-9_.:-]{1,64}$` and strips all free-form `message` / `long_message` text so account names, item IDs, or tokens can never leak into reports.
+   - Validates every diagnostic token against explicit allowlists (`ALLOWED_SYMBOLIC_ERROR_CODES`, `ALLOWED_NUMERIC_ERROR_CODES`, `ALLOWED_DIAGNOSTIC_CATEGORIES`, `ALLOWED_DIAGNOSTIC_DOMAINS`). Any unrecognized value—including strings shaped like account handles, 12-digit numeric item IDs, or secret tokens—is replaced with a generic label (`UNKNOWN_CODE`, `UNKNOWN_CATEGORY`, or `UNKNOWN_DOMAIN`), while recording `error_count` and `unrecognized_*_count`. Free-form `message` / `long_message` text is never included in shareable reports.
    - Explicitly classifies `validation_error` (`VALIDATION_ERROR`), `permission_or_scope_error` (`INSUFFICIENT_SCOPE` / HTTP `403`), `auth_error` (`UNAUTHENTICATED` / HTTP `401`), `rate_limit` (`RATE_LIMITED` / HTTP `429`), `parse_error`, and `transport_error`.
-2. **Completeness & Pagination Fail-Closed Rules**:
+2. **Evidence-Ranked Probe Selection**:
+   - All executed probes are preserved in `report["probes"]`, and `rank_graphql_probe_candidate()` selects the best probe for parity comparison (`selected_probe_key`) ordered by: (1) completeness and pagination validity, (2) presence of usable item records, (3) monitored field coverage across retrieved items, and (4) custom vs. built-in preference only when evidence quality is comparable. A count-only custom query never overrides an item-bearing probe.
+3. **Completeness & Pagination Fail-Closed Rules**:
    - Tracks `graphql_reported_total`, `graphql_raw_items_count`, `graphql_watched_count` (unique valid IDs), `duplicate_ids_count`, `missing_ids_count`, `graphql_truncated`, `graphql_complete`, and `pagination_status` (`complete`, `truncated`, `unverified`, `count_only`, `incomplete_identity`, `inconsistent_total`).
    - A partial 1-page GraphQL response (e.g. `100` items fetched when `reported_total == 150`) is **never** classified as `equivalent_after_normalization` or `compared`. Instead, `status` is marked `inconclusive` and both `watched_count` and sample-matched item fields are downgraded to `unverified`.
    - `xml_truncated=True` similarly blocks definitive parity conclusions.
    - Built-in discovery probes execute a single page (`limit: 100, offset: 0`) to avoid uncontrolled pagination on unverified schemas. Once a paginated query contract is confirmed via `--query-file`, `--paginate-custom-query` enables bounded multi-page fetching (up to `MAX_PAGES`) that halts immediately if a page returns zero new unique IDs or encounters duplicate/missing IDs.
-3. **Missing-Field & Null-Coverage Evidence**:
+4. **Missing-Field & Null-Coverage Evidence**:
    - Items where a field is `null` in both Trading XML and GraphQL increment `both_absent_count` rather than `exact_match_count`.
    - Each field reports `coverage` (`complete`, `partial`, or `none`). A field with partial non-null coverage (`both_absent_count > 0`) is downgraded to `unverified` so missing values never inflate parity confidence.
-4. **Resilient Partial-Source Failure Handling**:
+5. **Resilient Partial-Source Failure Handling**:
    - If the Trading XML `GetMyeBayBuying` call fails, the harness records `xml_available=False` and `xml_error_summary` without inventing parity results, while still running and reporting the GraphQL contract probes.
 
 ### 7.3 Running the Read-Only Validation Harness & Explorer Custom Queries

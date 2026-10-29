@@ -93,7 +93,6 @@ _EBAY_TOKEN_PATTERN = re.compile(
     r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+)", re.IGNORECASE
 )
 _EBAY_IMAGE_ASSET_PATTERN = re.compile(r"/images/g/([^/]+)/s-l\d+\.[a-zA-Z0-9]+$")
-_SAFE_DIAGNOSTIC_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 _VARIABLE_DECL_RE = re.compile(
     r"\$([_A-Za-z][_0-9A-Za-z]*)\s*:\s*([^,=)]+?)(?:\s*=\s*([^,)]+))?(?=[,)])"
 )
@@ -107,6 +106,90 @@ _VALIDATION_ERROR_CODES: frozenset[str] = frozenset(
         "GRAPHQL_PARSE_FAILED",
     }
 )
+
+ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "VALIDATION_ERROR",
+        "GRAPHQL_VALIDATION_FAILED",
+        "GRAPHQL_PARSE_FAILED",
+        "INVALID_QUERY",
+        "BAD_USER_INPUT",
+        "PERSISTED_QUERY_NOT_FOUND",
+        "PERSISTED_QUERY_NOT_SUPPORTED",
+        "OPERATION_RESOLUTION_FAILURE",
+        "INTROSPECTION_DISABLED",
+        "MALFORMED_ERROR",
+        "UNAUTHENTICATED",
+        "UNAUTHORIZED",
+        "INVALID_TOKEN",
+        "TOKEN_EXPIRED",
+        "INVALID_ACCESS_TOKEN",
+        "ACCESS_DENIED",
+        "FORBIDDEN",
+        "INSUFFICIENT_SCOPE",
+        "MISSING_SCOPE",
+        "NOT_AUTHORIZED",
+        "RATE_LIMITED",
+        "TOO_MANY_REQUESTS",
+        "RATE_LIMIT_EXCEEDED",
+        "THROTTLED",
+        "INTERNAL_SERVER_ERROR",
+        "SERVICE_UNAVAILABLE",
+        "SYSTEM_ERROR",
+        "DOWNSTREAM_SERVICE_ERROR",
+        "GATEWAY_TIMEOUT",
+        "BAD_GATEWAY",
+    }
+)
+
+ALLOWED_NUMERIC_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "1001",
+        "1002",
+        "1003",
+        "1004",
+        "1100",
+        "2001",
+        "2002",
+        "2003",
+    }
+)
+
+ALLOWED_DIAGNOSTIC_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "REQUEST",
+        "BUSINESS",
+        "APPLICATION",
+        "SYSTEM",
+        "AUTH",
+        "AUTHENTICATION",
+        "AUTHORIZATION",
+    }
+)
+
+ALLOWED_DIAGNOSTIC_DOMAINS: frozenset[str] = frozenset(
+    {
+        "BUY_WATCHLIST",
+        "BUY_BIDDING",
+        "BUY_OFFER",
+        "BUY_BROWSE",
+        "SELL_LISTING",
+        "SELL_FULFILLMENT",
+        "SELL_ACCOUNT",
+        "SELL_ANALYTICS",
+        "SELL_FINANCES",
+        "SECURITY",
+        "OAUTH",
+        "API_GRAPHQL",
+        "GRAPHQL",
+        "SYSTEM",
+        "REQUEST",
+    }
+)
+
+REDACTED_ERROR_CODE = "UNKNOWN_CODE"
+REDACTED_CATEGORY = "UNKNOWN_CATEGORY"
+REDACTED_DOMAIN = "UNKNOWN_DOMAIN"
 
 
 @dataclass(frozen=True)
@@ -257,11 +340,18 @@ def infer_and_validate_query_operation(
     return resolved_operation_name
 
 
-def sanitize_diagnostic_token(value: Any) -> str | None:
-    """Validate and return a short diagnostic code/category/domain token.
+def sanitize_diagnostic_token(
+    value: Any,
+    *,
+    kind: str = "code",
+) -> str | None:
+    """Validate a diagnostic code, category, or domain against strict allowlists.
 
-    Rejects free-form error messages, tokens, or long strings to guarantee
-    shareable reports cannot leak account details or credentials.
+    Preserves only explicitly recognized symbolic eBay/GraphQL error codes,
+    documented numeric error codes, and known categories/domains. Any non-empty
+    unrecognized value is replaced with a generic label (``UNKNOWN_CODE``,
+    ``UNKNOWN_CATEGORY``, or ``UNKNOWN_DOMAIN``) so account handles, numeric
+    item IDs, or secret-like strings can never leak into shareable reports.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -269,10 +359,23 @@ def sanitize_diagnostic_token(value: Any) -> str | None:
     if not text:
         return None
     if _EBAY_TOKEN_PATTERN.search(text):
-        return None
-    if not _SAFE_DIAGNOSTIC_TOKEN_RE.match(text):
-        return None
-    return text
+        if kind == "category":
+            return REDACTED_CATEGORY
+        if kind == "domain":
+            return REDACTED_DOMAIN
+        return REDACTED_ERROR_CODE
+
+    upper = text.upper()
+    if kind == "category":
+        return upper if upper in ALLOWED_DIAGNOSTIC_CATEGORIES else REDACTED_CATEGORY
+    if kind == "domain":
+        return upper if upper in ALLOWED_DIAGNOSTIC_DOMAINS else REDACTED_DOMAIN
+
+    if upper in ALLOWED_SYMBOLIC_ERROR_CODES:
+        return upper
+    if text in ALLOWED_NUMERIC_ERROR_CODES:
+        return text
+    return REDACTED_ERROR_CODE
 
 
 def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
@@ -284,6 +387,10 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
         sanitized_errors: list[dict[str, str | None]] = []
         raw_err_dicts: list[dict[str, Any]] = []
         status_codes: list[int] = []
+        unrecognized_code_count = 0
+        unrecognized_category_count = 0
+        unrecognized_domain_count = 0
+        raw_upper_codes: set[str] = set()
 
         for err in exc.errors:
             if not isinstance(err, dict):
@@ -320,11 +427,24 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
             if isinstance(raw_status, int):
                 status_codes.append(raw_status)
 
-            code_tok = sanitize_diagnostic_token(raw_code)
-            err_code_tok = sanitize_diagnostic_token(raw_error_code) or code_tok
-            err_id_tok = sanitize_diagnostic_token(raw_error_id)
-            cat_tok = sanitize_diagnostic_token(raw_category)
-            dom_tok = sanitize_diagnostic_token(raw_domain)
+            for raw_candidate in (raw_error_code, raw_code, raw_error_id):
+                if raw_candidate is not None and not isinstance(raw_candidate, bool):
+                    raw_upper_codes.add(str(raw_candidate).strip().upper())
+
+            code_tok = sanitize_diagnostic_token(raw_code, kind="code")
+            err_code_tok = (
+                sanitize_diagnostic_token(raw_error_code, kind="code") or code_tok
+            )
+            err_id_tok = sanitize_diagnostic_token(raw_error_id, kind="code")
+            cat_tok = sanitize_diagnostic_token(raw_category, kind="category")
+            dom_tok = sanitize_diagnostic_token(raw_domain, kind="domain")
+
+            if REDACTED_ERROR_CODE in (code_tok, err_code_tok, err_id_tok):
+                unrecognized_code_count += 1
+            if cat_tok == REDACTED_CATEGORY:
+                unrecognized_category_count += 1
+            if dom_tok == REDACTED_DOMAIN:
+                unrecognized_domain_count += 1
 
             for candidate_code in (err_code_tok, code_tok, err_id_tok):
                 if candidate_code and candidate_code not in error_codes:
@@ -344,8 +464,7 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
                 }
             )
 
-        upper_codes = {c.upper() for c in error_codes}
-        is_validation = bool(upper_codes & _VALIDATION_ERROR_CODES)
+        is_validation = bool(raw_upper_codes & _VALIDATION_ERROR_CODES)
         is_perm = any(is_graphql_permission_error(e) for e in raw_err_dicts)
         is_expired = any(is_graphql_token_expired(e) for e in raw_err_dicts)
         is_rate_limit = any(is_graphql_rate_limit_error(e) for e in raw_err_dicts)
@@ -365,6 +484,10 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
             "error_type": type(exc).__name__,
             "failure_class": failure_class,
             "http_status": status_codes[0] if status_codes else 200,
+            "error_count": len(raw_err_dicts),
+            "unrecognized_code_count": unrecognized_code_count,
+            "unrecognized_category_count": unrecognized_category_count,
+            "unrecognized_domain_count": unrecognized_domain_count,
             "code": error_codes[0] if error_codes else None,
             "error_code": error_codes[0] if error_codes else None,
             "category": categories[0] if categories else None,
@@ -420,6 +543,10 @@ def summarize_probe_exception(exc: BaseException) -> dict[str, Any]:
         "error_type": type(exc).__name__,
         "failure_class": failure_class,
         "http_status": http_status,
+        "error_count": 1,
+        "unrecognized_code_count": 0,
+        "unrecognized_category_count": 0,
+        "unrecognized_domain_count": 0,
         "code": None,
         "error_code": None,
         "category": None,
@@ -1304,6 +1431,65 @@ def compare_watchlist_snapshots(
     }
 
 
+def rank_graphql_probe_candidate(
+    merged_preview: Mapping[str, Any],
+    *,
+    is_custom: bool = False,
+) -> tuple[int, int, int, int, int, int]:
+    """Score a normalized GraphQL probe result for parity comparison selection.
+
+    Selection priority (highest tuple wins):
+    1. Completeness and pagination validity (``complete`` > ``truncated`` > ``unverified`` > ``incomplete_identity`` > ``count_only``).
+    2. Presence of usable item records (non-empty ``items_by_id`` > empty ``items`` list > count-only).
+    3. Available monitored field coverage across retrieved items (0..9 fields populated).
+    4. Number of unique valid item records retrieved.
+    5. Presence of reported total count metadata.
+    6. Custom vs. built-in probe preference (only when evidence quality is comparable).
+    """
+    pagination_status = str(merged_preview.get("pagination_status") or "")
+    completeness_rank_map = {
+        "complete": 4,
+        "truncated": 3,
+        "unverified": 2,
+        "incomplete_identity": 1,
+        "inconsistent_total": 1,
+        "count_only": 0,
+    }
+    completeness_tier = completeness_rank_map.get(pagination_status, 0)
+
+    items_by_id = merged_preview.get("items_by_id")
+    unique_items = items_by_id if isinstance(items_by_id, Mapping) else {}
+    items_list_present = bool(merged_preview.get("items_list_present"))
+    if items_list_present and len(unique_items) > 0:
+        items_tier = 2
+    elif items_list_present:
+        items_tier = 1
+    else:
+        items_tier = 0
+
+    item_fields = tuple(f for f in MONITORED_WATCHLIST_FIELDS if f != "watched_count")
+    populated_fields_count = 0
+    if unique_items:
+        for field_name in item_fields:
+            if any(
+                isinstance(item, Mapping) and item.get(field_name) is not None
+                for item in unique_items.values()
+            ):
+                populated_fields_count += 1
+
+    has_reported_total = 1 if merged_preview.get("reported_total") is not None else 0
+    custom_tiebreaker = 1 if is_custom else 0
+
+    return (
+        completeness_tier,
+        items_tier,
+        populated_fields_count,
+        len(unique_items),
+        has_reported_total,
+        custom_tiebreaker,
+    )
+
+
 def sanitize_parity_report(
     report: Mapping[str, Any],
     *,
@@ -1328,8 +1514,15 @@ def sanitize_parity_report(
             result: dict[str, Any] = {}
             for key, val in node.items():
                 key_str = str(key)
-                if key_str.lower() in FORBIDDEN_REPORT_KEYS:
+                key_lower = key_str.lower()
+                if key_lower in FORBIDDEN_REPORT_KEYS:
                     result[key_str] = "[REDACTED]"
+                elif (
+                    key_lower in {"code", "error_code", "error_id"} and val is not None
+                ):
+                    result[key_str] = sanitize_diagnostic_token(val, kind="code")
+                elif key_lower == "domain" and val is not None:
+                    result[key_str] = sanitize_diagnostic_token(val, kind="domain")
                 else:
                     result[key_str] = _walk(val)
             return result
@@ -1355,27 +1548,42 @@ def format_parity_report_markdown(report: Mapping[str, Any]) -> str:
         f"- **Site ID / Marketplace**: `{report.get('site_id', '0')}` (`{report.get('marketplace_id', 'EBAY_US')}`)",
         f"- **Comparison Status**: `{parity_status(report)}`",
         f"- **Pagination / Completeness Status**: `{report.get('pagination_status', 'unverified')}`",
-        "",
-        "## Collection Summary",
-        "",
-        "| Metric | Value |",
-        "|---|---|",
-        f"| Trading XML Available | `{report.get('xml_available', True)}` |",
-        f"| Trading XML Truncated | `{report.get('xml_truncated', False)}` |",
-        f"| Trading XML Watched Items | `{report.get('xml_watched_count')}` |",
-        f"| GraphQL Unique Watched Items | `{report.get('graphql_watched_count')}` |",
-        f"| GraphQL Raw Items Retrieved | `{report.get('graphql_raw_items_count')}` |",
-        f"| GraphQL Reported Total | `{report.get('graphql_reported_total')}` |",
-        f"| GraphQL Complete | `{report.get('graphql_complete', False)}` |",
-        f"| GraphQL Truncated | `{report.get('graphql_truncated', False)}` |",
-        f"| Common Matched Item IDs | `{report.get('common_items_count')}` |",
-        f"| XML-Only Item IDs | `{report.get('xml_only_count')}` |",
-        f"| GraphQL-Only Item IDs | `{report.get('graphql_only_count')}` |",
-        f"| Composite `v1|...|...` IDs Normalized | `{report.get('composite_ids_normalized_count')}` |",
-        f"| Duplicate GraphQL Item IDs | `{report.get('duplicate_ids_count', 0)}` |",
-        f"| Missing / Invalid GraphQL Item IDs | `{report.get('missing_ids_count', 0)}` |",
-        "",
     ]
+    if report.get("selected_probe_key"):
+        lines.append(
+            f"- **Selected Parity Probe**: `{report.get('selected_probe_key')}`"
+        )
+    lines.extend(
+        [
+            "",
+            "## Collection Summary",
+            "",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Trading XML Available | `{report.get('xml_available', True)}` |",
+            f"| Trading XML Truncated | `{report.get('xml_truncated', False)}` |",
+            f"| Trading XML Watched Items | `{report.get('xml_watched_count')}` |",
+            f"| GraphQL Unique Watched Items | `{report.get('graphql_watched_count')}` |",
+            f"| GraphQL Raw Items Retrieved | `{report.get('graphql_raw_items_count')}` |",
+            f"| GraphQL Reported Total | `{report.get('graphql_reported_total')}` |",
+            f"| GraphQL Complete | `{report.get('graphql_complete', False)}` |",
+            f"| GraphQL Truncated | `{report.get('graphql_truncated', False)}` |",
+            f"| Common Matched Item IDs | `{report.get('common_items_count')}` |",
+            f"| XML-Only Item IDs | `{report.get('xml_only_count')}` |",
+            f"| GraphQL-Only Item IDs | `{report.get('graphql_only_count')}` |",
+            f"| Composite `v1|...|...` IDs Normalized | `{report.get('composite_ids_normalized_count')}` |",
+            f"| Duplicate GraphQL Item IDs | `{report.get('duplicate_ids_count', 0)}` |",
+            f"| Missing / Invalid GraphQL Item IDs | `{report.get('missing_ids_count', 0)}` |",
+            "",
+        ]
+    )
+
+    op_warnings = report.get("operational_warnings")
+    if isinstance(op_warnings, list) and op_warnings:
+        lines.extend(["## Operational Warnings", ""])
+        for warning in op_warnings:
+            lines.append(f"- {warning}")
+        lines.append("")
 
     xml_err = report.get("xml_error_summary")
     if isinstance(xml_err, Mapping) and xml_err:

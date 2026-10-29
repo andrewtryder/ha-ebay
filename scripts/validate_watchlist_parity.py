@@ -59,6 +59,7 @@ from custom_components.ebay.parsers.watchlist_parity import (  # noqa: E402
     infer_and_validate_query_operation,
     merge_graphql_watchlist_pages,
     normalize_graphql_watchlist_payload,
+    rank_graphql_probe_candidate,
     sanitize_parity_report,
     summarize_probe_exception,
     validate_all_contract_probes,
@@ -449,8 +450,22 @@ async def run_live_watchlist_validation(
 
     probe_results: list[dict[str, Any]] = []
     best_graphql_pages: list[dict[str, Any]] | None = None
-    best_is_custom = False
+    best_rank: tuple[int, int, int, int, int, int] | None = None
+    selected_probe_key: str | None = None
     last_error_summary: dict[str, Any] | None = None
+
+    has_refresh_token = bool(
+        getattr(client, "refresh_token", None)
+        or getattr(client, "_refresh_token", None)
+    )
+    operational_warnings: list[str] = []
+    if not has_refresh_token:
+        operational_warnings.append(
+            "Running with a short-lived access token and no refresh token: "
+            "if the token expires or returns HTTP 401 / UNAUTHENTICATED, automatic "
+            "OAuth token refresh and retry cannot succeed. Mint a fresh access token "
+            "or provide EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, and EBAY_REFRESH_TOKEN."
+        )
 
     for probe in probes_to_run:
         should_paginate = paginate_custom_probe and probe.key == "custom_query_file"
@@ -496,7 +511,10 @@ async def run_live_watchlist_validation(
                 continue
 
             merged_preview = merge_graphql_watchlist_pages(pages)
-            has_items = merged_preview["items_list_present"]
+            is_custom = probe.key == "custom_query_file"
+            candidate_rank = rank_graphql_probe_candidate(
+                merged_preview, is_custom=is_custom
+            )
             probe_results.append(
                 {
                     "key": probe.key,
@@ -513,14 +531,10 @@ async def run_live_watchlist_validation(
                 }
             )
 
-            is_custom = probe.key == "custom_query_file"
-            if (
-                best_graphql_pages is None
-                or (is_custom and has_items)
-                or (not best_is_custom and (is_custom or has_items))
-            ):
+            if best_rank is None or candidate_rank > best_rank:
                 best_graphql_pages = pages
-                best_is_custom = is_custom
+                best_rank = candidate_rank
+                selected_probe_key = probe.key
         except (
             EbayError,
             aiohttp.ClientError,
@@ -562,7 +576,13 @@ async def run_live_watchlist_validation(
         try:
             merged_for_redaction = merge_graphql_watchlist_pages(best_graphql_pages)
             for item in merged_for_redaction["items_by_id"].values():
-                for sensitive_key in ("item_id", "raw_item_id", "title", "url", "image"):
+                for sensitive_key in (
+                    "item_id",
+                    "raw_item_id",
+                    "title",
+                    "url",
+                    "image",
+                ):
                     val = item.get(sensitive_key)
                     if isinstance(val, str) and val.strip():
                         forbidden.append(val.strip())
@@ -574,6 +594,8 @@ async def run_live_watchlist_validation(
         "environment": client.environment,
         "site_id": client.site_id,
         "marketplace_id": marketplace_id_for_site(client.site_id) or "EBAY_US",
+        "selected_probe_key": selected_probe_key,
+        "operational_warnings": operational_warnings,
         "probes": probe_results,
         **comparison,
     }

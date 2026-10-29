@@ -253,14 +253,87 @@ def test_summarize_probe_exception_flat_sanitized_and_nested_errors() -> None:
     assert http_429_summary["is_rate_limit"] is True
     assert http_429_summary["http_status"] == 429
 
-    # 4. Unsafe diagnostic tokens (spaces, tokens, secrets) are rejected
+    # 4. Allowlisted diagnostic tokens vs. unrecognized/sensitive values
     assert sanitize_diagnostic_token("VALIDATION_ERROR") == "VALIDATION_ERROR"
     assert sanitize_diagnostic_token(1001) == "1001"
-    assert sanitize_diagnostic_token("Bearer secret-jwt") is None
-    assert sanitize_diagnostic_token("v^1.1#i^1#p^3#token") is None
-    assert sanitize_diagnostic_token("Free form message with spaces") is None
+    assert sanitize_diagnostic_token("REQUEST", kind="category") == "REQUEST"
+    assert sanitize_diagnostic_token("BUY_WATCHLIST", kind="domain") == "BUY_WATCHLIST"
+    assert sanitize_diagnostic_token("Bearer secret-jwt") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token("v^1.1#i^1#p^3#token") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token("Free form message with spaces") == "UNKNOWN_CODE"
     assert sanitize_diagnostic_token(None) is None
     assert sanitize_diagnostic_token(True) is None
+
+
+def test_diagnostic_privacy_allowlist_redacts_item_ids_accounts_and_secrets() -> None:
+    """Account names, 12-digit numeric item IDs, and 64-char secrets in error codes/domains are replaced with generic labels."""
+    secret_64 = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    item_id_code = "123456789012"
+    account_domain = "user_private_account"
+    account_code = "seller_handle_99"
+
+    assert sanitize_diagnostic_token(item_id_code, kind="code") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token(123456789012, kind="code") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token(account_code, kind="code") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token(secret_64, kind="code") == "UNKNOWN_CODE"
+    assert sanitize_diagnostic_token(account_domain, kind="domain") == "UNKNOWN_DOMAIN"
+    assert sanitize_diagnostic_token(secret_64, kind="domain") == "UNKNOWN_DOMAIN"
+    assert (
+        sanitize_diagnostic_token("private_category", kind="category")
+        == "UNKNOWN_CATEGORY"
+    )
+
+    flattened_errors = sanitize_graphql_errors(
+        [
+            {
+                "message": "Private account failure for seller_handle_99",
+                "extensions": {
+                    "code": item_id_code,
+                    "errorCode": account_code,
+                    "category": "private_category",
+                    "domain": account_domain,
+                },
+            },
+            {
+                "message": "Token leak attempt",
+                "extensions": {
+                    "code": secret_64,
+                    "category": "REQUEST",
+                    "domain": "BUY_WATCHLIST",
+                },
+            },
+        ]
+    )
+    exc = EbayGraphQLError("Synthetic error", errors=flattened_errors)
+    summary = summarize_probe_exception(exc)
+
+    assert summary["error_count"] == 2
+    assert summary["unrecognized_code_count"] == 2
+    assert summary["unrecognized_category_count"] == 1
+    assert summary["unrecognized_domain_count"] == 1
+    assert summary["error_codes"] == ["UNKNOWN_CODE"]
+    assert summary["categories"] == ["UNKNOWN_CATEGORY", "REQUEST"]
+    assert summary["domains"] == ["UNKNOWN_DOMAIN", "BUY_WATCHLIST"]
+
+    report = sanitize_parity_report(
+        {
+            "status": "unverified",
+            "graphql_error_summary": summary,
+            "manual_error": {
+                "code": item_id_code,
+                "error_code": account_code,
+                "domain": account_domain,
+            },
+        }
+    )
+    serialized = json.dumps(report)
+    assert item_id_code not in serialized
+    assert account_domain not in serialized
+    assert account_code not in serialized
+    assert secret_64 not in serialized
+    assert report["manual_error"]["code"] == "UNKNOWN_CODE"
+    assert report["manual_error"]["error_code"] == "UNKNOWN_CODE"
+    assert report["manual_error"]["domain"] == "UNKNOWN_DOMAIN"
 
 
 def test_completeness_and_pagination_fail_closed_and_bounded_multi_page() -> None:
@@ -1036,3 +1109,108 @@ def test_run_live_watchlist_validation_with_mocked_client() -> None:
     assert "## Contract Probes" in md
     assert "## Field-Level Parity Matrix" in md
     assert "VALIDATION_ERROR" in md
+
+
+def test_probe_selection_does_not_override_item_probe_with_custom_count_only_probe() -> (
+    None
+):
+    """A custom count-only probe must not replace a built-in probe that returned usable items."""
+    xml_demo, gql_demo = cli_harness._synthetic_demo_fixtures()
+    root = ET.fromstring(xml_demo)
+    gql_data = json.loads(gql_demo)["data"]
+
+    client = Mock()
+    client.environment = "production"
+    client.site_id = "0"
+    client.client_id = "secret-client-id"
+    client._client_secret = "secret-client-secret"
+    client.runame = "secret-runame"
+    client.refresh_token = None
+    client._refresh_token = None
+    client._access_token = "short-lived-access-token"
+    client.async_call_trading_api = AsyncMock(return_value=root)
+
+    custom_count_only_probe = WatchlistContractProbe(
+        key="custom_query_file",
+        description="Custom count-only probe",
+        query="query CustomCountOnly { userWatchList { total } }",
+        operation_name="CustomCountOnly",
+    )
+
+    async def _side_effect(
+        query: str,
+        variables: dict[str, Any] | None = None,
+        *,
+        operation_name: str | None = None,
+    ) -> dict[str, Any]:
+        if operation_name == "Handshake":
+            return {"__typename": "Query"}
+        if operation_name in ("GetWatchListTotal", "CustomCountOnly"):
+            return {"userWatchList": {"total": 2}}
+        if operation_name == "GetUserWatchList":
+            return gql_data
+        raise EbayGraphQLError(
+            "Validation error",
+            errors=sanitize_graphql_errors(
+                [{"extensions": {"code": "VALIDATION_ERROR", "category": "REQUEST"}}]
+            ),
+        )
+
+    client.async_post_graphql = AsyncMock(side_effect=_side_effect)
+
+    report = asyncio.run(
+        cli_harness.run_live_watchlist_validation(
+            client,
+            custom_probe=custom_count_only_probe,
+        )
+    )
+    # 1. Built-in item-bearing probe is selected over custom count-only probe
+    assert report["selected_probe_key"] == "user_watchlist_items_paginated"
+    assert report["status"] == "compared"
+    assert report["graphql_watched_count"] == 2
+    assert report["common_items_count"] == 2
+
+    # 2. All probes (including custom_query_file) are preserved in report["probes"]
+    probes_by_key = {p["key"]: p for p in report["probes"]}
+    assert probes_by_key["user_watchlist_items_paginated"]["outcome"] == "success"
+    assert probes_by_key["custom_query_file"]["outcome"] == "success"
+    assert probes_by_key["custom_query_file"]["pagination_status"] == "count_only"
+
+    # 3. Access-token-only mode emits an explicit operational warning
+    assert len(report["operational_warnings"]) == 1
+    assert "no refresh token" in report["operational_warnings"][0]
+    md = format_parity_report_markdown(report)
+    assert "## Operational Warnings" in md
+    assert "Selected Parity Probe" in md
+
+    # 4. When custom probe has comparable complete item evidence, custom probe wins tie-breaker
+    custom_full_probe = WatchlistContractProbe(
+        key="custom_query_file",
+        description="Custom full item probe",
+        query=(
+            "query CustomFull($limit: Int, $offset: Int) { "
+            "userWatchList(limit: $limit, offset: $offset) { total items { itemId title } } }"
+        ),
+        operation_name="CustomFull",
+        variables={"limit": 100, "offset": 0},
+    )
+
+    async def _tie_side_effect(
+        query: str,
+        variables: dict[str, Any] | None = None,
+        *,
+        operation_name: str | None = None,
+    ) -> dict[str, Any]:
+        if operation_name == "Handshake":
+            return {"__typename": "Query"}
+        return gql_data
+
+    client.async_post_graphql = AsyncMock(side_effect=_tie_side_effect)
+    tie_report = asyncio.run(
+        cli_harness.run_live_watchlist_validation(
+            client,
+            custom_probe=custom_full_probe,
+        )
+    )
+    assert tie_report["selected_probe_key"] == "custom_query_file"
+    assert tie_report["status"] == "compared"
