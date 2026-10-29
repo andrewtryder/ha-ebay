@@ -16,7 +16,7 @@ read-only access to that application.
 
 You need:
 
-- Home Assistant `2026.3.0` or newer
+- Home Assistant `2026.8.0` or newer
 - the eBay custom integration installed through HACS
 - an eBay Developers Program account
 - a regular eBay account whose activity you want to monitor
