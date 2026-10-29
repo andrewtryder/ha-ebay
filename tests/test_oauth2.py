@@ -495,38 +495,45 @@ def test_manual_fallback_still_shows_consent_url(
     )
 
 
-def test_initial_flow_shows_authorization_method_menu(
+def test_initial_flow_starts_credentials_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Initial setup starts with an authorization-method menu."""
+    """Initial setup starts directly with the credentials step in automatic mode."""
     flow = _flow(monkeypatch)
 
     result = asyncio.run(flow.async_step_user())
 
-    assert result["type"] == "menu"
-    assert result["step_id"] == "user"
-    assert result["menu_options"] == ["automatic", "manual"]
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert (
+        result["description_placeholders"]["callback_url"]
+        == "https://my.home-assistant.io/redirect/oauth"
+    )
+    assert (
+        result["description_placeholders"]["developer_console_url"]
+        == DEVELOPER_CONSOLE_URL
+    )
 
 
-def test_automatic_selection_shows_prepare_application_step(
+def test_automatic_selection_shows_credentials_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Automatic callback shows eBay app preparation before credentials."""
+    """Automatic callback goes directly to credentials."""
     flow = _flow(monkeypatch)
 
     result = asyncio.run(flow.async_step_automatic())
 
     assert result["type"] == "form"
-    assert result["step_id"] == "prepare_application"
+    assert result["step_id"] == "credentials"
 
 
-def test_prepare_step_has_setup_placeholders(
+def test_credentials_step_has_setup_placeholders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prepare step includes copyable callback and documentation placeholders."""
+    """Credentials step includes copyable callback and documentation placeholders."""
     flow = _flow(monkeypatch)
 
-    result = asyncio.run(flow.async_step_prepare_application())
+    result = asyncio.run(flow.async_step_credentials())
 
     placeholders = result["description_placeholders"]
     assert placeholders["callback_url"] == "https://my.home-assistant.io/redirect/oauth"
@@ -535,13 +542,13 @@ def test_prepare_step_has_setup_placeholders(
     assert placeholders["privacy_policy_url"] == PRIVACY_POLICY_URL
 
 
-def test_prepare_continue_shows_credentials_form(
+def test_prepare_application_alias_shows_credentials_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Continuing past app preparation asks for credentials."""
+    """Legacy prepare_application step alias forwards to credentials."""
     flow = _flow(monkeypatch)
 
-    result = asyncio.run(flow.async_step_prepare_application({}))
+    result = asyncio.run(flow.async_step_prepare_application())
 
     assert result["type"] == "form"
     assert result["step_id"] == "credentials"
@@ -625,6 +632,82 @@ def test_credentials_are_stripped_before_unique_id_and_oauth(
     assert flow._data[CONF_CLIENT_SECRET] == "client-secret"
     assert flow._data[CONF_RUNAME] == "Example-Runame"
     assert flow._data[CONF_SITE_ID] == "0"
+
+
+def test_credentials_reject_invalid_site_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown or invalid marketplace Site IDs are rejected."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(flow.async_step_credentials(_flow_data(site_id="999")))
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {CONF_SITE_ID: "invalid_site_id"}
+
+
+def test_credentials_manual_checkbox_transitions_to_manual_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checking manual_authorization opens manual consent step directly."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials({**_flow_data(), "manual_authorization": True})
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "manual"
+    assert (
+        "auth.ebay.com/oauth2/authorize"
+        in result["description_placeholders"]["consent_url"]
+    )
+
+
+def test_automatic_creation_abort_falls_back_to_manual_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When automatic OAuth token resolution fails, flow falls back to manual step."""
+    flow = _flow(monkeypatch)
+    asyncio.run(flow.async_step_credentials(_flow_data()))
+
+    flow.external_data = {"code": "bad-code"}
+
+    async def _fail_resolve(data: Any) -> dict[str, Any]:
+        raise oauth_token_request_error(
+            "oauth_failed", token_url="https://api.ebay.com"
+        )
+
+    monkeypatch.setattr(
+        flow.flow_impl,
+        "async_resolve_external_data",
+        _fail_resolve,
+    )
+
+    result = asyncio.run(flow.async_step_creation())
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "manual"
+    assert (
+        "auth.ebay.com/oauth2/authorize"
+        in result["description_placeholders"]["consent_url"]
+    )
+
+
+def test_marketplace_dropdown_options_serialize_correctly() -> None:
+    """Marketplace dropdown options match supported marketplaces."""
+    from custom_components.ebay.marketplace import (
+        MARKETPLACE_NAMES,
+        SITE_ID_TO_MARKETPLACE,
+    )
+
+    flow = EbayConfigFlow()
+    schema = flow._credentials_schema({})
+    fields = _schema_fields(schema)
+
+    assert set(MARKETPLACE_NAMES.keys()) == set(SITE_ID_TO_MARKETPLACE.keys())
+    assert fields[CONF_SITE_ID].default() == "0"
 
 
 def test_manual_selection_reaches_credentials_then_manual_step(

@@ -42,10 +42,10 @@ You need an eBay Developer Program application with:
 - Cert ID / Client secret
 - RuName
 - Production or Sandbox environment
-- Site ID (`0` for eBay US)
+- eBay marketplace selection (e.g. eBay United States)
 
-Start the integration setup in Home Assistant first, copy the callback URL it provides,
-and register that URL in the matching eBay application keyset.
+Start the integration setup in Home Assistant first, copy the callback URL it provides
+on the setup screen, and register that URL in the matching eBay application keyset.
 
 See the illustrated **[eBay OAuth setup guide](docs/ebay-oauth-setup.md)** for the complete walkthrough.
 
