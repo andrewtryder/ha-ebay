@@ -172,51 +172,89 @@ class RestClientMixin:
         self._access_token_expires_at = None
         # User id is account-scoped; clear so a reauth cannot reuse a stale handle.
         self._feedback_user_id = None
-        if self._oauth_session is not None and hasattr(self._oauth_session, "token"):
-            token = dict(self._oauth_session.token)
-            token["expires_at"] = 0
-            hass = getattr(self._oauth_session, "hass", None)
-            config_entry = getattr(self._oauth_session, "config_entry", None)
-            config_entries = getattr(hass, "config_entries", None)
-            if (
-                config_entries is not None
-                and config_entry is not None
-                and hasattr(config_entries, "async_update_entry")
-            ):
-                config_entries.async_update_entry(
-                    config_entry,
-                    data={**getattr(config_entry, "data", {}), "token": token},
-                )
 
-    async def async_refresh_access_token(self) -> str:
-        """Force a fresh access token from the OAuth provider."""
+    @property
+    def _refresh_lock(self) -> asyncio.Lock:
+        """Return the client-level token refresh lock, creating if needed."""
+        if not hasattr(self, "_token_refresh_lock") or self._token_refresh_lock is None:
+            self._token_refresh_lock = asyncio.Lock()
+        return self._token_refresh_lock
+
+    async def async_refresh_access_token(
+        self, *, failed_token: str | None = None
+    ) -> str:
+        """Force a fresh access token from the OAuth provider with locking and deduplication."""
         if self._oauth_session is not None:
-            try:
-                new_token = (
-                    await self._oauth_session.implementation.async_refresh_token(
-                        self._oauth_session.token
+            token_lock = getattr(self._oauth_session, "_token_lock", None)
+            if token_lock is not None:
+                async with token_lock:
+                    return await self._async_refresh_oauth2_session(
+                        failed_token=failed_token
                     )
+            async with self._refresh_lock:
+                return await self._async_refresh_oauth2_session(
+                    failed_token=failed_token
                 )
-            except OAuth2TokenRequestReauthError as exc:
-                raise EbayAuthError("OAuth token refresh failed") from exc
-            except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
-                raise EbayAuthTransientError(
-                    "OAuth token refresh failed temporarily"
-                ) from exc
-            if hasattr(self._oauth_session, "hass") and hasattr(
-                self._oauth_session, "config_entry"
-            ):
-                self._oauth_session.hass.config_entries.async_update_entry(
-                    self._oauth_session.config_entry,
-                    data={**self._oauth_session.config_entry.data, "token": new_token},
-                )
-            access_token = new_token.get("access_token")
-            if not access_token:
-                raise EbayAuthError("OAuth token data does not include access token")
-            return access_token
 
-        self._clear_access_token()
-        return await self.async_get_access_token()
+        async with self._refresh_lock:
+            # If another coroutine already refreshed the token, return it
+            if (
+                failed_token is not None
+                and self._access_token
+                and self._access_token != failed_token
+                and not self._access_token_expiring()
+            ):
+                return self._access_token
+            self._clear_access_token()
+            return await self.async_get_access_token()
+
+    async def _async_refresh_oauth2_session(
+        self, *, failed_token: str | None = None
+    ) -> str:
+        """Execute OAuth2Session token refresh under lock with double-checked caching."""
+        token_data = getattr(self._oauth_session, "token", None)
+        current_token = (
+            token_data.get("access_token") if isinstance(token_data, dict) else None
+        )
+        if failed_token is not None and current_token and current_token != failed_token:
+            return current_token
+
+        try:
+            new_token = await self._oauth_session.implementation.async_refresh_token(
+                self._oauth_session.token
+            )
+        except OAuth2TokenRequestReauthError as exc:
+            config_entry = getattr(self._oauth_session, "config_entry", None)
+            hass = getattr(self._oauth_session, "hass", None)
+            if (
+                config_entry is not None
+                and hass is not None
+                and hasattr(config_entry, "async_start_reauth_if_available")
+            ):
+                config_entry.async_start_reauth_if_available(hass)
+            raise EbayAuthError("OAuth token refresh failed") from exc
+        except (OAuth2TokenRequestTransientError, OAuth2TokenRequestError) as exc:
+            raise EbayAuthTransientError(
+                "OAuth token refresh failed temporarily"
+            ) from exc
+
+        if not isinstance(new_token, dict) or not new_token.get("access_token"):
+            raise EbayAuthError("OAuth token data does not include access token")
+
+        hass = getattr(self._oauth_session, "hass", None)
+        config_entry = getattr(self._oauth_session, "config_entry", None)
+        config_entries = getattr(hass, "config_entries", None)
+        if (
+            config_entries is not None
+            and config_entry is not None
+            and hasattr(config_entries, "async_update_entry")
+        ):
+            config_entries.async_update_entry(
+                config_entry,
+                data={**getattr(config_entry, "data", {}), "token": new_token},
+            )
+
+        return str(new_token["access_token"])
 
     async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
         headers = {

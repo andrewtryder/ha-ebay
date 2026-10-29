@@ -26,10 +26,12 @@ class EbayAuthError(EbayError):
         *,
         is_expired: bool = True,
         is_permission_error: bool = False,
+        failed_token: str | None = None,
     ) -> None:
         super().__init__(message)
         self.is_expired = is_expired
         self.is_permission_error = is_permission_error
+        self.failed_token = failed_token
 
 
 class EbayAuthTransientError(EbayError):

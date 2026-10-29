@@ -311,10 +311,12 @@ class GraphQLClientMixin:
         """Store a sanitized failure detail for diagnostics."""
         raise NotImplementedError
 
-    async def _refresh_and_clear_token(self) -> None:
+    async def _refresh_and_clear_token(
+        self, *, failed_token: str | None = None
+    ) -> None:
         """Invalidate and force refresh the access token before retry."""
         if hasattr(self, "async_refresh_access_token"):
-            await self.async_refresh_access_token()
+            await self.async_refresh_access_token(failed_token=failed_token)
         else:
             self._clear_access_token()
 
@@ -460,7 +462,8 @@ class GraphQLClientMixin:
                     _LOGGER.debug(
                         "GraphQL auth token expired; requesting fresh token for retry"
                     )
-                    await self._refresh_and_clear_token()
+                    failed_token = getattr(exc, "failed_token", None)
+                    await self._refresh_and_clear_token(failed_token=failed_token)
                     continue
                 raise
         raise EbayAuthError(
@@ -522,6 +525,7 @@ class GraphQLClientMixin:
                             f"eBay GraphQL auth failed with HTTP {response.status}",
                             is_expired=True,
                             is_permission_error=False,
+                            failed_token=access_token,
                         )
 
                     # 403 Forbidden (missing scope or permanent permission denial)
@@ -699,6 +703,7 @@ class GraphQLClientMixin:
                                     f"eBay GraphQL authentication error (token expired): {err.get('message')}",
                                     is_expired=True,
                                     is_permission_error=False,
+                                    failed_token=access_token,
                                 )
 
                         # 2. Check for permanent scope or permission error (no refresh/retry)

@@ -7,15 +7,21 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from homeassistant.helpers.config_entry_oauth2_flow import (
+    OAuth2TokenRequestReauthError,
+    OAuth2TokenRequestTransientError,
+)
 
+from custom_components.ebay import _async_update_listener
 from custom_components.ebay.api import (
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
+    EbayAuthTransientError,
     EbayGraphQLError,
     EbayParseError,
     EbayPartialFailure,
@@ -987,7 +993,7 @@ def test_graphql_200_token_expired_triggers_refresh_and_retry_success() -> None:
     client = _make_client(MockSession())
     refresh_called = False
 
-    async def _mock_refresh() -> str:
+    async def _mock_refresh(*args: Any, **kwargs: Any) -> str:
         nonlocal refresh_called
         refresh_called = True
         client._access_token = "refreshed_token_val"
@@ -1349,3 +1355,247 @@ def test_graphql_200_null_data_system_error_triggers_retry_and_succeeds() -> Non
     assert calls == 2
     assert mock_sleep.await_count == 1
     assert data == {"userWatchList": {"total": 99}}
+
+
+def test_clear_access_token_does_not_mutate_config_entry_or_trigger_reload() -> None:
+    """Ensure _clear_access_token() does not write to config entry or fire listeners."""
+    update_called = False
+
+    class MockConfigEntries:
+        def async_update_entry(self, entry: Any, *, data: dict[str, Any]) -> None:
+            nonlocal update_called
+            update_called = True
+
+    class MockHass:
+        def __init__(self) -> None:
+            self.config_entries = MockConfigEntries()
+
+    class MockOAuth2Session:
+        def __init__(self) -> None:
+            self.config_entry = type(
+                "Entry", (), {"data": {"token": {"access_token": "abc"}}}
+            )()
+            self.hass = MockHass()
+            self.token = {"access_token": "abc", "expires_at": time.time() + 3600}
+
+    client = _make_client(None)
+    client._oauth_session = MockOAuth2Session()
+    client._access_token = "cached_token"
+    client._access_token_expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    # Calling _clear_access_token directly must only reset client in-memory state
+    client._clear_access_token()
+    assert client._access_token is None
+    assert client._access_token_expires_at is None
+    assert update_called is False
+
+
+def test_graphql_concurrent_token_refresh_deduplicates() -> None:
+    """Multiple concurrent GraphQL calls with expired token trigger only one refresh."""
+    refresh_calls = 0
+    current_token_val = "old_expired_tok"
+
+    class MockImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            nonlocal refresh_calls, current_token_val
+            refresh_calls += 1
+            await asyncio.sleep(0.01)  # Simulate network latency
+            current_token_val = "new_fresh_tok"
+            return {
+                "access_token": "new_fresh_tok",
+                "refresh_token": "new_refresh",
+                "expires_in": 7200,
+            }
+
+    class MockConfigEntry:
+        def __init__(self) -> None:
+            self.data = {
+                "token": {
+                    "access_token": "old_expired_tok",
+                    "expires_at": time.time() + 3600,
+                }
+            }
+
+    class MockConfigEntries:
+        def async_update_entry(self, entry: Any, *, data: dict[str, Any]) -> None:
+            entry.data = data
+
+    class MockHass:
+        def __init__(self) -> None:
+            self.config_entries = MockConfigEntries()
+
+    class MockOAuth2Session:
+        def __init__(self) -> None:
+            self.config_entry = MockConfigEntry()
+            self.hass = MockHass()
+            self.implementation = MockImplementation()
+            self._token_lock = asyncio.Lock()
+
+        @property
+        def token(self) -> dict[str, Any]:
+            return self.config_entry.data["token"]
+
+        async def async_ensure_token_valid(self) -> None:
+            pass
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            auth_header = kwargs.get("headers", {}).get("Authorization", "")
+            token = auth_header.replace("Bearer ", "")
+            if token == "old_expired_tok":
+                return _Context(_Response(status=401, text="Unauthorized"))
+            return _Context(
+                _Response(
+                    status=200,
+                    json_payload={"data": {"userWatchList": {"total": 100}}},
+                )
+            )
+
+    client = _make_client(MockSession())
+    client._oauth_session = MockOAuth2Session()
+    client._access_token = None
+
+    async def _run_concurrent() -> list[dict[str, Any]]:
+        tasks = [
+            client.async_post_graphql("query { userWatchList { total } }")
+            for _ in range(5)
+        ]
+        return await asyncio.gather(*tasks)
+
+    results = asyncio.run(_run_concurrent())
+
+    assert len(results) == 5
+    for r in results:
+        assert r == {"userWatchList": {"total": 100}}
+    # Crucial: Exactly 1 refresh call was made to the OAuth provider, not 5!
+    assert refresh_calls == 1
+
+
+def test_graphql_refresh_reauth_triggers_ha_reauth() -> None:
+    """When refresh fails with OAuth2TokenRequestReauthError, HA reauth is triggered."""
+    reauth_started = False
+
+    class MockConfigEntry:
+        def __init__(self) -> None:
+            self.data = {"token": {"access_token": "expired_tok"}}
+
+        def async_start_reauth_if_available(self, hass: Any) -> None:
+            nonlocal reauth_started
+            reauth_started = True
+
+    class MockImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            raise OAuth2TokenRequestReauthError(domain="ebay", request_info=MagicMock())
+
+    class MockOAuth2Session:
+        def __init__(self) -> None:
+            self.config_entry = MockConfigEntry()
+            self.hass = object()
+            self.implementation = MockImplementation()
+            self._token_lock = asyncio.Lock()
+
+        @property
+        def token(self) -> dict[str, Any]:
+            return self.config_entry.data["token"]
+
+        async def async_ensure_token_valid(self) -> None:
+            pass
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(_Response(status=401, text="Unauthorized"))
+
+    client = _make_client(MockSession())
+    client._oauth_session = MockOAuth2Session()
+    client._access_token = None
+
+    with pytest.raises(EbayAuthError, match="OAuth token refresh failed"):
+        asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    assert reauth_started is True
+
+
+def test_graphql_refresh_transient_error_does_not_trigger_reauth() -> None:
+    """When refresh fails with OAuth2TokenRequestTransientError, reauth is NOT triggered."""
+    reauth_started = False
+
+    class MockConfigEntry:
+        def __init__(self) -> None:
+            self.data = {"token": {"access_token": "expired_tok"}}
+
+        def async_start_reauth_if_available(self, hass: Any) -> None:
+            nonlocal reauth_started
+            reauth_started = True
+
+    class MockImplementation:
+        async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+            raise OAuth2TokenRequestTransientError(
+                domain="ebay", request_info=MagicMock()
+            )
+
+    class MockOAuth2Session:
+        def __init__(self) -> None:
+            self.config_entry = MockConfigEntry()
+            self.hass = object()
+            self.implementation = MockImplementation()
+            self._token_lock = asyncio.Lock()
+
+        @property
+        def token(self) -> dict[str, Any]:
+            return self.config_entry.data["token"]
+
+        async def async_ensure_token_valid(self) -> None:
+            pass
+
+    class MockSession:
+        def post(self, url: str, **kwargs: Any) -> _Context:
+            return _Context(_Response(status=401, text="Unauthorized"))
+
+    client = _make_client(MockSession())
+    client._oauth_session = MockOAuth2Session()
+    client._access_token = None
+
+    with pytest.raises(EbayAuthTransientError, match="refresh failed temporarily"):
+        asyncio.run(client.async_post_graphql("query { userWatchList { total } }"))
+
+    assert reauth_started is False
+
+
+def test_token_only_update_does_not_reload_integration() -> None:
+    """Updating token without changing options does not invoke async_reload."""
+    from custom_components.ebay.const import DEFAULT_OPTIONS
+
+    reload_called = False
+
+    class MockConfigEntries:
+        async def async_reload(self, entry_id: str) -> None:
+            nonlocal reload_called
+            reload_called = True
+
+    class MockHass:
+        def __init__(self) -> None:
+            self.config_entries = MockConfigEntries()
+
+    class MockCoordinator:
+        def __init__(self, options: dict[str, Any]) -> None:
+            self.options = options
+
+    class MockEntry:
+        def __init__(self) -> None:
+            self.entry_id = "test_entry_123"
+            self.options = {"poll_interval": 60}
+            self.runtime_data = MockCoordinator(
+                {**DEFAULT_OPTIONS, "poll_interval": 60}
+            )
+
+    hass = MockHass()
+    entry = MockEntry()
+
+    # 1. Token update with same options: should NOT reload
+    asyncio.run(_async_update_listener(hass, entry))  # type: ignore[arg-type]
+    assert reload_called is False
+
+    # 2. Options actually change: SHOULD reload
+    entry.options = {"poll_interval": 120}
+    asyncio.run(_async_update_listener(hass, entry))  # type: ignore[arg-type]
+    assert reload_called is True

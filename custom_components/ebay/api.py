@@ -6,6 +6,7 @@ across ``clients/`` (HTTP mixins) and ``parsers/`` (pure helpers).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -345,6 +346,7 @@ class EbayApiClient(
         self._partial_failure_details: list[dict[str, Any]] = []
         self._last_api_failure: ApiFailure | None = None
         self._accept_language = accept_language_for_site(site_id)
+        self._token_refresh_lock: asyncio.Lock | None = None
 
     async def async_fetch_data(
         self,

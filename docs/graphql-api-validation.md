@@ -83,9 +83,10 @@ Accept-Language: en-US
 
 - **`extensions.code`**: Numeric or string error identifier (e.g. `1001`, `"RATE_LIMITED"`, `"UNAUTHENTICATED"`).
 - **`extensions.category`**:
-  - `REQUEST`: Issue originated with client input, malformed syntax, expired token, or rate limiting.
-  - `APPLICATION`: Application runtime exception.
-  - `SYSTEM`: Backend infrastructure or upstream service failure.
+  - `REQUEST`: **[OFFICIAL SPEC]** Issue originated with client input, malformed syntax, expired token, missing variables, or rate limiting.
+  - `BUSINESS`: **[OFFICIAL SPEC]** Business-rule or state validation failure (e.g. item ended, listing restricted).
+  - `APPLICATION`: **[OFFICIAL SPEC]** Application runtime exception on eBay's server.
+  - `SYSTEM`: **[DEFENSIVE FALLBACK]** Not an officially documented eBay GraphQL category (which uses `APPLICATION`, `BUSINESS`, and `REQUEST`), but supported defensively in client error parsers for internal/gateway failures or 5xx responses.
 - **`extensions.domain`**: Functional service domain (e.g. `BUY_WATCHLIST`).
 - **No Root Extensions**: Root-level `extensions` are not used by eBay for error reporting; error metadata is strictly nested within `errors[].extensions`.
 
@@ -94,20 +95,20 @@ Accept-Language: en-US
 | Condition | Response HTTP Status | Body Structure | Client Action | Verification Level |
 |---|---|---|---|---|
 | **Success** | `200 OK` | `data: {...}, errors: null` | Return `data` mapping. | **[LOCAL MOCK]** |
-| **Token Expired** | `401 Unauthorized` OR `200 OK` with auth expired code/message | `errors[].extensions.code in (1001, "UNAUTHENTICATED", "TOKEN_EXPIRED")` | Force-refresh OAuth access token via `OAuth2Session` / refresh endpoint; retry request once. | **[LOCAL MOCK]** |
+| **Token Expired** | `401 Unauthorized` OR `200 OK` with auth expired code/message | `errors[].extensions.code in (1001, "UNAUTHENTICATED", "TOKEN_EXPIRED")` | Force-refresh OAuth access token via synchronized `async_refresh_access_token()`; retry request once. | **[LOCAL MOCK]** |
 | **Permission Denied / Missing Scope** | `403 Forbidden` OR `200 OK` with permission error | `errors[].extensions.code in ("FORBIDDEN", "ACCESS_DENIED", "INSUFFICIENT_SCOPE")` | **Do NOT refresh token.** Raise `EbayAuthError` immediately without retry. | **[LOCAL MOCK]** |
 | **Rate Limited** | `429 Too Many Requests` OR `200 OK` with rate limit error | `errors[].extensions.code == "RATE_LIMITED"` | Parse `Retry-After` (if present) or apply exponential backoff (`0.5 * 2^attempt`), retrying up to 3 times. Classify as `transient`. | **[LOCAL MOCK]** |
-| **System / 5xx Error** | `5xx` OR `200 OK` with `data: null` & `category: "SYSTEM"` | `errors[].extensions.category == "SYSTEM"` | Exponential backoff retry up to 3 times. Classify as `transient`. | **[LOCAL MOCK]** |
+| **System / 5xx Error** | `5xx` OR `200 OK` with `data: null` & transient failure | `5xx status` or fallback `category == "SYSTEM"` | Exponential backoff retry up to 3 times. Classify as `transient`. | **[LOCAL MOCK]** |
 | **Partial Collection Failure** | `200 OK` | `data: {"userWatchList": null}, errors: [...]` | **[CRITICAL SAFEGUARD]** When `allow_partial_data=False` (default), raise `EbayGraphQLError`. **Never return null/missing collections as `[]`.** | **[LOCAL MOCK]** |
 | **Malformed Response** | Any | Empty text, non-JSON, or `errors` array containing non-objects (e.g. `["error"]`) | Raise `EbayParseError`. Fail closed. | **[LOCAL MOCK]** |
 
 ### 3.3 Home Assistant `OAuth2Session` Integration
 
 **[LOCAL MOCK]** When integrated with Home Assistant's `OAuth2Session`:
-- Standard `async_ensure_token_valid()` evaluates token expiry against local clock (`valid_token`). If eBay prematurely revokes or rejects a token with HTTP 401, `valid_token` remains `True` and reusing `async_ensure_token_valid()` would retransmit the identical rejected token.
-- `ha-ebay` implements `async_refresh_access_token()` which invokes `self._oauth_session.implementation.async_refresh_token(self._oauth_session.token)` directly and updates `self.hass.config_entries.async_update_entry(...)`.
-- `_clear_access_token()` sets `expires_at = 0` on the session token dictionary.
-- The retry attempt retrieves the newly refreshed token and transmits it in the `Authorization: Bearer` header.
+- **Preserved REST Invariant**: `RestClientMixin._clear_access_token()` is an in-memory reset of the client's token cache and does **not** mutate Home Assistant's config entry data. Existing REST and Trading XML callers never trigger config-entry update listeners or reloads on 401 errors.
+- **Synchronized Forced Refresh**: `async_refresh_access_token()` synchronizes token refreshes under Home Assistant's `OAuth2Session._token_lock` (or the client's refresh lock). Double-checked verification checks whether a concurrent coroutine already refreshed the token, preventing multiple simultaneous refresh calls to eBay for the same expired token.
+- **Token-Only Update Safety**: The integration's `_async_update_listener` compares `entry.options` to `coordinator.options`. Token-only config entry updates bypass coordinator reloads, preventing background refresh loops from interrupting polling.
+- **Reauthentication Propagation**: If token refresh fails with `OAuth2TokenRequestReauthError` (e.g. invalid grant or revoked refresh token), `config_entry.async_start_reauth_if_available(hass)` is invoked to launch Home Assistant's reauthentication flow before raising `EbayAuthError`. Temporary refresh failures (`OAuth2TokenRequestTransientError`) raise `EbayAuthTransientError` without triggering reauth.
 
 ---
 

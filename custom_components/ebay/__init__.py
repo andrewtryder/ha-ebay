@@ -226,4 +226,12 @@ def _renamed_sensor_unique_id(entry_id: str, unique_id: str) -> str | None:
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload after options change."""
+    coordinator = getattr(entry, "runtime_data", None)
+    if coordinator is not None and hasattr(coordinator, "options"):
+        current_options = {**DEFAULT_OPTIONS, **entry.options}
+        if current_options == coordinator.options:
+            _LOGGER.debug(
+                "Skipping reload for entry %s: options have not changed", entry.entry_id
+            )
+            return
     await hass.config_entries.async_reload(entry.entry_id)
