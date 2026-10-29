@@ -171,33 +171,6 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             description_placeholders=self._setup_description_placeholders(),
         )
 
-    async def async_step_creation(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
-        """Create config entry from external data with recovery fallback."""
-        result = await super().async_step_creation(user_input)
-        if (
-            result.get("type") == "abort"
-            and result.get("reason") in ("oauth_failed", "oauth_timeout")
-            and self._data
-            and CONF_CLIENT_ID in self._data
-            and CONF_RUNAME in self._data
-        ):
-            _LOGGER.warning(
-                "Automatic OAuth callback aborted (%s); offering manual authorization fallback",
-                result.get("reason"),
-            )
-            self._oauth_mode = OAUTH_MODE_MANUAL
-            self._consent_url = build_consent_url(
-                self._data[CONF_ENVIRONMENT],
-                self._data[CONF_CLIENT_ID],
-                self._data[CONF_RUNAME],
-                self._state,
-                scope=self._requested_scopes,
-            )
-            return await self.async_step_manual()
-        return result
-
     async def async_oauth_create_entry(
         self, data: dict[str, Any]
     ) -> config_entries.ConfigFlowResult:
@@ -243,13 +216,13 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         cleaned = {
             key: value
             for key, value in entry_data.items()
-            if key != CONF_PENDING_OPTIONS
+            if key != CONF_PENDING_OPTIONS and key != "manual_authorization"
         }
         if isinstance(pending, dict):
-            return self.async_update_reload_and_abort(
+            return self.async_update_and_abort(
                 entry, data=cleaned, options=dict(pending)
             )
-        return self.async_update_reload_and_abort(entry, data=cleaned)
+        return self.async_update_and_abort(entry, data=cleaned)
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]
@@ -970,6 +943,7 @@ def _normalize_credentials(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Normalize credential form input and report blank required fields."""
     data = dict(user_input)
+    data.pop("manual_authorization", None)
     errors: dict[str, str] = {}
     for field in (
         CONF_CLIENT_ID,

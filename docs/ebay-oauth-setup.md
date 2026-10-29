@@ -216,10 +216,17 @@ and configure it with a different Client ID.
 
 ## Manual authorization fallback
 
-Use manual authorization only when the automatic browser callback does not complete.
-You can enable the **Manual authorization (troubleshooting fallback)** checkbox on
-the setup screen, or if an automatic callback fails during setup, Home Assistant
-will automatically transition to the manual fallback form.
+Use manual authorization only when your browser environment cannot complete the
+automatic callback (e.g. strict firewall rules, remote VPN configurations, or issues
+redirecting back from `my.home-assistant.io`).
+
+Enable the **Manual authorization (troubleshooting fallback)** checkbox on the initial
+credentials setup screen. Home Assistant will present a consent URL and a text input
+to paste the final callback URL or authorization code directly.
+
+Transient token exchange errors (such as upstream eBay API outages or invalid credentials)
+will abort the flow normally so that transient network problems can be resolved directly
+without forcing manual code pasting.
 
 1. Open the consent URL shown by Home Assistant.
 2. Sign in with the regular eBay account you want to monitor.

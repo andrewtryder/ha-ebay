@@ -665,10 +665,10 @@ def test_credentials_manual_checkbox_transitions_to_manual_step(
     )
 
 
-def test_automatic_creation_abort_falls_back_to_manual_step(
+def test_automatic_creation_abort_fails_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When automatic OAuth token resolution fails, flow falls back to manual step."""
+    """When automatic OAuth token resolution fails, flow aborts cleanly."""
     flow = _flow(monkeypatch)
     asyncio.run(flow.async_step_credentials(_flow_data()))
 
@@ -687,12 +687,37 @@ def test_automatic_creation_abort_falls_back_to_manual_step(
 
     result = asyncio.run(flow.async_step_creation())
 
+    assert result["type"] == "abort"
+    assert result["reason"] == "oauth_failed"
+
+
+def test_credentials_normalizes_and_strips_manual_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """manual_authorization is never stored in flow._data or created entry."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials({**_flow_data(), "manual_authorization": True})
+    )
+
     assert result["type"] == "form"
     assert result["step_id"] == "manual"
-    assert (
-        "auth.ebay.com/oauth2/authorize"
-        in result["description_placeholders"]["consent_url"]
+    assert "manual_authorization" not in flow._data
+
+    entry_result = asyncio.run(
+        flow.async_oauth_create_entry(
+            {
+                "auth_implementation": "ebay:production:client-id",
+                "token": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                },
+            }
+        )
     )
+    assert "manual_authorization" not in entry_result["data"]
 
 
 def test_marketplace_dropdown_options_serialize_correctly() -> None:
@@ -862,7 +887,7 @@ def test_manual_reauth_updates_existing_entry(
         lambda hass: object(),
     )
     monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
-    monkeypatch.setattr(flow, "async_update_reload_and_abort", _update)
+    monkeypatch.setattr(flow, "async_update_and_abort", _update)
     flow.flow_impl = EbayOAuth2Implementation(flow.hass, flow._data)
 
     result = asyncio.run(
@@ -873,6 +898,7 @@ def test_manual_reauth_updates_existing_entry(
     assert updated["entry"] is entry
     assert updated["data"][CONF_CLIENT_SECRET] == "new-secret"
     assert updated["data"]["token"]["refresh_token"] == "refresh"
+    assert "manual_authorization" not in updated["data"]
 
 
 def test_build_consent_url_defaults_to_core_scope() -> None:
@@ -923,7 +949,7 @@ def test_reauth_updates_existing_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"type": "abort", "reason": "reauth_successful"}
 
     monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
-    monkeypatch.setattr(flow, "async_update_reload_and_abort", _update)
+    monkeypatch.setattr(flow, "async_update_and_abort", _update)
 
     result = asyncio.run(
         flow.async_oauth_create_entry(
@@ -943,6 +969,49 @@ def test_reauth_updates_existing_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert updated["entry"] is entry
     assert updated["data"][CONF_CLIENT_SECRET] == "new-secret"
     assert updated["data"]["token"]["refresh_token"] == "refresh"
+    assert "manual_authorization" not in updated["data"]
+
+
+def test_reauth_uses_async_update_and_abort_avoiding_duplicate_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_finish_reauth calls async_update_and_abort avoiding duplicate reloads."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": {**_flow_data(), "manual_authorization": True},
+            "options": {},
+            "title": "eBay",
+        },
+    )()
+    called: dict[str, Any] = {}
+
+    def _mock_update_and_abort(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        called["update_and_abort"] = kwargs
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    def _mock_update_reload_and_abort(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        called["update_reload_and_abort"] = kwargs
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_and_abort", _mock_update_and_abort)
+    monkeypatch.setattr(
+        flow, "async_update_reload_and_abort", _mock_update_reload_and_abort
+    )
+
+    result = flow._finish_reauth({**_flow_data(), "manual_authorization": True})
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert "update_and_abort" in called
+    assert "update_reload_and_abort" not in called
+    assert "manual_authorization" not in called["update_and_abort"]["data"]
 
 
 def test_reauth_credentials_prefill_safe_fields_only(
@@ -1281,7 +1350,7 @@ def test_reauth_success_commits_pending_options(
         return {"type": "abort", "reason": "reauth_successful"}
 
     monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
-    monkeypatch.setattr(flow, "async_update_reload_and_abort", _update)
+    monkeypatch.setattr(flow, "async_update_and_abort", _update)
 
     result = asyncio.run(
         flow.async_oauth_create_entry(
@@ -1301,8 +1370,49 @@ def test_reauth_success_commits_pending_options(
     assert updated["entry"] is entry
     assert updated["options"] == pending
     assert CONF_PENDING_OPTIONS not in updated["data"]
+    assert "manual_authorization" not in updated["data"]
     assert entry.options["feedback_enabled"] is True
     assert CONF_PENDING_OPTIONS not in entry.data
+
+
+def test_reauth_with_pending_options_uses_async_update_and_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_finish_reauth with pending options calls async_update_and_abort."""
+    from custom_components.ebay.const import CONF_PENDING_OPTIONS
+
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    pending = {"poll_interval": 30}
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": {**_flow_data(), CONF_PENDING_OPTIONS: pending},
+            "options": {},
+            "title": "eBay",
+        },
+    )()
+    called: dict[str, Any] = {}
+
+    def _mock_update_and_abort(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        called["update_and_abort"] = kwargs
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_and_abort", _mock_update_and_abort)
+
+    result = flow._finish_reauth(
+        {**_flow_data(), "manual_authorization": True, CONF_PENDING_OPTIONS: pending}
+    )
+
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert called["update_and_abort"]["options"] == pending
+    assert CONF_PENDING_OPTIONS not in called["update_and_abort"]["data"]
+    assert "manual_authorization" not in called["update_and_abort"]["data"]
 
 
 def test_reauth_cancel_discards_pending_options(
