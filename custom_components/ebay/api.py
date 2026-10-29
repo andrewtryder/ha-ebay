@@ -27,6 +27,7 @@ from .clients.errors import (
     EbayAuthError,
     EbayAuthTransientError,
     EbayError,
+    EbayGraphQLError,
     EbayParseError,
     EbayPartialFailure,
     _error_text_blob,
@@ -40,10 +41,18 @@ from .clients.errors import (
     map_rest_failure_category,
     merge_partial_failure_details,
     sanitize_ebay_rest_errors,
+    sanitize_graphql_errors,
 )
 from .clients.feedback import FeedbackClientMixin
 from .clients.finances import FinancesClientMixin
 from .clients.fulfillment import FulfillmentClientMixin
+from .clients.graphql import (
+    GraphQLClientMixin,
+    GraphQLResponse,
+    is_graphql_auth_error,
+    is_graphql_rate_limit_error,
+    validate_read_only_query,
+)
 from .clients.http import TOKEN_REFRESH_MARGIN, RestClientMixin
 from .clients.messages import MessagesClientMixin
 from .clients.scopes import (
@@ -210,8 +219,11 @@ __all__ = [
     "EbayAuthTransientError",
     "EbayEndpoints",
     "EbayError",
+    "EbayGraphQLError",
     "EbayParseError",
     "EbayPartialFailure",
+    "GraphQLClientMixin",
+    "GraphQLResponse",
     "_copy_seller_ops",
     "_dict_by_item_id",
     "_duration_ms",
@@ -255,6 +267,8 @@ __all__ = [
     "extract_trading_warnings",
     "format_seconds",
     "has_core_scope",
+    "is_graphql_auth_error",
+    "is_graphql_rate_limit_error",
     "join_scopes",
     "map_rest_failure_category",
     "merge_partial_failure_details",
@@ -270,10 +284,12 @@ __all__ = [
     "parse_sold_unsold_classification",
     "resolve_granted_scopes",
     "sanitize_ebay_rest_errors",
+    "sanitize_graphql_errors",
     "scopes_for_options",
     "seconds_until",
     "seller_list_views_by_item_id",
     "summarize_payload",
+    "validate_read_only_query",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -281,6 +297,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class EbayApiClient(
     RestClientMixin,
+    GraphQLClientMixin,
     TradingClientMixin,
     AnalyticsClientMixin,
     FulfillmentClientMixin,

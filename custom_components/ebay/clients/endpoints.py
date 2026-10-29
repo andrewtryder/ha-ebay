@@ -24,6 +24,7 @@ class EbayEndpoints:
     messages: str
     account: str
     finances: str
+    graphql: str = "https://graphqlapi.ebay.com/graphql"
 
 
 def endpoints_for(environment: str) -> EbayEndpoints:
@@ -41,6 +42,7 @@ def endpoints_for(environment: str) -> EbayEndpoints:
             messages="https://api.sandbox.ebay.com/commerce/message/v1",
             account="https://api.sandbox.ebay.com/sell/account/v1",
             finances="https://apiz.sandbox.ebay.com/sell/finances/v1",
+            graphql="https://graphqlapi.sandbox.ebay.com/graphql",
         )
     return EbayEndpoints(
         trading="https://api.ebay.com/ws/api.dll",
@@ -56,6 +58,7 @@ def endpoints_for(environment: str) -> EbayEndpoints:
         # Finances uses the apiz host; some marketplaces also require digital
         # request signing and are gated via marketplace.finances.
         finances="https://apiz.ebay.com/sell/finances/v1",
+        graphql="https://graphqlapi.ebay.com/graphql",
     )
 
 
