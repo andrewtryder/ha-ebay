@@ -200,3 +200,42 @@ Before migrating `WatchedItemData` or replacing `GetMyeBayBuying` in production 
 - [ ] **Watchlist Schema & Pagination Verification**: Run live `userWatchList(limit: 5)` query via GraphQL Explorer. Validate exact field names (`total`, `items`, `itemId`, `price`, `itemEndDate`, `image`).
 - [ ] **Bid Count Availability on Watchlist**: Check whether `bidCount` exists on auction items returned by `userWatchList` to avoid telemetry regression compared to `GetMyeBayBuying`.
 - [ ] **Sandbox Endpoint Accessibility**: Verify whether `https://graphqlapi.sandbox.ebay.com/graphql` responds to requests or if GraphQL is production-only.
+
+---
+
+## 7. Watchlist Capability Matrix & Reproducible Parity Harness (Milestone 1)
+
+### 7.1 Evidence-Based Watchlist Field Matrix
+
+| Monitored Field | Trading XML Source (`GetMyeBayBuying` `WatchList`) | Candidate GraphQL Source (`userWatchList`) | Offline Normalization Parity | Live API Status | Notes |
+|---|---|---|---|---|---|
+| `watched_count` | `len(WatchList/ItemArray/Item)` | `userWatchList.total` or `watchListCount` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | Official docs reference both `total` and `watchListCount` / `watchListMaximum`. |
+| `item_id` | `Item/ItemID` (`"123456789012"`) | `itemId` / `legacyItemId` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | `normalize_watchlist_item_id()` normalizes composite `v1\|123456789012\|0` to `"123456789012"`. |
+| `title` | `Item/Title` | `title` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | String title comparison. |
+| `current_price` | `Item/SellingStatus/CurrentPrice` (fallback `StartPrice`) | `price.value` / `currentPrice.amount` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | String decimal values normalize to `float`. |
+| `currency` | `CurrentPrice/@currencyID` | `price.currency` / `currencyCode` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | ISO 4217 currency code. |
+| `listing_type` | `Item/ListingType` (`Chinese`, `FixedPriceItem`) | `formatType` / `buyingOptions` (`AUCTION`, `FIXED_PRICE`) | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | `normalize_listing_type_category()` maps both XML and GraphQL formats to `"auction"` or `"fixed_price"`. |
+| `end_time` | `Item/ListingDetails/EndTime` | `itemEndDate` / `endTime` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Parsed to UTC `datetime` via `parse_ebay_time()`. |
+| `url` | `Item/ListingDetails/ViewItemURL` | `itemWebUrl` / `itemUrl` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Canonical item URL matching strips tracking query parameters and title slugs. |
+| `image` | `Item/PictureDetails/GalleryURL` | `image.imageUrl` / `galleryUrl` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Matches canonical eBay CDN asset hash across thumbnail resolutions (`s-l140` vs. `s-l500`). |
+| `bid_count` | `Item/SellingStatus/BidCount` | `bidCount` / `bids` | **Missing field / Unverified** (`missing_field` / `unverified`) | **[UNVERIFIED]** | Must verify live whether `userWatchList` exposes `bidCount` on watched auction items. |
+
+### 7.2 Running the Read-Only Validation Harness
+
+The validation harness (`scripts/validate_watchlist_parity.py`) makes **zero network calls** unless `--live` is explicitly supplied, and redacts all credentials, tokens, item IDs, titles, prices, and URLs from its output:
+
+```bash
+# 1. Offline synthetic demo (zero network calls, no credentials required):
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --synthetic-demo
+
+# 2. Live read-only validation using local .env credentials (maintainer opt-in):
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --live --output watchlist_parity.local.md
+
+# 3. Live read-only validation using an existing HA core.config_entries file (read-only):
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --live \
+  --ha-config-entries /path/to/.storage/core.config_entries \
+  --output watchlist_parity.local.md
+```

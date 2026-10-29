@@ -9,3 +9,6 @@ __pycache__/
 .DS_Store
 .devcontainer/ha-config/*
 !.devcontainer/ha-config/configuration.yaml
+*.local.json
+*.local.md
+.parity_reports/
