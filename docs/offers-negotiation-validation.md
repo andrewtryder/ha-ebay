@@ -54,12 +54,14 @@ Milestone 6 resolves critical architectural boundaries between distinct eBay off
 
 ### 3.1 Seller Best Offer Negotiation History
 - **Candidate GraphQL Operation**: `sellerNegotiationHistory` **`[UNVERIFIED]`**.
+- **Official Status**: Documented as a top-level query root in eBay's October 26, 2026 release notes **`[OFFICIAL SPEC]`**. However, all nested selection sets, input arguments (such as `limit`, `offset`, `after`), and pagination structure (`pageInfo`, `edges`, `nodes`) remain **exploratory candidate schemas** requiring live resolver verification **`[UNVERIFIED]`**.
 - **Legacy XML Operation**: `GetBestOffers` (role `Seller`) **`[OFFICIAL SPEC]`** **`[REPO_VERIFIED]`**.
 - **Role**: `Seller`.
 - **Purpose**: Retrieves incoming and historical Best Offers submitted by buyers on the seller's active listings, along with seller counteroffers and status updates.
 
 ### 3.2 Buyer Best Offer Negotiation History
 - **Candidate GraphQL Operation**: `buyerNegotiationHistory` **`[UNVERIFIED]`**.
+- **Official Status**: Referenced in migration guides as a conceptual equivalent for buyer offer history, but is an **exploratory candidate operation name**; it does **NOT** constitute proof of live account entitlement or production resolver authorization **`[UNVERIFIED]`**.
 - **Legacy XML Operation**: `GetMyeBayBuying` (`BestOfferList`) **`[OFFICIAL SPEC]`** **`[OFFLINE_TESTED]`**.
 - **Role**: `Buyer`.
 - **Purpose**: Retrieves outgoing Best Offers submitted by the authenticated buyer to sellers, including pending confirmation, counteroffers, and expiration.
@@ -184,13 +186,20 @@ All candidate probes are validated via `validate_read_only_query()` and statical
 
 ## 7. Bounded Pagination & Completeness Engine
 
-To protect Home Assistant against unbounded loops and contradictory responses, `merge_graphql_offers_pages()` enforces:
+To protect Home Assistant against unbounded loops, partial responses, and false-positive parity claims, `normalize_graphql_offers_payload()`, `merge_graphql_offers_pages()`, and `compare_offers_snapshots()` implement a strict **fail-closed completeness contract**:
 
-- **Loop & Cycle Detection**: Fingerprints page payloads and halts if duplicate pages are returned.
-- **Contradictory Totals**: Halts and reports `is_complete=False` if declared totals change between pages.
-- **End-of-Pages Protection**: Detects and flags pages arriving after `hasNextPage: false`.
-- **Max Page Bounds**: Pinned to `max_pages=25` (configurable up to 25). Exceeding limits sets `is_truncated=True`.
-- **Partial GraphQL Errors**: HTTP 200 responses with `errors[]` extract sanitized codes and fail closed (`is_complete=False`).
+- **Transport vs Collection Completeness**: A successful `__typename` handshake verifies transport connectivity and token validity, but returns `is_complete=False` (`HANDSHAKE_ONLY`) because no negotiation records were retrieved.
+- **Count-Only Operation Safety**: Summary count queries (e.g. `total`, `activeCount`) return reported metrics but return `is_complete=False` (`COUNT_ONLY_QUERY`) because no individual negotiation records were collected.
+- **Empty Pages Safeguard**: An empty page sequence passed to merge functions returns `is_complete=False` (`NO_PAGES_PROVIDED`).
+- **Pagination Metadata Requirement**: Responses lacking `pageInfo` or containing non-boolean `hasNextPage` values fail closed (`MISSING_PAGINATION_METADATA`, `MALFORMED_PAGE_INFO`).
+- **Pending Continuation Safety**: Any collection whose final page declares `hasNextPage: True` (or non-false) fails closed as incomplete (`PENDING_CONTINUATION`).
+- **Reconciliation of Declared Totals vs Census**: Total collected records must strictly equal the declared total count (`TOTAL_RECORDS_MISMATCH`). If no total is declared, census completeness cannot be proven (`UNVERIFIED_COLLECTION_CENSUS`).
+- **Duplicate & Cycle Detection**: Duplicate page payloads trigger `PAGINATION_CYCLE_DETECTED`; duplicate negotiation IDs across pages trigger `DUPLICATE_OFFER_ID_ACROSS_PAGES`.
+- **Pages After End Protection**: Additional pages received after `hasNextPage: false` trigger `PAGES_AFTER_END_DECLARED`.
+- **Max Page Bounds**: Pinned to `max_pages=25` (configurable up to 25). Traversal beyond this limit halts and sets `is_truncated=True` (`MAX_PAGES_EXCEEDED`).
+- **Strict Identity Set Parity**: Candidate and XML records must have exact identity matching (`xml_ids == cand_ids`). Any extra, missing, or duplicate negotiation IDs cause parity failure.
+- **Empty Snapshot Parity (Anti-False-Positive)**: When both XML and Candidate snapshots have 0 records, aggregate counts match (`exact_match`), but all record-level fields are evaluated as `unverified`. The snapshot's overall status is classified as `inconclusive`, preventing false-positive pass claims when no records were available to verify.
+- **Partial GraphQL Errors**: HTTP 200 responses containing GraphQL `errors[]` extract sanitized codes and fail closed (`is_complete=False`).
 
 ---
 
@@ -211,13 +220,12 @@ To protect Home Assistant against unbounded loops and contradictory responses, `
 
 ## 9. Privacy & Diagnostic Protection
 
-`sanitize_offers_parity_report()` ensures zero leaks in parity reports:
+`sanitize_offers_parity_report()` ensures zero diagnostic leaks or credential exposure in validation reports:
 
-- Complete redaction of `access_token`, `refresh_token`, `client_secret`, `runame`, `authorization`.
-- Redaction of free-text message bodies (`message`, `buyer_message`, `seller_message`).
-- Redaction of buyer handles and usernames (`buyer_username`, `seller_username`, `buyer_id`).
-- Redaction of buyer feedback scores and email addresses.
-- Redaction of raw bearer tokens matching `v^1.1#...` patterns.
+- **Strict Token & Secret Redaction**: Redacts `access_token`, `refresh_token`, `client_secret`, `client_id`, `runame`, `authorization`, `auth_code`, `api_key`, `raw_xml`, `raw_graphql`, `email`, `password`, `secret`.
+- **Bearer Token Sanitization**: Recursively scrubs token patterns (`Bearer ...`, `v^1.1#...`, `refresh_token=...`) and email patterns from all report strings, diagnostics, and error messages.
+- **Message & PII Scrubbing**: Redacts free-text message bodies (`message`, `buyer_message`, `seller_message`), usernames/IDs (`buyer_username`, `seller_username`, `buyer_id`, `seller_id`), titles (`title`, `listing_title`), and feedback scores.
+- **Deterministic SHA-256 Identifier Pseudonymization**: Rather than removing raw listing IDs from summary maps, `active_offers_by_item_id` converts listing item IDs to deterministic 12-character SHA-256 pseudonyms (`item_<sha256_12>`). This preserves per-item count grouping structure in diagnostic reports without exposing sensitive production eBay listing identifiers.
 
 ---
 
@@ -232,14 +240,24 @@ uv run python scripts/validate_offers_parity.py
 # Offline verification for buyer negotiations specifically:
 uv run python scripts/validate_offers_parity.py --role buyer
 
+# Explicit synthetic demonstration mode:
+uv run python scripts/validate_offers_parity.py --synthetic-demo --role seller
+
 # Offline comparison of local file fixtures:
 uv run python scripts/validate_offers_parity.py \
   --xml-fixture tests/fixtures/offers.xml \
   --graphql-fixture tests/fixtures/negotiations.json
 
 # Opt-in read-only live validation (explicit credentials required):
-uv run python scripts/validate_offers_parity.py --live --env-file .env.local --role seller
+uv run python scripts/validate_offers_parity.py --live --env-file .env.local --role seller --max-pages 5
 ```
+
+### Synthetic Demo Limitations
+The `--synthetic-demo` mode runs entirely locally against bundled synthetic fixtures. It validates parser logic, data normalization, parity comparison algorithms, diagnostic sanitization, and CLI rendering. It makes **zero network requests** and does **NOT** prove:
+- Live eBay GraphQL Offer API endpoint availability or stability.
+- Account entitlement or resolver authorization on user keysets.
+- Field-level compatibility with live production eBay data.
+- Live scope grant mechanics or token acceptance.
 
 ---
 

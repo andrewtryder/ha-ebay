@@ -49,15 +49,19 @@ from custom_components.ebay.parsers.offers_parity import (
     is_eligible_items_payload,
     is_inventory_offer_payload,
     merge_graphql_offers_pages,
+    merge_trading_xml_buyer_offers_pages,
+    merge_trading_xml_seller_offers_pages,
     normalize_graphql_offers_payload,
     normalize_item_id,
     normalize_negotiation_status,
     normalize_trading_xml_buyer_offers,
     normalize_trading_xml_seller_offers,
     parse_query_variables,
+    pseudonymize_identifier,
     rank_offers_probe_candidate,
     render_offers_parity_json,
     render_offers_parity_markdown,
+    sanitize_diagnostic_string,
     sanitize_diagnostic_token,
     sanitize_graphql_field_name,
     sanitize_graphql_operation_name,
@@ -391,6 +395,7 @@ def test_normalize_graphql_offers_handles_http200_with_errors() -> None:
             "sellerNegotiationHistory": {
                 "total": 1,
                 "negotiations": [{"negotiationId": "neg-1", "status": "ACTIVE"}],
+                "pageInfo": {"hasNextPage": False},
             }
         },
         "errors": [
@@ -406,18 +411,21 @@ def test_normalize_graphql_offers_handles_http200_with_errors() -> None:
     }
     res = normalize_graphql_offers_payload(payload)
     assert res.is_complete is False
-    assert len(res.errors) == 1
-    assert res.errors[0]["code"] == "FORBIDDEN"
-    assert res.errors[0]["category"] == "REQUEST"
-    assert res.errors[0]["domain"] == "SECURITY"
+    assert any(e.get("code") == "FORBIDDEN" for e in res.errors)
+    for err in res.errors:
+        if err.get("code") == "FORBIDDEN":
+            assert err["category"] == "REQUEST"
+            assert err["domain"] == "SECURITY"
 
 
 def test_normalize_graphql_offers_handshake_typename() -> None:
-    """Handshake query with __typename succeeds as handshake probe."""
+    """Handshake query with __typename succeeds as handshake probe but is not complete collection."""
     payload = {"data": {"__typename": "Query"}}
     res = normalize_graphql_offers_payload(payload)
-    assert res.is_complete is True
+    assert res.is_complete is False
+    assert any(e["code"] == "HANDSHAKE_ONLY" for e in res.errors)
     assert res.diagnostics.get("handshake_typename") == "Query"
+    assert res.diagnostics.get("operation_kind") == "handshake_only"
 
 
 def test_normalize_graphql_offers_malformed_payload() -> None:
@@ -908,20 +916,23 @@ def test_xml_offers_parsing_edge_cases() -> None:
     # XML with Errors block
     err_xml = """<?xml version="1.0" encoding="utf-8"?>
 <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Failure</Ack>
   <Errors>
     <ErrorCode>1001</ErrorCode>
     <SeverityCode>Error</SeverityCode>
+    <ShortMessage>Database temporarily unavailable</ShortMessage>
   </Errors>
 </GetBestOffersResponse>
 """
     res_err = normalize_trading_xml_seller_offers(err_xml)
     assert res_err.is_complete is False
-    assert len(res_err.errors) == 1
-    assert res_err.errors[0]["code"] == "1001"
+    assert any(e["code"] == "1001" for e in res_err.errors)
+    assert any(e["code"] == "XML_ACK_FAILURE" for e in res_err.errors)
 
     # XML with Role="Buyer" or missing ItemID
     skip_xml = """<?xml version="1.0" encoding="utf-8"?>
 <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
   <ItemBestOffersArray>
     <ItemBestOffers>
       <Role>Buyer</Role>
@@ -942,6 +953,7 @@ def test_xml_offers_parsing_edge_cases() -> None:
     # Buyer XML with Errors and missing BestOfferList
     buyer_err_xml = """<?xml version="1.0" encoding="utf-8"?>
 <GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Warning</Ack>
   <Errors>
     <ErrorCode>1002</ErrorCode>
     <SeverityCode>Warning</SeverityCode>
@@ -997,7 +1009,7 @@ def test_graphql_normalization_sequence_and_edges() -> None:
     assert res_edges.negotiations[0].negotiation_id == "edge-1"
     assert res_edges.negotiations[0].initiator_role == "buyer"
 
-    # Both empty snapshots comparison
+    # Both empty snapshots comparison: fail-closed / inconclusive for record-level fields
     empty_xml = OfferCollectionResult(
         negotiations=(),
         total_count=0,
@@ -1015,7 +1027,9 @@ def test_graphql_normalization_sequence_and_edges() -> None:
         is_truncated=False,
     )
     comp_empty = compare_offers_snapshots(empty_xml, empty_cand)
-    assert comp_empty["overall_status"] == "pass"
+    assert comp_empty["overall_status"] == "inconclusive"
+    assert comp_empty["is_inconclusive"] is True
+    assert comp_empty["field_counts"][PARITY_UNVERIFIED] == 10
 
     # No matched IDs
     mismatch_cand = OfferCollectionResult(
@@ -1132,3 +1146,538 @@ async def test_cli_async_run_live_validation_mocked() -> None:
         )
         assert res["mode"] == "live_validation"
         assert res["reports"]["seller"]["overall_status"] == "pass"
+
+
+# ---------------------------------------------------------------------------
+# Test PR #100 Hardening: Pagination, Census, XML Failure, and Privacy
+# ---------------------------------------------------------------------------
+def test_normalize_graphql_offers_count_only_fails_closed() -> None:
+    """Count-only GraphQL query (total without negotiations) fails closed."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 5,
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload)
+    assert res.is_complete is False
+    assert any(e["code"] == "COUNT_ONLY_QUERY" for e in res.errors)
+
+
+def test_normalize_graphql_offers_missing_page_info_fails_closed() -> None:
+    """Missing pageInfo metadata cannot be treated as evidence of completion."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 1,
+                "negotiations": [{"negotiationId": "neg-1", "status": "ACTIVE"}],
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload)
+    assert res.is_complete is False
+    assert any(e["code"] == "MISSING_PAGINATION_METADATA" for e in res.errors)
+
+
+def test_normalize_graphql_offers_malformed_page_info_fails_closed() -> None:
+    """Non-boolean hasNextPage fails closed as malformed page info."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 1,
+                "negotiations": [{"negotiationId": "neg-1", "status": "ACTIVE"}],
+                "pageInfo": {"hasNextPage": "true"},  # String, not boolean
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload)
+    assert res.is_complete is False
+    assert res.is_truncated is True
+    assert any(e["code"] == "MALFORMED_PAGE_INFO" for e in res.errors)
+
+
+def test_normalize_graphql_offers_missing_negotiation_id_fails_closed() -> None:
+    """Negotiation item missing ID fails closed."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 1,
+                "negotiations": [{"status": "ACTIVE", "price": {"value": 10.0}}],
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload)
+    assert res.is_complete is False
+    assert any(e["code"] == "MISSING_NEGOTIATION_ID" for e in res.errors)
+
+
+def test_normalize_graphql_offers_role_mismatch_fails_closed() -> None:
+    """Negotiation with conflicting role fails closed."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 1,
+                "negotiations": [
+                    {
+                        "negotiationId": "neg-1",
+                        "role": "BUYER",  # conflicting with default role SELLER
+                        "status": "ACTIVE",
+                    }
+                ],
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload, role=NegotiationRole.SELLER)
+    assert res.is_complete is False
+    assert any(e["code"] == "ROLE_MISMATCH" for e in res.errors)
+
+
+def test_normalize_graphql_offers_total_records_mismatch_fails_closed() -> None:
+    """Declared total differing from collected records fails closed."""
+    payload = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 5,
+                "negotiations": [{"negotiationId": "neg-1", "status": "ACTIVE"}],
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = normalize_graphql_offers_payload(payload)
+    assert res.is_complete is False
+    assert any(e["code"] == "TOTAL_RECORDS_MISMATCH" for e in res.errors)
+
+
+def test_merge_graphql_offers_pages_empty_fails_closed() -> None:
+    """Empty list of pages is not evidence of a verified empty collection."""
+    res = merge_graphql_offers_pages([])
+    assert res.is_complete is False
+    assert any(e["code"] == "NO_PAGES_PROVIDED" for e in res.errors)
+
+
+def test_merge_graphql_offers_pages_pending_continuation_fails_closed() -> None:
+    """Final page with hasNextPage=True never produces is_complete=True."""
+    p1 = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 2,
+                "negotiations": [{"negotiationId": "neg-1"}],
+                "pageInfo": {"hasNextPage": True},
+            }
+        }
+    }
+    res = merge_graphql_offers_pages([p1])
+    assert res.is_complete is False
+    assert res.is_truncated is True
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res.errors)
+
+
+def test_merge_graphql_offers_pages_duplicate_id_across_pages() -> None:
+    """Duplicate negotiation ID across pages fails closed."""
+    p1 = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 2,
+                "negotiations": [{"negotiationId": "neg-repeat"}],
+                "pageInfo": {"hasNextPage": True},
+            }
+        }
+    }
+    p2 = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "total": 2,
+                "negotiations": [{"negotiationId": "neg-repeat"}],
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = merge_graphql_offers_pages([p1, p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "DUPLICATE_OFFER_ID_ACROSS_PAGES" for e in res.errors)
+
+
+def test_merge_graphql_offers_pages_unverified_census_when_total_none() -> None:
+    """Pages lacking declared total count cannot be verified complete."""
+    p1 = {
+        "data": {
+            "sellerNegotiationHistory": {
+                "negotiations": [{"negotiationId": "neg-1"}],
+                "pageInfo": {"hasNextPage": False},
+            }
+        }
+    }
+    res = merge_graphql_offers_pages([p1])
+    assert res.is_complete is False
+    assert any(e["code"] == "UNVERIFIED_COLLECTION_CENSUS" for e in res.errors)
+
+
+def test_trading_xml_seller_offers_multi_page_merge() -> None:
+    """Multi-page seller Trading XML responses merge into a complete collection."""
+    xml_p1 = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ItemBestOffersArray>
+    <ItemBestOffers>
+      <Role>Seller</Role>
+      <Item><ItemID>item-1</ItemID></Item>
+      <BestOfferArray>
+        <BestOffer><BestOfferID>off-1</BestOfferID><Status>Active</Status></BestOffer>
+      </BestOfferArray>
+    </ItemBestOffers>
+  </ItemBestOffersArray>
+  <PaginationResult>
+    <TotalNumberOfPages>2</TotalNumberOfPages>
+    <TotalNumberOfEntries>2</TotalNumberOfEntries>
+  </PaginationResult>
+</GetBestOffersResponse>
+"""
+    xml_p2 = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ItemBestOffersArray>
+    <ItemBestOffers>
+      <Role>Seller</Role>
+      <Item><ItemID>item-2</ItemID></Item>
+      <BestOfferArray>
+        <BestOffer><BestOfferID>off-2</BestOfferID><Status>Active</Status></BestOffer>
+      </BestOfferArray>
+    </ItemBestOffers>
+  </ItemBestOffersArray>
+  <PaginationResult>
+    <TotalNumberOfPages>2</TotalNumberOfPages>
+    <TotalNumberOfEntries>2</TotalNumberOfEntries>
+  </PaginationResult>
+</GetBestOffersResponse>
+"""
+    res = merge_trading_xml_seller_offers_pages([xml_p1, xml_p2])
+    assert res.is_complete is True
+    assert len(res.negotiations) == 2
+    assert res.total_active_offers == 2
+    assert res.active_offers_by_item_id == {"item-1": 1, "item-2": 1}
+
+
+def test_trading_xml_seller_offers_multi_page_truncated() -> None:
+    """Seller Trading XML with missing pages is flagged truncated and incomplete."""
+    xml_p1 = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ItemBestOffersArray>
+    <ItemBestOffers>
+      <Role>Seller</Role>
+      <Item><ItemID>item-1</ItemID></Item>
+      <BestOfferArray>
+        <BestOffer><BestOfferID>off-1</BestOfferID><Status>Active</Status></BestOffer>
+      </BestOfferArray>
+    </ItemBestOffers>
+  </ItemBestOffersArray>
+  <PaginationResult>
+    <TotalNumberOfPages>2</TotalNumberOfPages>
+    <TotalNumberOfEntries>2</TotalNumberOfEntries>
+  </PaginationResult>
+</GetBestOffersResponse>
+"""
+    res = merge_trading_xml_seller_offers_pages([xml_p1])
+    assert res.is_complete is False
+    assert res.is_truncated is True
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res.errors)
+
+
+def test_trading_xml_seller_offers_multi_page_duplicate_id() -> None:
+    """Duplicate offer ID across XML pages fails closed."""
+    xml_p1 = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ItemBestOffersArray>
+    <ItemBestOffers>
+      <Role>Seller</Role>
+      <Item><ItemID>item-1</ItemID></Item>
+      <BestOfferArray>
+        <BestOffer><BestOfferID>off-dup</BestOfferID><Status>Active</Status></BestOffer>
+      </BestOfferArray>
+    </ItemBestOffers>
+  </ItemBestOffersArray>
+  <PaginationResult>
+    <TotalNumberOfPages>2</TotalNumberOfPages>
+    <TotalNumberOfEntries>2</TotalNumberOfEntries>
+  </PaginationResult>
+</GetBestOffersResponse>
+"""
+    xml_p2 = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <ItemBestOffersArray>
+    <ItemBestOffers>
+      <Role>Seller</Role>
+      <Item><ItemID>item-2</ItemID></Item>
+      <BestOfferArray>
+        <BestOffer><BestOfferID>off-dup</BestOfferID><Status>Active</Status></BestOffer>
+      </BestOfferArray>
+    </ItemBestOffers>
+  </ItemBestOffersArray>
+  <PaginationResult>
+    <TotalNumberOfPages>2</TotalNumberOfPages>
+    <TotalNumberOfEntries>2</TotalNumberOfEntries>
+  </PaginationResult>
+</GetBestOffersResponse>
+"""
+    res = merge_trading_xml_seller_offers_pages([xml_p1, xml_p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "DUPLICATE_OFFER_ID_ACROSS_PAGES" for e in res.errors)
+
+
+def test_trading_xml_buyer_offers_multi_page_merge() -> None:
+    """Multi-page buyer Trading XML responses merge into a complete collection."""
+    xml_b1 = """<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <BestOfferList>
+    <ItemArray>
+      <Item>
+        <ItemID>item-b1</ItemID>
+        <BestOfferDetails><BestOffer><BestOfferID>off-b1</BestOfferID><Status>Active</Status></BestOffer></BestOfferDetails>
+      </Item>
+    </ItemArray>
+    <PaginationResult>
+      <TotalNumberOfPages>2</TotalNumberOfPages>
+      <TotalNumberOfEntries>2</TotalNumberOfEntries>
+    </PaginationResult>
+  </BestOfferList>
+</GetMyeBayBuyingResponse>
+"""
+    xml_b2 = """<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Success</Ack>
+  <BestOfferList>
+    <ItemArray>
+      <Item>
+        <ItemID>item-b2</ItemID>
+        <BestOfferDetails><BestOffer><BestOfferID>off-b2</BestOfferID><Status>Active</Status></BestOffer></BestOfferDetails>
+      </Item>
+    </ItemArray>
+    <PaginationResult>
+      <TotalNumberOfPages>2</TotalNumberOfPages>
+      <TotalNumberOfEntries>2</TotalNumberOfEntries>
+    </PaginationResult>
+  </BestOfferList>
+</GetMyeBayBuyingResponse>
+"""
+    res = merge_trading_xml_buyer_offers_pages([xml_b1, xml_b2])
+    assert res.is_complete is True
+    assert len(res.negotiations) == 2
+
+
+def test_trading_xml_normalization_failures() -> None:
+    """Verify XML failures: invalid root, Ack=Failure, Ack=PartialFailure, and empty string."""
+    assert normalize_trading_xml_seller_offers("").is_complete is False
+    assert normalize_trading_xml_seller_offers("<InvalidRoot/>").is_complete is False
+    assert normalize_trading_xml_seller_offers("<NotClosed").is_complete is False
+
+    fail_xml = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>Failure</Ack>
+  <Errors><ErrorCode>931</ErrorCode></Errors>
+</GetBestOffersResponse>
+"""
+    res_fail = normalize_trading_xml_seller_offers(fail_xml)
+    assert res_fail.is_complete is False
+    assert any(e["code"] == "XML_ACK_FAILURE" for e in res_fail.errors)
+
+    partial_xml = """<?xml version="1.0" encoding="utf-8"?>
+<GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+  <Ack>PartialFailure</Ack>
+</GetBestOffersResponse>
+"""
+    res_part = normalize_trading_xml_seller_offers(partial_xml)
+    assert res_part.is_complete is False
+    assert any(e["code"] == "XML_ACK_PARTIAL_FAILURE" for e in res_part.errors)
+
+
+def test_compare_offers_snapshots_equal_counts_different_ids() -> None:
+    """Matching counts but completely different IDs fails parity."""
+    xml_snap = OfferCollectionResult(
+        negotiations=(
+            NormalizedNegotiation(
+                negotiation_id="id-100",
+                item_id="item-A",
+                role=NegotiationRole.SELLER,
+                status=NegotiationStatus.ACTIVE,
+                price=10.0,
+            ),
+        ),
+        total_count=1,
+        active_offers_by_item_id={"item-A": 1},
+        total_active_offers=1,
+        is_complete=True,
+    )
+    cand_snap = OfferCollectionResult(
+        negotiations=(
+            NormalizedNegotiation(
+                negotiation_id="id-200",  # Different ID!
+                item_id="item-A",
+                role=NegotiationRole.SELLER,
+                status=NegotiationStatus.ACTIVE,
+                price=10.0,
+            ),
+        ),
+        total_count=1,
+        active_offers_by_item_id={"item-A": 1},
+        total_active_offers=1,
+        is_complete=True,
+    )
+    comp = compare_offers_snapshots(xml_snap, cand_snap)
+    assert comp["overall_status"] == "fail"
+    assert (
+        comp["field_comparisons"]["negotiation_id"]["status"]
+        == PARITY_DIFFERENT_SEMANTICS
+    )
+
+
+def test_compare_offers_snapshots_extra_and_missing_records() -> None:
+    """Extra candidate records or missing records cause parity failure."""
+    neg1 = NormalizedNegotiation(
+        negotiation_id="id-1",
+        item_id="item-1",
+        role=NegotiationRole.SELLER,
+        status=NegotiationStatus.ACTIVE,
+    )
+    neg2 = NormalizedNegotiation(
+        negotiation_id="id-2",
+        item_id="item-2",
+        role=NegotiationRole.SELLER,
+        status=NegotiationStatus.ACTIVE,
+    )
+
+    xml_snap = OfferCollectionResult(
+        negotiations=(neg1,),
+        total_count=1,
+        active_offers_by_item_id={"item-1": 1},
+        total_active_offers=1,
+        is_complete=True,
+    )
+    cand_extra = OfferCollectionResult(
+        negotiations=(neg1, neg2),
+        total_count=2,
+        active_offers_by_item_id={"item-1": 1, "item-2": 1},
+        total_active_offers=2,
+        is_complete=True,
+    )
+
+    comp = compare_offers_snapshots(xml_snap, cand_extra)
+    assert comp["overall_status"] == "fail"
+    assert "extra in candidate" in comp["field_comparisons"]["negotiation_id"]["note"]
+
+
+def test_compare_offers_snapshots_role_conflicts() -> None:
+    """Role mismatch between XML and candidate records flags different semantics."""
+    neg_xml = NormalizedNegotiation(
+        negotiation_id="id-1",
+        item_id="item-1",
+        role=NegotiationRole.SELLER,
+        status=NegotiationStatus.ACTIVE,
+    )
+    neg_cand = NormalizedNegotiation(
+        negotiation_id="id-1",
+        item_id="item-1",
+        role=NegotiationRole.BUYER,
+        status=NegotiationStatus.ACTIVE,
+    )
+
+    xml_snap = OfferCollectionResult(
+        negotiations=(neg_xml,),
+        total_count=1,
+        active_offers_by_item_id={"item-1": 1},
+        total_active_offers=1,
+        is_complete=True,
+    )
+    cand_snap = OfferCollectionResult(
+        negotiations=(neg_cand,),
+        total_count=1,
+        active_offers_by_item_id={"item-1": 1},
+        total_active_offers=1,
+        is_complete=True,
+    )
+
+    comp = compare_offers_snapshots(xml_snap, cand_snap)
+    assert comp["overall_status"] == "fail"
+    assert comp["field_comparisons"]["role"]["status"] == PARITY_DIFFERENT_SEMANTICS
+
+
+def test_privacy_adversarial_tokens_credentials_and_emails_scrubbed() -> None:
+    """Report sanitization scrubs Bearer tokens, refresh tokens, emails, secrets, and raw item IDs."""
+    dirty_report = {
+        "role": "seller",
+        "overall_status": "pass",
+        "active_offers_by_item_id": {
+            "110000000001": 2,
+            "110000000002": 1,
+        },
+        "field_comparisons": {
+            "selling_total_offers": {
+                "status": "exact_match",
+                "note": "Token Bearer v^1.1#secret-raw-token leaked!",
+            },
+            "status": {
+                "status": "exact_match",
+                "note": "Contact user@example.com for refresh_token=secret_refresh_val",
+            },
+        },
+        "errors": [
+            {
+                "code": "FORBIDDEN",
+                "diagnostic": "Failed with client_secret=very_secret_key and access_token=Bearer tok123",
+            }
+        ],
+        "access_token": "Bearer should-be-dropped",
+        "refresh_token": "should-be-dropped",
+        "client_secret": "should-be-dropped",
+    }
+
+    sanitized = sanitize_offers_parity_report(dirty_report)
+
+    # 1. Forbidden keys must be dropped
+    assert "access_token" not in sanitized
+    assert "refresh_token" not in sanitized
+    assert "client_secret" not in sanitized
+
+    # 2. Raw item IDs must be pseudonymized
+    for key in sanitized["active_offers_by_item_id"]:
+        assert key.startswith("item_")
+        assert "110000000001" not in key
+        assert "110000000002" not in key
+
+    # 3. String notes and diagnostics must have tokens and secrets redacted
+    md_text = render_offers_parity_markdown(dirty_report)
+    json_text = render_offers_parity_json(dirty_report)
+
+    for text in (md_text, json_text):
+        assert "v^1.1#secret-raw-token" not in text
+        assert "user@example.com" not in text
+        assert "secret_refresh_val" not in text
+        assert "very_secret_key" not in text
+        assert "should-be-dropped" not in text
+        assert "[REDACTED_TOKEN]" in text
+        assert "[REDACTED_EMAIL]" in text
+
+
+def test_pseudonymize_identifier_and_sanitize_diagnostic_string() -> None:
+    """Direct tests for deterministic pseudonymization and diagnostic string scrubbing."""
+    assert pseudonymize_identifier("123456789012").startswith("item_")
+    assert pseudonymize_identifier("123456789012") == pseudonymize_identifier(
+        "123456789012"
+    )
+    assert pseudonymize_identifier("item-1") != pseudonymize_identifier("item-2")
+    assert pseudonymize_identifier(None) is None
+    assert pseudonymize_identifier(12345) == "12345"
+
+    dirty_str = "Auth Bearer v^1.1#tok email dev@example.com refresh_token=secret_val"
+    cleaned = sanitize_diagnostic_string(dirty_str)
+    assert "v^1.1#tok" not in cleaned
+    assert "dev@example.com" not in cleaned
+    assert "secret_val" not in cleaned
+    assert "[REDACTED_TOKEN]" in cleaned
+    assert "[REDACTED_EMAIL]" in cleaned

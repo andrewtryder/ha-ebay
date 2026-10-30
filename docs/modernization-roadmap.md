@@ -105,13 +105,14 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 
 ### 7. Best Offers and Negotiation History Validation (Milestone 6)
 - **Authoritative API Research & Contract Discovery**:
-  - Researched eBay GraphQL Offer API (`sellerNegotiationHistory`, `buyerNegotiationHistory`, released October 26, 2026).
+  - Researched eBay GraphQL Offer API (`sellerNegotiationHistory` root query documented October 26, 2026; candidate selection sets and `buyerNegotiationHistory` exploratory).
   - Established critical distinctions between incoming Best Offer negotiations, REST Sell Negotiation discount eligibility (`find_eligible_items`), and REST Sell Inventory listing-offer objects (`getOffer`).
   - Preserved existing production baseline: seller `GetBestOffers` active offer counts (`active_offers_by_item_id()`) feeding `{entry_id}_selling_total_offers`, per-item `offers` sensors, and `offer_received` events.
   - Maintained zero production buyer offer polling to prevent exposing unfinished buyer entities.
 - **Read-Only Offers Parity Validation Module & Offline Harness**:
   - Added [`custom_components/ebay/parsers/offers_parity.py`](../custom_components/ebay/parsers/offers_parity.py) and CLI harness [`scripts/validate_offers_parity.py`](../scripts/validate_offers_parity.py).
   - Built typed, immutable models (`NormalizedNegotiation`, `OfferCollectionResult`) and 8 strictly read-only GraphQL candidate probes.
-  - Evaluates all monitored offer fields across the 6-state parity taxonomy with fail-closed pagination and loop detection.
-  - Preserved privacy protections: zero tokens, secrets, client credentials, buyer usernames, or private offer prices in reports.
+  - Evaluates all monitored offer fields across the 6-state parity taxonomy with fail-closed bounded multi-page pagination (up to 25 pages), loop detection, pending continuation checks, and strict identity set matching.
+  - Fail-closed empty snapshot handling: empty collections evaluate record fields as unverified, reporting inconclusive status rather than false-positive pass claims.
+  - Preserved privacy protections: zero tokens, secrets, client credentials, buyer usernames, or private offer prices in reports; listing IDs in active offer count maps are pseudonymized with deterministic SHA-256 hashes (`item_<sha256_12>`).
   - Milestone status: **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Next planned workstream: **Milestone 7 (Sold/Unsold Listing Classification Package)**.

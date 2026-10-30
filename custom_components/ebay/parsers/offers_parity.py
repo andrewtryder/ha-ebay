@@ -8,6 +8,7 @@ without exposing credentials, private pricing data, or private account details.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -120,12 +121,47 @@ FORBIDDEN_REPORT_KEYS: frozenset[str] = frozenset(
         "seller_id",
         "feedback_score",
         "email",
+        "password",
+        "secret",
+        "user_email",
+        "phone",
+        "title",
+        "listing_title",
     }
 )
 
 _EBAY_TOKEN_PATTERN = re.compile(
-    r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+)", re.IGNORECASE
+    r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+|refresh_token=[^\s&\"']+)", re.IGNORECASE
 )
+_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+
+
+def pseudonymize_identifier(val: str, prefix: str = "id") -> str:
+    """Return a deterministic, privacy-preserving 12-char SHA-256 pseudonym."""
+    if not val:
+        return ""
+    h = hashlib.sha256(val.strip().encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}_{h}"
+
+
+def sanitize_diagnostic_string(val: str) -> str:
+    """Sanitize arbitrary strings, redacting auth tokens, emails, and sensitive patterns."""
+    if not isinstance(val, str):
+        return str(val)
+    # Redact eBay access/refresh tokens
+    text = _EBAY_TOKEN_PATTERN.sub("[REDACTED_TOKEN]", val)
+    # Redact email addresses
+    text = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", text)
+    # Redact sensitive key=value patterns in query strings or diagnostic messages
+    text = re.sub(
+        r"(client_secret|client_id|refresh_token|password|secret|runame|token)=([^&\s\"']+)",
+        r"\1=[REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text
+
+
 _VARIABLE_DECL_RE = re.compile(
     r"\$([_A-Za-z][_0-9A-Za-z]*)\s*:\s*([^,=)]+?)(?:\s*=\s*([^,)]+))?(?=[,)])"
 )
@@ -168,6 +204,32 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "LISTING_NOT_FOUND",
         "OFFER_NOT_FOUND",
         "NEGOTIATION_NOT_FOUND",
+        "HANDSHAKE_ONLY",
+        "COUNT_ONLY_QUERY",
+        "COUNT_ONLY_OPERATION",
+        "MISSING_PAGINATION_METADATA",
+        "MALFORMED_PAGE_INFO",
+        "TOTAL_RECORDS_MISMATCH",
+        "MISSING_NEGOTIATION_ID",
+        "DUPLICATE_OFFER_ID",
+        "DUPLICATE_OFFER_ID_ACROSS_PAGES",
+        "ROLE_MISMATCH",
+        "NO_PAGES_PROVIDED",
+        "MALFORMED_PAGE",
+        "PAGINATION_CYCLE_DETECTED",
+        "PAGES_AFTER_END_DECLARED",
+        "CONTRADICTORY_PAGINATION_TOTALS",
+        "MAX_PAGES_EXCEEDED",
+        "PENDING_CONTINUATION",
+        "UNVERIFIED_COLLECTION_CENSUS",
+        "XML_ACK_FAILURE",
+        "XML_ACK_PARTIAL_FAILURE",
+        "XML_ACK_MISSING",
+        "XML_ACK_UNKNOWN",
+        "INVALID_XML_ROOT",
+        "EMPTY_XML_PAYLOAD",
+        "XML_PARSE_ERROR",
+        "MISSING_REQUIRED_CONTAINER",
     }
 )
 
@@ -467,10 +529,10 @@ class NormalizedNegotiation:
     item_id: str | None
     role: NegotiationRole
     status: NegotiationStatus
-    raw_status: str | None
-    price: float | None
-    currency: str | None
-    quantity: int | None
+    raw_status: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    quantity: int | None = None
     created_at: datetime | None = None
     expires_at: datetime | None = None
     updated_at: datetime | None = None
@@ -491,7 +553,7 @@ class OfferCollectionResult:
     active_offers_by_item_id: dict[str, int]
     total_active_offers: int
     is_complete: bool
-    is_truncated: bool
+    is_truncated: bool = False
     errors: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -999,7 +1061,39 @@ def normalize_trading_xml_seller_offers(
     identical to ``active_offers_by_item_id`` in ``trading_items.py``.
     """
     if isinstance(root_or_xml, str):
-        root = ET.fromstring(root_or_xml)
+        cleaned = root_or_xml.strip()
+        if not cleaned:
+            return OfferCollectionResult(
+                negotiations=(),
+                total_count=None,
+                active_offers_by_item_id={},
+                total_active_offers=0,
+                is_complete=False,
+                is_truncated=False,
+                errors=(
+                    {
+                        "code": "EMPTY_XML_PAYLOAD",
+                        "diagnostic": "Empty XML content provided",
+                    },
+                ),
+            )
+        try:
+            root = ET.fromstring(cleaned)
+        except ET.ParseError as exc:
+            return OfferCollectionResult(
+                negotiations=(),
+                total_count=None,
+                active_offers_by_item_id={},
+                total_active_offers=0,
+                is_complete=False,
+                is_truncated=False,
+                errors=(
+                    {
+                        "code": "XML_PARSE_ERROR",
+                        "diagnostic": sanitize_diagnostic_string(str(exc)),
+                    },
+                ),
+            )
     else:
         root = root_or_xml
 
@@ -1008,17 +1102,77 @@ def normalize_trading_xml_seller_offers(
     seen_offer_ids: set[str] = set()
     errors: list[dict[str, Any]] = []
 
+    # Verify response root tag
+    if not (
+        root.tag.endswith("GetBestOffersResponse")
+        or root.tag == "GetBestOffersResponse"
+    ):
+        return OfferCollectionResult(
+            negotiations=(),
+            total_count=None,
+            active_offers_by_item_id={},
+            total_active_offers=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "INVALID_XML_ROOT",
+                    "diagnostic": f"Expected GetBestOffersResponse root, got {root.tag}",
+                },
+            ),
+        )
+
+    # Check Ack status
+    ack = _text(root, "e:Ack")
+    if ack == "Failure":
+        errors.append(
+            {
+                "code": "XML_ACK_FAILURE",
+                "diagnostic": "Trading XML returned Ack=Failure",
+            }
+        )
+    elif ack == "PartialFailure":
+        errors.append(
+            {
+                "code": "XML_ACK_PARTIAL_FAILURE",
+                "diagnostic": "Trading XML returned Ack=PartialFailure",
+            }
+        )
+    elif ack not in ("Success", "Warning"):
+        errors.append(
+            {
+                "code": "XML_ACK_MISSING",
+                "diagnostic": f"Missing or unrecognized Ack: {ack}",
+            }
+        )
+
     # Check for XML errors
     for err in root.findall("e:Errors", namespaces=NS):
         code = _text(err, "e:ErrorCode")
         severity = _text(err, "e:SeverityCode")
+        short_msg = _text(err, "e:ShortMessage")
         if code:
             errors.append(
                 {
                     "code": sanitize_diagnostic_token(code, kind="error_code"),
-                    "severity": severity,
+                    "severity": sanitize_diagnostic_token(severity, kind="category"),
+                    "diagnostic": sanitize_diagnostic_string(
+                        short_msg or f"XML error {code}"
+                    ),
                 }
             )
+
+    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages")) or 1
+    total_entries = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfEntries"))
+
+    item_array = root.find("e:ItemBestOffersArray", namespaces=NS)
+    if item_array is None and total_entries is not None and total_entries > 0:
+        errors.append(
+            {
+                "code": "MISSING_REQUIRED_CONTAINER",
+                "diagnostic": "Missing ItemBestOffersArray container despite positive TotalNumberOfEntries",
+            }
+        )
 
     for item_offers in root.findall(
         "e:ItemBestOffersArray/e:ItemBestOffers", namespaces=NS
@@ -1052,7 +1206,14 @@ def normalize_trading_xml_seller_offers(
             # Counteroffer if present
             counter_price, counter_curr = _money(offer_el, "e:CounterOfferPrice")
 
-            if offer_id and offer_id in seen_offer_ids:
+            if not offer_id:
+                errors.append(
+                    {
+                        "code": "MISSING_NEGOTIATION_ID",
+                        "diagnostic": "Trading XML BestOffer missing required BestOfferID",
+                    }
+                )
+            elif offer_id in seen_offer_ids:
                 errors.append(
                     {
                         "code": "DUPLICATE_OFFER_ID",
@@ -1087,18 +1248,185 @@ def normalize_trading_xml_seller_offers(
         )
 
     total_active = sum(active_offers_by_item.values())
-    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages")) or 1
-    total_entries = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfEntries"))
+    is_truncated = total_pages > 1
+    has_blocking_errors = any(
+        e.get("code")
+        in (
+            "XML_ACK_FAILURE",
+            "XML_ACK_PARTIAL_FAILURE",
+            "XML_ACK_MISSING",
+            "INVALID_XML_ROOT",
+            "XML_PARSE_ERROR",
+            "MISSING_REQUIRED_CONTAINER",
+        )
+        for e in errors
+    )
+    is_complete = not has_blocking_errors and len(errors) == 0 and not is_truncated
 
     return OfferCollectionResult(
         negotiations=tuple(negotiations),
         total_count=total_entries if total_entries is not None else len(negotiations),
         active_offers_by_item_id=active_offers_by_item,
         total_active_offers=total_active,
-        is_complete=len(errors) == 0,
-        is_truncated=total_pages > 1,
+        is_complete=is_complete,
+        is_truncated=is_truncated,
         errors=tuple(errors),
         diagnostics={"total_pages": total_pages, "total_entries": total_entries},
+    )
+
+
+def merge_trading_xml_seller_offers_pages(
+    pages: Sequence[ET.Element | str],
+    max_pages: int = 25,
+) -> OfferCollectionResult:
+    """Merge multiple pages of Trading XML GetBestOffers responses fail-closed."""
+    if not pages:
+        return OfferCollectionResult(
+            negotiations=(),
+            total_count=None,
+            active_offers_by_item_id={},
+            total_active_offers=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "NO_PAGES_PROVIDED",
+                    "diagnostic": "No XML pages provided for merging",
+                },
+            ),
+        )
+
+    all_negotiations: list[NormalizedNegotiation] = []
+    active_offers_by_item: dict[str, int] = {}
+    seen_offer_ids: set[str] = set()
+    errors: list[dict[str, Any]] = []
+    seen_fingerprints: set[str] = set()
+
+    declared_total_pages: int | None = None
+    declared_total_entries: int | None = None
+    is_truncated = False
+
+    for page_idx, page in enumerate(pages[:max_pages]):
+        # Fingerprint for cycle detection
+        page_str = (
+            page
+            if isinstance(page, str)
+            else ET.tostring(page, encoding="utf-8").decode("utf-8")
+        )
+        h = hashlib.sha256(page_str.strip().encode("utf-8")).hexdigest()
+        if h in seen_fingerprints and len(page_str) > 50:
+            errors.append(
+                {
+                    "code": "PAGINATION_CYCLE_DETECTED",
+                    "diagnostic": f"Duplicate XML page detected at page {page_idx + 1}",
+                }
+            )
+            is_truncated = True
+            break
+        seen_fingerprints.add(h)
+
+        page_res = normalize_trading_xml_seller_offers(page)
+        errors.extend(page_res.errors)
+
+        diag = page_res.diagnostics or {}
+        p_total_pages = diag.get("total_pages")
+        p_total_entries = diag.get("total_entries")
+
+        if declared_total_pages is None and p_total_pages is not None:
+            declared_total_pages = p_total_pages
+        if declared_total_entries is None and p_total_entries is not None:
+            declared_total_entries = p_total_entries
+        elif (
+            declared_total_entries is not None
+            and p_total_entries is not None
+            and declared_total_entries != p_total_entries
+        ):
+            errors.append(
+                {
+                    "code": "CONTRADICTORY_PAGINATION_TOTALS",
+                    "diagnostic": f"Declared total entries changed from {declared_total_entries} to {p_total_entries}",
+                }
+            )
+
+        for neg in page_res.negotiations:
+            if not neg.negotiation_id:
+                errors.append(
+                    {
+                        "code": "MISSING_NEGOTIATION_ID",
+                        "diagnostic": f"Offer on page {page_idx + 1} missing required identifier",
+                    }
+                )
+            elif neg.negotiation_id in seen_offer_ids:
+                errors.append(
+                    {
+                        "code": "DUPLICATE_OFFER_ID_ACROSS_PAGES",
+                        "diagnostic": f"Offer ID repeated across XML pages: {len(seen_offer_ids) + 1}",
+                    }
+                )
+            if neg.negotiation_id:
+                seen_offer_ids.add(neg.negotiation_id)
+
+            all_negotiations.append(neg)
+
+        for item_id, count in page_res.active_offers_by_item_id.items():
+            active_offers_by_item[item_id] = (
+                active_offers_by_item.get(item_id, 0) + count
+            )
+
+    if len(pages) > max_pages:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "MAX_PAGES_EXCEEDED",
+                "diagnostic": f"Total XML pages {len(pages)} exceeded limit {max_pages}",
+            }
+        )
+
+    if declared_total_pages is not None and len(pages) < declared_total_pages:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "PENDING_CONTINUATION",
+                "diagnostic": f"Retrieved {len(pages)} of {declared_total_pages} declared XML pages",
+            }
+        )
+
+    if (
+        declared_total_entries is not None
+        and len(all_negotiations) != declared_total_entries
+    ):
+        errors.append(
+            {
+                "code": "TOTAL_RECORDS_MISMATCH",
+                "diagnostic": f"Collected {len(all_negotiations)} offers but PaginationResult declared {declared_total_entries}",
+            }
+        )
+
+    is_complete = (
+        len(errors) == 0
+        and not is_truncated
+        and (declared_total_pages is not None and len(pages) >= declared_total_pages)
+        and (
+            declared_total_entries is not None
+            and len(all_negotiations) == declared_total_entries
+        )
+    )
+
+    return OfferCollectionResult(
+        negotiations=tuple(all_negotiations),
+        total_count=declared_total_entries
+        if declared_total_entries is not None
+        else len(all_negotiations),
+        active_offers_by_item_id=active_offers_by_item,
+        total_active_offers=sum(active_offers_by_item.values()),
+        is_complete=is_complete,
+        is_truncated=is_truncated,
+        errors=tuple(errors),
+        diagnostics={
+            "page_count": len(pages),
+            "declared_total_pages": declared_total_pages,
+            "declared_total_entries": declared_total_entries,
+        },
     )
 
 
@@ -1107,7 +1435,39 @@ def normalize_trading_xml_buyer_offers(
 ) -> OfferCollectionResult:
     """Parse legacy Trading XML GetMyeBayBuying (BestOfferList) into canonical OfferCollectionResult."""
     if isinstance(root_or_xml, str):
-        root = ET.fromstring(root_or_xml)
+        cleaned = root_or_xml.strip()
+        if not cleaned:
+            return OfferCollectionResult(
+                negotiations=(),
+                total_count=None,
+                active_offers_by_item_id={},
+                total_active_offers=0,
+                is_complete=False,
+                is_truncated=False,
+                errors=(
+                    {
+                        "code": "EMPTY_XML_PAYLOAD",
+                        "diagnostic": "Empty XML content provided",
+                    },
+                ),
+            )
+        try:
+            root = ET.fromstring(cleaned)
+        except ET.ParseError as exc:
+            return OfferCollectionResult(
+                negotiations=(),
+                total_count=None,
+                active_offers_by_item_id={},
+                total_active_offers=0,
+                is_complete=False,
+                is_truncated=False,
+                errors=(
+                    {
+                        "code": "XML_PARSE_ERROR",
+                        "diagnostic": sanitize_diagnostic_string(str(exc)),
+                    },
+                ),
+            )
     else:
         root = root_or_xml
 
@@ -1116,19 +1476,74 @@ def normalize_trading_xml_buyer_offers(
     seen_offer_ids: set[str] = set()
     errors: list[dict[str, Any]] = []
 
+    # Verify response root tag
+    if not (
+        root.tag.endswith("GetMyeBayBuyingResponse")
+        or root.tag == "GetMyeBayBuyingResponse"
+    ):
+        return OfferCollectionResult(
+            negotiations=(),
+            total_count=None,
+            active_offers_by_item_id={},
+            total_active_offers=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "INVALID_XML_ROOT",
+                    "diagnostic": f"Expected GetMyeBayBuyingResponse root, got {root.tag}",
+                },
+            ),
+        )
+
+    # Check Ack status
+    ack = _text(root, "e:Ack")
+    if ack == "Failure":
+        errors.append(
+            {
+                "code": "XML_ACK_FAILURE",
+                "diagnostic": "Trading XML returned Ack=Failure",
+            }
+        )
+    elif ack == "PartialFailure":
+        errors.append(
+            {
+                "code": "XML_ACK_PARTIAL_FAILURE",
+                "diagnostic": "Trading XML returned Ack=PartialFailure",
+            }
+        )
+    elif ack not in ("Success", "Warning"):
+        errors.append(
+            {
+                "code": "XML_ACK_MISSING",
+                "diagnostic": f"Missing or unrecognized Ack: {ack}",
+            }
+        )
+
     for err in root.findall("e:Errors", namespaces=NS):
         code = _text(err, "e:ErrorCode")
         severity = _text(err, "e:SeverityCode")
+        short_msg = _text(err, "e:ShortMessage")
         if code:
             errors.append(
                 {
                     "code": sanitize_diagnostic_token(code, kind="error_code"),
                     "severity": severity,
+                    "diagnostic": sanitize_diagnostic_string(
+                        short_msg or f"XML error {code}"
+                    ),
                 }
             )
 
     container = root.find("e:BestOfferList", namespaces=NS)
-    if container is not None:
+    if container is None:
+        errors.append(
+            {
+                "code": "MISSING_REQUIRED_CONTAINER",
+                "diagnostic": "Missing BestOfferList container in GetMyeBayBuyingResponse",
+            }
+        )
+    else:
         for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
             item_id = _text(item, "e:ItemID")
             if not item_id:
@@ -1153,7 +1568,14 @@ def normalize_trading_xml_buyer_offers(
                 created = _parse_iso_datetime(_text(offer_el, "e:CreationTime"))
                 expires = _parse_iso_datetime(_text(offer_el, "e:ExpirationTime"))
 
-                if offer_id and offer_id in seen_offer_ids:
+                if not offer_id:
+                    errors.append(
+                        {
+                            "code": "MISSING_NEGOTIATION_ID",
+                            "diagnostic": "Buyer BestOffer missing required BestOfferID",
+                        }
+                    )
+                elif offer_id in seen_offer_ids:
                     errors.append(
                         {
                             "code": "DUPLICATE_OFFER_ID",
@@ -1199,15 +1621,173 @@ def normalize_trading_xml_buyer_offers(
             _text(container, "e:PaginationResult/e:TotalNumberOfEntries")
         )
 
+    is_truncated = total_pages > 1
+    has_blocking_errors = any(
+        e.get("code")
+        in (
+            "XML_ACK_FAILURE",
+            "XML_ACK_PARTIAL_FAILURE",
+            "XML_ACK_MISSING",
+            "INVALID_XML_ROOT",
+            "XML_PARSE_ERROR",
+            "MISSING_REQUIRED_CONTAINER",
+        )
+        for e in errors
+    )
+    is_complete = not has_blocking_errors and len(errors) == 0 and not is_truncated
+
     return OfferCollectionResult(
         negotiations=tuple(negotiations),
         total_count=total_entries if total_entries is not None else len(negotiations),
         active_offers_by_item_id=active_offers_by_item,
         total_active_offers=total_active,
-        is_complete=len(errors) == 0,
-        is_truncated=total_pages > 1,
+        is_complete=is_complete,
+        is_truncated=is_truncated,
         errors=tuple(errors),
         diagnostics={"total_pages": total_pages, "total_entries": total_entries},
+    )
+
+
+def merge_trading_xml_buyer_offers_pages(
+    pages: Sequence[ET.Element | str],
+    max_pages: int = 25,
+) -> OfferCollectionResult:
+    """Merge multiple pages of Trading XML GetMyeBayBuying responses fail-closed."""
+    if not pages:
+        return OfferCollectionResult(
+            negotiations=(),
+            total_count=None,
+            active_offers_by_item_id={},
+            total_active_offers=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "NO_PAGES_PROVIDED",
+                    "diagnostic": "No XML pages provided for merging",
+                },
+            ),
+        )
+
+    all_negotiations: list[NormalizedNegotiation] = []
+    active_offers_by_item: dict[str, int] = {}
+    seen_offer_ids: set[str] = set()
+    errors: list[dict[str, Any]] = []
+    seen_fingerprints: set[str] = set()
+
+    declared_total_pages: int | None = None
+    declared_total_entries: int | None = None
+    is_truncated = False
+
+    for page_idx, page in enumerate(pages[:max_pages]):
+        page_str = (
+            page
+            if isinstance(page, str)
+            else ET.tostring(page, encoding="utf-8").decode("utf-8")
+        )
+        h = hashlib.sha256(page_str.strip().encode("utf-8")).hexdigest()
+        if h in seen_fingerprints and len(page_str) > 50:
+            errors.append(
+                {
+                    "code": "PAGINATION_CYCLE_DETECTED",
+                    "diagnostic": f"Duplicate XML page detected at page {page_idx + 1}",
+                }
+            )
+            is_truncated = True
+            break
+        seen_fingerprints.add(h)
+
+        page_res = normalize_trading_xml_buyer_offers(page)
+        errors.extend(page_res.errors)
+
+        diag = page_res.diagnostics or {}
+        p_total_pages = diag.get("total_pages")
+        p_total_entries = diag.get("total_entries")
+
+        if declared_total_pages is None and p_total_pages is not None:
+            declared_total_pages = p_total_pages
+        if declared_total_entries is None and p_total_entries is not None:
+            declared_total_entries = p_total_entries
+
+        for neg in page_res.negotiations:
+            if not neg.negotiation_id:
+                errors.append(
+                    {
+                        "code": "MISSING_NEGOTIATION_ID",
+                        "diagnostic": f"Buyer offer on page {page_idx + 1} missing required identifier",
+                    }
+                )
+            elif neg.negotiation_id in seen_offer_ids:
+                errors.append(
+                    {
+                        "code": "DUPLICATE_OFFER_ID_ACROSS_PAGES",
+                        "diagnostic": f"Offer ID repeated across XML pages: {len(seen_offer_ids) + 1}",
+                    }
+                )
+            if neg.negotiation_id:
+                seen_offer_ids.add(neg.negotiation_id)
+
+            all_negotiations.append(neg)
+
+        for item_id, count in page_res.active_offers_by_item_id.items():
+            active_offers_by_item[item_id] = (
+                active_offers_by_item.get(item_id, 0) + count
+            )
+
+    if len(pages) > max_pages:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "MAX_PAGES_EXCEEDED",
+                "diagnostic": f"Total XML pages {len(pages)} exceeded limit {max_pages}",
+            }
+        )
+
+    if declared_total_pages is not None and len(pages) < declared_total_pages:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "PENDING_CONTINUATION",
+                "diagnostic": f"Retrieved {len(pages)} of {declared_total_pages} declared XML pages",
+            }
+        )
+
+    if (
+        declared_total_entries is not None
+        and len(all_negotiations) != declared_total_entries
+    ):
+        errors.append(
+            {
+                "code": "TOTAL_RECORDS_MISMATCH",
+                "diagnostic": f"Collected {len(all_negotiations)} buyer offers but PaginationResult declared {declared_total_entries}",
+            }
+        )
+
+    is_complete = (
+        len(errors) == 0
+        and not is_truncated
+        and (declared_total_pages is not None and len(pages) >= declared_total_pages)
+        and (
+            declared_total_entries is not None
+            and len(all_negotiations) == declared_total_entries
+        )
+    )
+
+    return OfferCollectionResult(
+        negotiations=tuple(all_negotiations),
+        total_count=declared_total_entries
+        if declared_total_entries is not None
+        else len(all_negotiations),
+        active_offers_by_item_id=active_offers_by_item,
+        total_active_offers=sum(active_offers_by_item.values()),
+        is_complete=is_complete,
+        is_truncated=is_truncated,
+        errors=tuple(errors),
+        diagnostics={
+            "page_count": len(pages),
+            "declared_total_pages": declared_total_pages,
+            "declared_total_entries": declared_total_entries,
+        },
     )
 
 
@@ -1450,13 +2030,22 @@ def normalize_graphql_offers_payload(
         if "__typename" in data:
             return OfferCollectionResult(
                 negotiations=(),
-                total_count=0,
+                total_count=None,
                 active_offers_by_item_id={},
                 total_active_offers=0,
-                is_complete=len(errors) == 0,
+                is_complete=False,
                 is_truncated=False,
-                errors=tuple(errors),
-                diagnostics={"handshake_typename": str(data["__typename"])},
+                errors=tuple(errors)
+                + (
+                    {
+                        "code": "HANDSHAKE_ONLY",
+                        "diagnostic": "Handshake verifies connectivity only, not a negotiation collection",
+                    },
+                ),
+                diagnostics={
+                    "handshake_typename": str(data["__typename"]),
+                    "operation_kind": "handshake_only",
+                },
             )
         return OfferCollectionResult(
             negotiations=(),
@@ -1478,6 +2067,7 @@ def normalize_graphql_offers_payload(
     total_count: int | None = None
     items_raw: list[Any] = []
     page_info: dict[str, Any] = {}
+    has_items_array = False
 
     if isinstance(container, Mapping):
         # Extract total / counts
@@ -1492,13 +2082,50 @@ def normalize_graphql_offers_payload(
         for arr_key in ("negotiations", "offers", "items", "records", "nodes", "edges"):
             if arr_key in container and isinstance(container[arr_key], Sequence):
                 items_raw = list(container[arr_key])
+                has_items_array = True
                 break
 
         if isinstance(container.get("pageInfo"), Mapping):
             page_info = dict(container["pageInfo"])
     elif isinstance(container, Sequence):
         items_raw = list(container)
+        has_items_array = True
         total_count = len(items_raw)
+
+    if not has_items_array:
+        errors.append(
+            {
+                "code": "COUNT_ONLY_QUERY",
+                "diagnostic": "Count-only operation does not retrieve negotiation records",
+            }
+        )
+
+    has_page_info = (
+        isinstance(container.get("pageInfo"), Mapping)
+        if isinstance(container, Mapping)
+        else False
+    )
+    has_next: bool = False
+    raw_has_next: Any = None
+    if has_page_info:
+        raw_has_next = page_info.get("hasNextPage")
+        if not isinstance(raw_has_next, bool):
+            errors.append(
+                {
+                    "code": "MALFORMED_PAGE_INFO",
+                    "diagnostic": "pageInfo.hasNextPage must be a boolean",
+                }
+            )
+            has_next = True
+        else:
+            has_next = raw_has_next
+    else:
+        errors.append(
+            {
+                "code": "MISSING_PAGINATION_METADATA",
+                "diagnostic": "Response lacks pageInfo pagination metadata",
+            }
+        )
 
     negotiations: list[NormalizedNegotiation] = []
     active_offers_by_item: dict[str, int] = {}
@@ -1515,15 +2142,30 @@ def normalize_graphql_offers_payload(
         )
 
         normalized = normalize_graphql_negotiation_item(item_dict, default_role=role)
+        if not normalized.negotiation_id:
+            errors.append(
+                {
+                    "code": "MISSING_NEGOTIATION_ID",
+                    "diagnostic": "Negotiation item missing required identifier",
+                }
+            )
+        elif normalized.negotiation_id in seen_offer_ids:
+            errors.append(
+                {
+                    "code": "DUPLICATE_OFFER_ID",
+                    "diagnostic": f"Duplicate offer ID encountered: {len(seen_offer_ids) + 1}",
+                }
+            )
         if normalized.negotiation_id:
-            if normalized.negotiation_id in seen_offer_ids:
-                errors.append(
-                    {
-                        "code": "DUPLICATE_OFFER_ID",
-                        "diagnostic": f"Duplicate offer ID encountered: {len(seen_offer_ids) + 1}",
-                    }
-                )
             seen_offer_ids.add(normalized.negotiation_id)
+
+        if normalized.role != role:
+            errors.append(
+                {
+                    "code": "ROLE_MISMATCH",
+                    "diagnostic": f"Negotiation item role {normalized.role} does not match expected {role}",
+                }
+            )
 
         negotiations.append(normalized)
 
@@ -1533,12 +2175,25 @@ def normalize_graphql_offers_payload(
             if normalized.status in ACTIVE_NEGOTIATION_STATUSES:
                 active_offers_by_item[normalized.item_id] += 1
 
-    has_next = page_info.get("hasNextPage") is True
-    is_complete = len(errors) == 0 and not has_next
+    if total_count is not None and not has_next:
+        if total_count != len(negotiations):
+            errors.append(
+                {
+                    "code": "TOTAL_RECORDS_MISMATCH",
+                    "diagnostic": f"Declared total ({total_count}) does not match retrieved count ({len(negotiations)})",
+                }
+            )
+
+    is_complete = (
+        len(errors) == 0
+        and has_page_info
+        and (raw_has_next is False)
+        and (total_count is not None and total_count == len(negotiations))
+    )
 
     return OfferCollectionResult(
         negotiations=tuple(negotiations),
-        total_count=total_count if total_count is not None else len(negotiations),
+        total_count=total_count,
         active_offers_by_item_id=active_offers_by_item,
         total_active_offers=sum(active_offers_by_item.values()),
         is_complete=is_complete,
@@ -1562,11 +2217,17 @@ def merge_graphql_offers_pages(
     if not pages:
         return OfferCollectionResult(
             negotiations=(),
-            total_count=0,
+            total_count=None,
             active_offers_by_item_id={},
             total_active_offers=0,
-            is_complete=True,
+            is_complete=False,
             is_truncated=False,
+            errors=(
+                {
+                    "code": "NO_PAGES_PROVIDED",
+                    "diagnostic": "No pages provided for merging",
+                },
+            ),
         )
 
     all_negotiations: list[NormalizedNegotiation] = []
@@ -1581,7 +2242,15 @@ def merge_graphql_offers_pages(
     declared_end_reached = False
 
     for page_idx, page in enumerate(pages[:max_pages]):
-        # Fingerprint for cycle/loop detection
+        if not isinstance(page, Mapping):
+            errors.append(
+                {
+                    "code": "MALFORMED_PAGE",
+                    "diagnostic": f"Page {page_idx + 1} is not a valid JSON object",
+                }
+            )
+            continue
+
         raw_items_str = json.dumps(page.get("data") or {}, sort_keys=True)
         if raw_items_str in seen_page_fingerprints and len(raw_items_str) > 20:
             errors.append(
@@ -1604,7 +2273,10 @@ def merge_graphql_offers_pages(
             )
 
         page_res = normalize_graphql_offers_payload(page, role=role)
-        errors.extend(page_res.errors)
+        # Propagate page errors, excluding single-page TOTAL_RECORDS_MISMATCH (evaluated on merged total)
+        for err in page_res.errors:
+            if err.get("code") != "TOTAL_RECORDS_MISMATCH":
+                errors.append(err)
 
         if declared_total is None and page_res.total_count is not None:
             declared_total = page_res.total_count
@@ -1621,7 +2293,14 @@ def merge_graphql_offers_pages(
             )
 
         for neg in page_res.negotiations:
-            if neg.negotiation_id and neg.negotiation_id in seen_offer_ids:
+            if not neg.negotiation_id:
+                errors.append(
+                    {
+                        "code": "MISSING_NEGOTIATION_ID",
+                        "diagnostic": f"Negotiation item on page {page_idx + 1} missing required identifier",
+                    }
+                )
+            elif neg.negotiation_id in seen_offer_ids:
                 errors.append(
                     {
                         "code": "DUPLICATE_OFFER_ID_ACROSS_PAGES",
@@ -1639,8 +2318,11 @@ def merge_graphql_offers_pages(
                 if neg.status in ACTIVE_NEGOTIATION_STATUSES:
                     active_offers_by_item[neg.item_id] += 1
 
-        if not page_res.diagnostics.get("has_next_page", True):
+        has_next_val = page_res.diagnostics.get("has_next_page")
+        if has_next_val is False:
             declared_end_reached = True
+        elif has_next_val is True:
+            declared_end_reached = False
 
     if len(pages) > max_pages:
         is_truncated = True
@@ -1651,7 +2333,37 @@ def merge_graphql_offers_pages(
             }
         )
 
-    is_complete = len(errors) == 0 and not is_truncated and not pages_after_end
+    if not declared_end_reached:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "PENDING_CONTINUATION",
+                "diagnostic": "Final page has pending continuation (hasNextPage is not false)",
+            }
+        )
+
+    if declared_total is not None and len(all_negotiations) != declared_total:
+        errors.append(
+            {
+                "code": "TOTAL_RECORDS_MISMATCH",
+                "diagnostic": f"Total collected records {len(all_negotiations)} does not match declared total {declared_total}",
+            }
+        )
+    elif declared_total is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No declared total count available to verify census completeness",
+            }
+        )
+
+    is_complete = (
+        len(errors) == 0
+        and declared_end_reached
+        and not is_truncated
+        and not pages_after_end
+        and (declared_total is not None and len(all_negotiations) == declared_total)
+    )
 
     return OfferCollectionResult(
         negotiations=tuple(all_negotiations),
@@ -1680,7 +2392,15 @@ def _compare_single_field(
 ) -> tuple[str, str | None]:
     """Compare a single field value between XML and Candidate, returning (parity_state, note)."""
     if xml_val is None and cand_val is None:
-        return PARITY_EXACT_MATCH, None
+        if field_name == "counteroffer_price":
+            return (
+                PARITY_EQUIVALENT_NORMALIZED,
+                "No counteroffer present on either side",
+            )
+        return (
+            PARITY_UNVERIFIED,
+            f"Field '{field_name}' absent in both baselines",
+        )
 
     if xml_val is not None and cand_val is None:
         return (
@@ -1884,7 +2604,11 @@ def compare_offers_snapshots(
         n.negotiation_id: n for n in candidate_snapshot.negotiations if n.negotiation_id
     }
 
-    matched_ids = set(xml_by_id.keys()) & set(cand_by_id.keys())
+    xml_ids = set(xml_by_id.keys())
+    cand_ids = set(cand_by_id.keys())
+    matched_ids = xml_ids & cand_ids
+    missing_in_candidate = xml_ids - cand_ids
+    extra_in_candidate = cand_ids - xml_ids
 
     record_fields = (
         "negotiation_id",
@@ -1900,68 +2624,100 @@ def compare_offers_snapshots(
     )
 
     if not xml_snapshot.negotiations and not candidate_snapshot.negotiations:
-        # Both empty - perfect match
+        # Both verified empty collections - record-level fields cannot be verified without records
         for fld in record_fields:
             field_comparisons[fld] = {
+                "status": PARITY_UNVERIFIED,
+                "label": PARITY_LABELS[PARITY_UNVERIFIED],
+                "note": "Verified empty collection; no records available to evaluate record-level field",
+            }
+            counts[PARITY_UNVERIFIED] += 1
+        overall_parity = "inconclusive"
+    else:
+        # Check negotiation_id identity set match
+        if xml_ids != cand_ids:
+            st_id = (
+                PARITY_MISSING_FIELD
+                if (len(cand_ids) == 0 and len(xml_ids) > 0)
+                else PARITY_DIFFERENT_SEMANTICS
+            )
+            notes_parts: list[str] = []
+            if missing_in_candidate:
+                notes_parts.append(f"{len(missing_in_candidate)} missing in candidate")
+            if extra_in_candidate:
+                notes_parts.append(f"{len(extra_in_candidate)} extra in candidate")
+            note_str = "Identity mismatch: " + "; ".join(notes_parts)
+            field_comparisons["negotiation_id"] = {
+                "status": st_id,
+                "label": PARITY_LABELS[st_id],
+                "note": note_str,
+            }
+            counts[st_id] += 1
+        else:
+            field_comparisons["negotiation_id"] = {
                 "status": PARITY_EXACT_MATCH,
                 "label": PARITY_LABELS[PARITY_EXACT_MATCH],
-                "note": "Empty collection in both snapshots",
+                "note": f"All {len(matched_ids)} negotiation IDs matched exactly",
             }
             counts[PARITY_EXACT_MATCH] += 1
-    elif not matched_ids:
-        for fld in record_fields:
-            field_comparisons[fld] = {
-                "status": PARITY_MISSING_FIELD,
-                "label": PARITY_LABELS[PARITY_MISSING_FIELD],
-                "note": f"No matching negotiation IDs between XML ({len(xml_by_id)}) and candidate ({len(cand_by_id)})",
-            }
-            counts[PARITY_MISSING_FIELD] += 1
-    else:
-        # Aggregate field states across all matched records
-        for fld in record_fields:
-            field_states: list[str] = []
-            for mid in matched_ids:
-                x_neg = xml_by_id[mid]
-                c_neg = cand_by_id[mid]
-                x_val = getattr(x_neg, fld, None)
-                c_val = getattr(c_neg, fld, None)
-                st, _ = _compare_single_field(fld, x_val, c_val)
-                field_states.append(st)
 
-            # Determine aggregate status for field
-            if all(s == PARITY_EXACT_MATCH for s in field_states):
-                overall_fld = PARITY_EXACT_MATCH
-            elif all(
-                s in (PARITY_EXACT_MATCH, PARITY_EQUIVALENT_NORMALIZED)
-                for s in field_states
-            ):
-                overall_fld = PARITY_EQUIVALENT_NORMALIZED
-            elif any(s == PARITY_DIFFERENT_SEMANTICS for s in field_states):
-                overall_fld = PARITY_DIFFERENT_SEMANTICS
-            elif any(s == PARITY_MISSING_FIELD for s in field_states):
-                overall_fld = PARITY_MISSING_FIELD
-            else:
-                overall_fld = PARITY_UNVERIFIED
+        other_record_fields = tuple(f for f in record_fields if f != "negotiation_id")
+        if not matched_ids:
+            for fld in other_record_fields:
+                field_comparisons[fld] = {
+                    "status": PARITY_MISSING_FIELD,
+                    "label": PARITY_LABELS[PARITY_MISSING_FIELD],
+                    "note": f"No matching negotiation IDs between XML ({len(xml_by_id)}) and candidate ({len(cand_by_id)})",
+                }
+                counts[PARITY_MISSING_FIELD] += 1
+        else:
+            for fld in other_record_fields:
+                field_states: list[str] = []
+                for mid in matched_ids:
+                    x_neg = xml_by_id[mid]
+                    c_neg = cand_by_id[mid]
+                    x_val = getattr(x_neg, fld, None)
+                    c_val = getattr(c_neg, fld, None)
+                    st_fld, _ = _compare_single_field(fld, x_val, c_val)
+                    field_states.append(st_fld)
 
-            field_comparisons[fld] = {
-                "status": overall_fld,
-                "label": PARITY_LABELS[overall_fld],
-                "note": f"Evaluated across {len(matched_ids)} matched negotiations",
-            }
-            counts[overall_fld] += 1
+                if any(s == PARITY_DIFFERENT_SEMANTICS for s in field_states):
+                    overall_fld = PARITY_DIFFERENT_SEMANTICS
+                elif any(s == PARITY_MISSING_FIELD for s in field_states):
+                    overall_fld = PARITY_MISSING_FIELD
+                elif any(s == PARITY_UNVERIFIED for s in field_states):
+                    overall_fld = PARITY_UNVERIFIED
+                elif all(s == PARITY_EXACT_MATCH for s in field_states):
+                    overall_fld = PARITY_EXACT_MATCH
+                elif all(
+                    s in (PARITY_EXACT_MATCH, PARITY_EQUIVALENT_NORMALIZED)
+                    for s in field_states
+                ):
+                    overall_fld = PARITY_EQUIVALENT_NORMALIZED
+                else:
+                    overall_fld = PARITY_UNVERIFIED
 
-    overall_parity = (
-        "pass"
-        if counts[PARITY_DIFFERENT_SEMANTICS] == 0
-        and counts[PARITY_MISSING_FIELD] == 0
-        and counts[PARITY_UNVERIFIED] == 0
-        else "fail"
-    )
+                field_comparisons[fld] = {
+                    "status": overall_fld,
+                    "label": PARITY_LABELS[overall_fld],
+                    "note": f"Evaluated across {len(matched_ids)} matched negotiations",
+                }
+                counts[overall_fld] += 1
+
+        overall_parity = (
+            "pass"
+            if xml_ids == cand_ids
+            and len(matched_ids) > 0
+            and counts[PARITY_DIFFERENT_SEMANTICS] == 0
+            and counts[PARITY_MISSING_FIELD] == 0
+            and counts[PARITY_UNVERIFIED] == 0
+            else "fail"
+        )
 
     return {
         "role": str(role),
         "overall_status": overall_parity,
-        "is_inconclusive": False,
+        "is_inconclusive": overall_parity == "inconclusive",
         "field_counts": counts,
         "field_comparisons": field_comparisons,
         "baseline_summary": {
@@ -1980,7 +2736,7 @@ def compare_offers_snapshots(
 
 def rank_offers_probe_candidate(result: dict[str, Any]) -> int:
     """Rank a candidate probe result (higher score is better)."""
-    if result.get("overall_status") == "inconclusive":
+    if result.get("overall_status") in ("inconclusive", "fail"):
         return -100
     counts = result.get("field_counts", {})
     score = (
@@ -2002,17 +2758,25 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
     for key, value in report.items():
         if key in FORBIDDEN_REPORT_KEYS:
             continue
+        if key == "active_offers_by_item_id" and isinstance(value, Mapping):
+            sanitized[key] = {
+                pseudonymize_identifier(str(item_id), prefix="item"): count
+                for item_id, count in value.items()
+            }
+            continue
         if isinstance(value, Mapping):
             sanitized[key] = sanitize_offers_parity_report(value)
         elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
             sanitized[key] = [
-                sanitize_offers_parity_report(v) if isinstance(v, Mapping) else v
+                sanitize_diagnostic_string(v)
+                if isinstance(v, str)
+                else sanitize_offers_parity_report(v)
+                if isinstance(v, Mapping)
+                else v
                 for v in value
             ]
         elif isinstance(value, str):
-            # Check for token leak
-            redacted = _EBAY_TOKEN_PATTERN.sub("[REDACTED_TOKEN]", value)
-            sanitized[key] = redacted
+            sanitized[key] = sanitize_diagnostic_string(value)
         else:
             sanitized[key] = value
     return sanitized

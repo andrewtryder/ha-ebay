@@ -41,12 +41,17 @@ if str(REPO_ROOT) not in sys.path:
 
 from custom_components.ebay.api import EbayApiClient  # noqa: E402
 from custom_components.ebay.clients.errors import EbayError  # noqa: E402
+from custom_components.ebay.const import NS  # noqa: E402
 from custom_components.ebay.parsers.offers_parity import (  # noqa: E402
     OFFERS_CONTRACT_PROBES,
     NegotiationRole,
     OfferCollectionResult,
+    _find_offers_container,
     build_get_my_ebay_buying_best_offers_xml,
     compare_offers_snapshots,
+    merge_graphql_offers_pages,
+    merge_trading_xml_buyer_offers_pages,
+    merge_trading_xml_seller_offers_pages,
     normalize_graphql_offers_payload,
     normalize_trading_xml_buyer_offers,
     normalize_trading_xml_seller_offers,
@@ -491,24 +496,56 @@ async def async_run_live_validation(
         xml_res: OfferCollectionResult
         if neg_role == NegotiationRole.SELLER:
             page = 1
-            all_xml_offers: list[str] = []
+            all_xml_offers: list[ET.Element] = []
             while page <= min(max_pages, BEST_OFFERS_MAX_PAGES):
                 root = await client.async_call_trading_api(
                     BEST_OFFERS_CALL_NAME, build_get_best_offers_xml(page=page)
                 )
-                all_xml_offers.append(
-                    ET.tostring(root, encoding="utf-8").decode("utf-8")
+                all_xml_offers.append(root)
+                total_pages_el = root.find(
+                    "e:PaginationResult/e:TotalNumberOfPages", namespaces=NS
                 )
-                # Break if single page or done
-                break
-            xml_res = normalize_trading_xml_seller_offers(
-                all_xml_offers[0] if all_xml_offers else ""
+                total_pages = 1
+                if total_pages_el is not None and total_pages_el.text:
+                    try:
+                        total_pages = int(total_pages_el.text.strip())
+                    except ValueError:
+                        break
+                if page >= total_pages:
+                    break
+                page += 1
+            xml_res = merge_trading_xml_seller_offers_pages(
+                all_xml_offers, max_pages=max_pages
             )
         else:
-            root = await client.async_call_trading_api(
-                READ_ONLY_CALL_NAME, build_get_my_ebay_buying_best_offers_xml(page=1)
+            page = 1
+            all_buyer_xml: list[ET.Element] = []
+            while page <= min(max_pages, 25):
+                root = await client.async_call_trading_api(
+                    READ_ONLY_CALL_NAME,
+                    build_get_my_ebay_buying_best_offers_xml(page=page),
+                )
+                all_buyer_xml.append(root)
+                container = root.find("e:BestOfferList", namespaces=NS)
+                total_pages_el = (
+                    container.find(
+                        "e:PaginationResult/e:TotalNumberOfPages", namespaces=NS
+                    )
+                    if container is not None
+                    else None
+                )
+                total_pages = 1
+                if total_pages_el is not None and total_pages_el.text:
+                    try:
+                        total_pages = int(total_pages_el.text.strip())
+                    except ValueError:
+                        break
+                if page >= total_pages:
+                    break
+                page += 1
+            xml_res = merge_trading_xml_buyer_offers_pages(
+                all_buyer_xml, max_pages=max_pages
             )
-            xml_res = normalize_trading_xml_buyer_offers(root)
 
         # 2. Probe candidate GraphQL operations
         matching_probes = [
@@ -523,12 +560,43 @@ async def async_run_live_validation(
 
         for probe in matching_probes:
             try:
-                raw_gql = await client.async_post_graphql(
-                    probe.query,
-                    variables=probe.variables,
-                    operation_name=probe.operation_name,
+                # Support schema-grounded pagination if variables are declared
+                gql_pages: list[dict[str, Any]] = []
+                current_vars = dict(probe.variables or {})
+                page_idx = 0
+                while page_idx < max_pages:
+                    raw_gql = await client.async_post_graphql(
+                        probe.query,
+                        variables=current_vars,
+                        operation_name=probe.operation_name,
+                    )
+                    gql_pages.append(raw_gql)
+                    page_idx += 1
+
+                    data_block = (
+                        raw_gql.get("data") if isinstance(raw_gql, dict) else None
+                    )
+                    if not isinstance(data_block, dict):
+                        break
+                    _, c_block = _find_offers_container(data_block)
+                    if not isinstance(c_block, dict):
+                        break
+                    p_info = c_block.get("pageInfo")
+                    if not isinstance(p_info, dict) or not p_info.get("hasNextPage"):
+                        break
+                    end_cursor = p_info.get("endCursor")
+                    if "after" in current_vars and end_cursor:
+                        current_vars["after"] = end_cursor
+                    elif "offset" in current_vars:
+                        current_vars["offset"] = current_vars.get(
+                            "offset", 0
+                        ) + current_vars.get("limit", 20)
+                    else:
+                        break
+
+                cand_res = merge_graphql_offers_pages(
+                    gql_pages, role=neg_role, max_pages=max_pages
                 )
-                cand_res = normalize_graphql_offers_payload(raw_gql, role=neg_role)
                 comp = compare_offers_snapshots(xml_res, cand_res, role=neg_role)
                 rnk = rank_offers_probe_candidate(comp)
 
