@@ -1666,13 +1666,13 @@ def test_privacy_adversarial_tokens_credentials_and_emails_scrubbed() -> None:
 
 def test_pseudonymize_identifier_and_sanitize_diagnostic_string() -> None:
     """Direct tests for deterministic pseudonymization and diagnostic string scrubbing."""
-    assert pseudonymize_identifier("123456789012").startswith("item_")
+    assert pseudonymize_identifier("123456789012").startswith("id_")
+    assert pseudonymize_identifier("123456789012", prefix="item").startswith("item_")
     assert pseudonymize_identifier("123456789012") == pseudonymize_identifier(
         "123456789012"
     )
     assert pseudonymize_identifier("item-1") != pseudonymize_identifier("item-2")
-    assert pseudonymize_identifier(None) is None
-    assert pseudonymize_identifier(12345) == "12345"
+    assert pseudonymize_identifier("") == ""
 
     dirty_str = "Auth Bearer v^1.1#tok email dev@example.com refresh_token=secret_val"
     cleaned = sanitize_diagnostic_string(dirty_str)
