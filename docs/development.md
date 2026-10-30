@@ -1,7 +1,7 @@
 # Development environment
 
 This repository includes a devcontainer and two Home Assistant test modes.
-The integration targets Home Assistant `2026.8.0+`.
+The integration targets Home Assistant `2026.10.0+`.
 
 ## Open the devcontainer
 
@@ -10,6 +10,7 @@ Open the repository in VS Code and choose **Dev Containers: Reopen in Container*
 The devcontainer includes:
 
 - Python 3.14
+- uv for project dependency management
 - Docker-in-Docker
 - GitHub CLI
 - pytest
@@ -17,55 +18,47 @@ The devcontainer includes:
 - pytest-homeassistant-custom-component
 - Pillow for generating brand assets
 
-## Local Python 3.14 environment
+## Local Python 3.14 environment with uv
 
 The repository targets Python 3.14, matching CI, the devcontainer, and Home
-Assistant `2026.8.0+` (requires Python `>=3.14.2`). On macOS with Homebrew
-Python installed:
+Assistant `2026.10.0+` (requires Python `>=3.14.2`).
+
+Install and synchronize dependencies using `uv`:
 
 ```bash
-/opt/homebrew/bin/python3.14 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements-dev.txt
+uv sync --locked
+uv run --locked pre-commit install --hook-types pre-commit --hook-types pre-push
 ```
 
 Install the git hooks so every commit runs fast lint/file checks and every push
-runs pytest (including the coverage floor from `pytest.ini`):
+runs pytest (including the coverage floor from `pyproject.toml`):
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
-.venv/bin/pre-commit install --hook-types pre-commit --hook-types pre-push
+uv run --locked pre-commit run --all-files
+uv run --locked pre-commit run --all-files --hook-stage pre-push
 ```
 
-Run the same checks manually with:
+Or run individual verification commands:
 
 ```bash
-.venv/bin/pre-commit run --all-files
-.venv/bin/pre-commit run --all-files --hook-stage pre-push
-```
-
-Or individually:
-
-```bash
-.venv/bin/python -m ruff check custom_components tests
-.venv/bin/python -m pytest -q
-.venv/bin/python -m compileall custom_components
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked pytest -q
+uv run --locked python -m compileall custom_components scripts tests
 ```
 
 Platforms under test include `sensor`, `binary_sensor`, `event`, `calendar`, and `button`.
 
-`pytest.ini` enables statement **and branch** coverage for `custom_components/ebay`.
+`pyproject.toml` enables statement **and branch** coverage for `custom_components/ebay`.
 `--cov-fail-under` is a combined TOTAL floor (currently 90%). Raise it gradually
 toward **95%** on the ladder **84 → 85 → 90 → 95**, preferring new tests that
 exercise config-flow, OAuth, pagination, partial-failure, and transition-event
 branches. The pre-push hook fails the push if coverage drops below the floor.
 
-CI runs `pre-commit run --all-files` (current leg only) plus `ruff` /
-`compileall` / `pytest` on Python 3.14 against two Home Assistant harnesses:
-minimum (`requirements-ha-min.txt` → `pytest-homeassistant-custom-component==0.13.354`
-→ Home Assistant `2026.8.0`) and current (`requirements-ha-current.txt` →
-`0.13.365` → `2026.9.2`). Local installs can keep using `requirements-ha.txt`
-(alias of current). The HACS minimum remains `2026.8.0` for runtime/docker.
+CI runs `pre-commit run --all-files` plus `ruff check`, `ruff format --check`,
+`compileall`, and `pytest` with branch coverage on Python 3.14 against a single
+pinned Home Assistant `2026.10.0` environment using `astral-sh/setup-uv` and
+the committed `uv.lock`. The HACS minimum is `2026.10.0` for runtime/docker.
 
 ### Conventional commits and Release Please
 
@@ -74,12 +67,6 @@ Pull request titles drive Release Please changelog categories:
 - Use `feat:` for new platforms or public user-facing behavior (minor bump, Features).
 - Use `fix:` for bug fixes only (patch bump, Bug Fixes).
 - Use `docs:`, `test:`, `chore:`, or `ci:` for non-user-facing work.
-
-Install the heavier Home Assistant pytest harness only when writing tests that need Home Assistant fixtures:
-
-```bash
-.venv/bin/python -m pip install -r requirements-ha.txt
-```
 
 ## Fast source-mounted Home Assistant test
 
@@ -134,7 +121,7 @@ full callback URL when available so OAuth state validation is exercised.
 
 This starts Home Assistant without mounting the local integration, installs HACS into the dev config volume, and lets you test the user-facing HACS install path.
 
-The dev Home Assistant image is pinned to `2026.8.0` to match the integration baseline in `hacs.json`.
+The dev Home Assistant image is pinned to `2026.10.0` to match the integration baseline in `hacs.json`.
 
 ```bash
 .devcontainer/start-ha-hacs.sh
@@ -200,7 +187,7 @@ Release Please owns the release version. It updates `version.txt` as the primary
 
 **Squash-merge only** for feature and fix PRs, with the squash commit title matching the semantic PR title. Regular merge commits can repeat the PR's conventional commit title in the merge commit body, which makes Release Please list the same change twice in the generated changelog. Do not rewrite historical changelog entries to undo past duplicates.
 
-Home Assistant `2026.8.0+` loads local custom integration brand assets from:
+Home Assistant `2026.10.0+` loads local custom integration brand assets from:
 
 ```text
 custom_components/ebay/brand/
@@ -209,8 +196,7 @@ custom_components/ebay/brand/
 Regenerate those assets with:
 
 ```bash
-python -m pip install pillow
-python scripts/prepare_brand_assets.py
+uv run python scripts/prepare_brand_assets.py
 ```
 
 On macOS/Linux, make scripts executable after checkout if needed:

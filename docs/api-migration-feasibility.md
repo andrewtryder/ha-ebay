@@ -2,7 +2,7 @@
 
 > **Repository:** `andrewtryder/ha-ebay`
 > **Status:** Research & Engineering Feasibility Assessment
-> **Version Baseline:** Home Assistant 2026.8.0+
+> **Version Baseline:** Home Assistant 2026.10.0+
 > **Policy:** Strictly read-only monitoring; no mutations (bids, offers, listings, messages, orders, or refunds); fail-closed partial data safety; Trading XML remains authoritative until field-level parity and reliable authorization are proven.
 
 ---

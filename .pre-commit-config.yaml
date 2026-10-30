@@ -1,4 +1,4 @@
-# Install once: pip install -r requirements-dev.txt && pre-commit install --hook-types pre-commit --hook-types pre-push
+# Install once: uv sync --locked && uv run --locked pre-commit install --hook-types pre-commit --hook-types pre-push
 # Commit hooks: fast lint/format/file hygiene. Push hooks: full pytest with coverage.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -26,6 +26,7 @@ repos:
       - id: check-merge-conflict
       - id: debug-statements
       - id: check-added-large-files
+        args: ['--maxkb=1000']
 
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
@@ -37,7 +38,7 @@ repos:
       - id: pytest
         name: pytest with coverage
         language: system
-        entry: bash -c 'if [ -x .venv/bin/python ]; then exec .venv/bin/python -m pytest -q; else exec python -m pytest -q; fi'
+        entry: uv run --locked pytest -q
         pass_filenames: false
         always_run: true
         stages: [pre-push]

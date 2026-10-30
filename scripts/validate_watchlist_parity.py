@@ -7,17 +7,14 @@ secrets, item IDs, titles, prices, or raw account responses.
 
 Examples:
   # Run offline synthetic parity verification (no network, no credentials):
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_watchlist_parity.py --synthetic-demo
+  uv run python scripts/validate_watchlist_parity.py --synthetic-demo
 
   # Compare local XML and GraphQL response fixtures offline:
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_watchlist_parity.py \\
+  uv run python scripts/validate_watchlist_parity.py \
     --xml-fixture path/to/buying.xml --graphql-fixture path/to/watchlist.json
 
   # Run live read-only validation against eBay using a local git-ignored .env file:
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_watchlist_parity.py --live --env-file .env.local \\
+  uv run python scripts/validate_watchlist_parity.py --live --env-file .env.local \
     --output watchlist_parity.local.md
 """
 
@@ -119,7 +116,9 @@ def _load_ha_storage_credentials(
             or str(e.get("title") or "") == target
         ]
         if not matched:
-            available_ids = [str(e.get("entry_id") or "<unknown>") for e in ebay_entries]
+            available_ids = [
+                str(e.get("entry_id") or "<unknown>") for e in ebay_entries
+            ]
             raise ValueError(
                 f"No 'ebay' config entry matching {target!r} in {storage_path}. "
                 f"Available entry_ids: {', '.join(available_ids)}"
@@ -172,9 +171,7 @@ def resolve_live_credentials(
 ) -> dict[str, str]:
     """Resolve read-only eBay credentials from environment, .env, or HA storage."""
     if ha_config_entries is not None:
-        creds = _load_ha_storage_credentials(
-            ha_config_entries, entry_id=ha_entry_id
-        )
+        creds = _load_ha_storage_credentials(ha_config_entries, entry_id=ha_entry_id)
     else:
         env_map = dict(_parse_dotenv_file(env_file)) if env_file else {}
         source_env = environ if environ is not None else os.environ
@@ -317,7 +314,12 @@ async def async_fetch_bounded_graphql_pages(
     base_vars = dict(probe.variables) if isinstance(probe.variables, Mapping) else {}
     limit = base_vars.get("limit")
     offset = base_vars.get("offset", 0)
-    if not isinstance(limit, int) or limit <= 0 or not isinstance(offset, int) or offset < 0:
+    if (
+        not isinstance(limit, int)
+        or limit <= 0
+        or not isinstance(offset, int)
+        or offset < 0
+    ):
         return pages
 
     norm_first = normalize_graphql_watchlist_payload(first_page)
