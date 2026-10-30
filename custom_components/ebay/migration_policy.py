@@ -6,12 +6,19 @@ eBay GraphQL and REST APIs without disrupting existing configurations, entity
 IDs, dashboards, or automations.
 
 Key Invariants:
-- Default Provider: Every feature defaults strictly to TRADING_XML.
+- Grounded Production Baselines:
+  - Buying (Watchlist, Bidding) and Selling listings (ActiveList, Offers,
+    Sold/Unsold) baseline strictly on Trading XML.
+  - Fulfillment Orders, Seller Standards, Messages, Analytics, Finances,
+    and Account Privileges baseline strictly on modern eBay REST APIs.
+    (Trading XML is NOT a fallback and XML-to-REST migration is NOT needed).
+  - Feedback is hybrid (Trading XML GetUser username resolution + REST Feedback).
 - Fail-Closed Readiness: Speculative queries, synthetic fixtures, or unverified
-  scopes never qualify a modern provider as ready. Unverified pagination,
+  scopes never qualify a candidate provider as ready. Unverified pagination,
   incomplete censuses, missing fields, or FORBIDDEN errors strictly block readiness.
-- Privacy Preservation: Readiness diagnostics are sanitized against tokens,
-  secrets, raw item identifiers, titles, prices, and user PII.
+- Privacy & Secret Redaction: Readiness diagnostics are strictly allowlisted.
+  Arbitrary strings, client secrets, OAuth tokens, listing IDs, and usernames
+  are always redacted to 'REDACTED_OR_OPAQUE_DIAGNOSTIC'.
 - Zero Runtime Mutation: This module is pure and decoupled from live production
   polling coordinators, config entries, and entities.
 """
@@ -20,8 +27,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import re
 from typing import Any, Mapping, Sequence
+
+from .const import (
+    BIDDING_EVENT_TYPES,
+    SELLING_EVENT_TYPES,
+    WATCHING_EVENT_TYPES,
+)
 
 
 class FeatureKey(StrEnum):
@@ -31,10 +43,14 @@ class FeatureKey(StrEnum):
     BIDDING = "bidding"
     SELLER_LISTINGS = "seller_listings"
     OFFERS = "offers"
+    SOLD_UNSOLD = "sold_unsold"
     ORDERS = "orders"
     FEEDBACK = "feedback"
     SELLER_STANDARDS = "seller_standards"
     MESSAGES = "messages"
+    ANALYTICS = "analytics"
+    FINANCES = "finances"
+    ACCOUNT_PRIVILEGES = "account_privileges"
 
 
 class ProviderType(StrEnum):
@@ -69,7 +85,8 @@ class MigrationMode(StrEnum):
     MIGRATED = "migrated"
 
 
-_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# Strict privacy allowlists: only known symbolic error codes, known safe scopes,
+# and known public schema field names are permitted in diagnostic outputs.
 _KNOWN_AUTH_ERROR_CODES = frozenset(
     {
         "FORBIDDEN",
@@ -78,53 +95,263 @@ _KNOWN_AUTH_ERROR_CODES = frozenset(
         "UNAUTHORIZED",
         "INVALID_SCOPE",
         "TOKEN_EXPIRED",
+        "BAD_REQUEST",
+        "NOT_FOUND",
+        "INTERNAL_SERVER_ERROR",
+        "RATE_LIMITED",
+        "INVALID_TOKEN",
+        "METHOD_NOT_ALLOWED",
+        "REQUEST_TIMEOUT",
+        "SERVICE_UNAVAILABLE",
+        "UNKNOWN",
+        "EMPTY",
+        "200",
+        "400",
+        "401",
+        "403",
+        "404",
+        "409",
+        "429",
+        "500",
+        "502",
+        "503",
     }
 )
 
-# Standard entity unique ID templates per feature domain
-_FIXED_FEATURE_UNIQUE_ID_SUFFIXES: Mapping[FeatureKey, tuple[str, ...]] = {
-    FeatureKey.WATCHLIST: ("watching",),
-    FeatureKey.BIDDING: ("bidding",),
-    FeatureKey.SELLER_LISTINGS: ("active_listings", "sold_items", "unsold_items"),
-    FeatureKey.OFFERS: ("active_offers",),
-    FeatureKey.ORDERS: ("orders_overdue",),
-    FeatureKey.FEEDBACK: ("feedback_score", "positive_feedback_percent"),
-    FeatureKey.SELLER_STANDARDS: ("seller_level",),
-    FeatureKey.MESSAGES: ("unread_messages",),
-}
+_KNOWN_SAFE_SCOPES = frozenset(
+    {
+        "https://api.ebay.com/oauth/api_scope",
+        "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly",
+        "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
+        "https://api.ebay.com/oauth/api_scope/sell.finances",
+        "https://api.ebay.com/oauth/api_scope/sell.analytics.readonly",
+        "https://api.ebay.com/oauth/api_scope/sell.account.readonly",
+        "https://api.ebay.com/oauth/api_scope/sell.inventory",
+        "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        "https://api.ebay.com/oauth/api_scope/commerce.feedback",
+        "https://api.ebay.com/oauth/api_scope/commerce.message",
+        "https://api.ebay.com/oauth/api_scope/sell.payment.dispute",
+        "buy.watchlist.read",
+        "buy.bidding.read",
+        "core",
+        "fulfillment",
+        "analytics",
+        "finances",
+        "account",
+        "feedback",
+        "messages",
+    }
+)
 
-# Standard event types per feature domain
-_FEATURE_EVENT_TYPES: Mapping[FeatureKey, tuple[str, ...]] = {
-    FeatureKey.WATCHLIST: (
-        "ebay_watched_item_ending_soon",
-        "ebay_price_drop",
-    ),
-    FeatureKey.BIDDING: (
-        "ebay_outbid",
-        "ebay_bidding_item_ending_soon",
-    ),
-    FeatureKey.SELLER_LISTINGS: (
-        "ebay_seller_at_risk",
-        "ebay_buyer_question",
-    ),
-    FeatureKey.OFFERS: ("ebay_offer_received",),
-    FeatureKey.ORDERS: ("ebay_order_overdue",),
-    FeatureKey.FEEDBACK: (),
-    FeatureKey.SELLER_STANDARDS: (),
-    FeatureKey.MESSAGES: ("ebay_buyer_question",),
-}
+_KNOWN_SAFE_FIELDS = frozenset(
+    {
+        "item_id",
+        "itemId",
+        "title",
+        "current_price",
+        "price",
+        "currency",
+        "bid_count",
+        "bidCount",
+        "end_time",
+        "endTime",
+        "listing_status",
+        "listingStatus",
+        "reserve_met",
+        "reserveMet",
+        "high_bidder",
+        "highBidder",
+        "quantity",
+        "quantity_sold",
+        "quantitySold",
+        "quantity_available",
+        "quantityAvailable",
+        "watch_count",
+        "watchCount",
+        "view_count",
+        "viewCount",
+        "offer_count",
+        "offerCount",
+        "question_count",
+        "questionCount",
+        "format",
+        "buy_it_now_price",
+        "buyItNowPrice",
+        "views",
+        "watchers",
+        "bids",
+        "offers",
+        "questions",
+        "seconds_left",
+        "pageInfo",
+        "hasNextPage",
+        "endCursor",
+        "totalCount",
+        "nodes",
+        "edges",
+        "node",
+    }
+)
+
+_SAFE_ALLOWLIST = _KNOWN_AUTH_ERROR_CODES | _KNOWN_SAFE_SCOPES | _KNOWN_SAFE_FIELDS
+
+REDACTED_DIAGNOSTIC = "REDACTED_OR_OPAQUE_DIAGNOSTIC"
 
 
 def sanitize_diagnostic_token(val: Any) -> str:
-    """Sanitize a diagnostic error code or string token, ensuring no secrets leak."""
+    """Sanitize a diagnostic error code, scope, or field token against a strict allowlist.
+
+    Any unrecognized string, client secret, OAuth token, raw item identifier,
+    title, user handle, or free-form text is redacted to REDACTED_OR_OPAQUE_DIAGNOSTIC.
+    """
     if val is None:
         return "UNKNOWN"
     s = str(val).strip()
     if not s:
         return "EMPTY"
-    if _SAFE_TOKEN_RE.match(s) and len(s) <= 64:
+    if s in _SAFE_ALLOWLIST:
         return s
-    return "MALFORMED_OR_OPAQUE_DIAGNOSTIC"
+    return REDACTED_DIAGNOSTIC
+
+
+# Summary sensor description keys grounded in sensor.py SUMMARY_SENSORS
+_SUMMARY_SENSOR_KEYS_BY_FEATURE: Mapping[FeatureKey, tuple[str, ...]] = {
+    FeatureKey.WATCHLIST: ("watched_items", "watched_ending_soon"),
+    FeatureKey.BIDDING: ("bidding_items",),
+    FeatureKey.SELLER_LISTINGS: (
+        "active_selling_items",
+        "selling_total_bids",
+        "selling_total_offers",
+        "active_listings_quantity_sold",
+        "sold_items_count",
+        "unsold_items_count",
+        "selling_total_watchers",
+        "selling_total_views",
+        "selling_ending_soon",
+    ),
+    FeatureKey.OFFERS: ("selling_total_offers",),
+    FeatureKey.SOLD_UNSOLD: ("sold_items_count", "unsold_items_count"),
+    FeatureKey.ORDERS: (
+        "orders_overdue",
+        "open_payment_disputes",
+    ),
+    FeatureKey.SELLER_STANDARDS: (
+        "seller_level",
+        "transaction_defect_rate",
+        "late_shipment_rate",
+        "cases_closed_without_seller_resolution",
+        "item_not_received_metric",
+        "item_not_as_described_metric",
+        "seller_next_evaluation_date",
+    ),
+    FeatureKey.FEEDBACK: (
+        "feedback_score",
+        "positive_feedback_percent",
+        "recent_positive_feedback",
+        "recent_neutral_feedback",
+        "recent_negative_feedback",
+        "items_awaiting_feedback",
+    ),
+    FeatureKey.MESSAGES: (
+        "unread_conversations",
+        "buyer_question_conversations",
+        "oldest_unanswered_message_hours",
+    ),
+    FeatureKey.ANALYTICS: (),
+    FeatureKey.FINANCES: ("available_funds", "pending_funds"),
+    FeatureKey.ACCOUNT_PRIVILEGES: (
+        "listing_amount_remaining",
+        "listing_amount_used",
+        "listing_quantity_remaining",
+        "listing_quantity_used",
+    ),
+}
+
+# Per-item sensor kinds and suffixes grounded in sensor.py ITEM_SENSOR_FIELDS
+_ITEM_SENSOR_KIND_MAP: Mapping[FeatureKey, str] = {
+    FeatureKey.WATCHLIST: "watched",
+    FeatureKey.BIDDING: "bidding",
+    FeatureKey.SELLER_LISTINGS: "selling",
+}
+
+_ITEM_SENSOR_SUFFIXES_BY_KIND: Mapping[str, tuple[str, ...]] = {
+    "watched": ("price", "bids", "seconds_left", "end_time"),
+    "bidding": ("current_price", "max_bid", "seconds_left", "end_time"),
+    "selling": (
+        "price",
+        "views",
+        "analytics_views_30d",
+        "watchers",
+        "bids",
+        "offers",
+        "questions",
+        "seconds_left",
+        "end_time",
+        "quantity_available",
+        "quantity_sold",
+    ),
+}
+
+# Event entities and their event types grounded in const.py & event.py
+_FEATURE_EVENT_TYPES: Mapping[FeatureKey, tuple[str, ...]] = {
+    FeatureKey.WATCHLIST: tuple(WATCHING_EVENT_TYPES),
+    FeatureKey.BIDDING: tuple(BIDDING_EVENT_TYPES),
+    FeatureKey.SELLER_LISTINGS: tuple(SELLING_EVENT_TYPES),
+    FeatureKey.OFFERS: ("offer_received",),
+    FeatureKey.SOLD_UNSOLD: (
+        "item_sold",
+        "item_ended_unsold",
+        "item_sale_completed",
+    ),
+    FeatureKey.ORDERS: (
+        "order_received",
+        "order_paid",
+        "shipment_due_soon",
+        "shipment_overdue",
+        "order_marked_shipped",
+        "tracking_added",
+        "payment_dispute_opened",
+    ),
+    FeatureKey.SELLER_STANDARDS: (
+        "seller_level_changed",
+        "seller_standard_at_risk",
+        "service_metric_above_peer_benchmark",
+    ),
+    FeatureKey.FEEDBACK: (
+        "feedback_received",
+        "negative_feedback_received",
+        "feedback_rating_changed",
+    ),
+    FeatureKey.MESSAGES: (
+        "new_buyer_question",
+        "new_message_received",
+    ),
+    FeatureKey.ANALYTICS: (),
+    FeatureKey.FINANCES: (),
+    FeatureKey.ACCOUNT_PRIVILEGES: (),
+}
+
+# Supported candidate providers per feature domain
+_SUPPORTED_CANDIDATE_PROVIDERS: Mapping[FeatureKey, frozenset[ProviderType]] = {
+    FeatureKey.WATCHLIST: frozenset({ProviderType.TRADING_XML, ProviderType.GRAPHQL}),
+    FeatureKey.BIDDING: frozenset({ProviderType.TRADING_XML, ProviderType.GRAPHQL}),
+    FeatureKey.SELLER_LISTINGS: frozenset(
+        {ProviderType.TRADING_XML, ProviderType.GRAPHQL}
+    ),
+    FeatureKey.OFFERS: frozenset(
+        {ProviderType.TRADING_XML, ProviderType.GRAPHQL, ProviderType.REST}
+    ),
+    FeatureKey.SOLD_UNSOLD: frozenset(
+        {ProviderType.TRADING_XML, ProviderType.GRAPHQL, ProviderType.REST}
+    ),
+    FeatureKey.ORDERS: frozenset({ProviderType.REST}),
+    FeatureKey.SELLER_STANDARDS: frozenset({ProviderType.REST}),
+    FeatureKey.FEEDBACK: frozenset({ProviderType.HYBRID, ProviderType.REST}),
+    FeatureKey.MESSAGES: frozenset({ProviderType.REST}),
+    FeatureKey.ANALYTICS: frozenset({ProviderType.REST}),
+    FeatureKey.FINANCES: frozenset({ProviderType.REST}),
+    FeatureKey.ACCOUNT_PRIVILEGES: frozenset({ProviderType.REST}),
+}
 
 
 @dataclass(frozen=True)
@@ -172,14 +399,14 @@ class FeatureReadiness:
 
 @dataclass(frozen=True)
 class FeatureContractPreservation:
-    """Verification results proving entity unique IDs and events remain stable."""
+    """Verification results proving entity unique IDs and events match expected contracts."""
 
     feature: FeatureKey
     entry_id: str
     expected_unique_ids: tuple[str, ...]
-    preserved_unique_ids: tuple[str, ...]
+    observed_unique_ids: tuple[str, ...]
     expected_event_types: tuple[str, ...]
-    preserved_event_types: tuple[str, ...]
+    observed_event_types: tuple[str, ...]
     contracts_intact: bool
     violations: tuple[str, ...] = ()
 
@@ -189,10 +416,38 @@ class MigrationPolicy:
 
     @staticmethod
     def get_default_provider(feature: FeatureKey) -> ProviderType:
-        """Return the default provider for a feature.
+        """Return the actual baseline production provider for a feature domain.
 
-        Always returns TRADING_XML to guarantee zero disruption to existing users.
+        Ground Truth Mapping:
+        - Buying (Watchlist, Bidding) and Selling listings (ActiveList, Offers,
+          Sold/Unsold) use Trading XML.
+        - Orders (Fulfillment API), Seller Standards (Analytics API),
+          Messages (REST Messages), Analytics (Traffic report),
+          Finances (Finances API), and Account Privileges (Account API)
+          already use modern REST APIs in production.
+          (Trading XML is NOT a fallback and XML-to-REST migration is NOT needed).
+        - Feedback uses a HYBRID model: username resolution via Trading XML GetUser
+          and score/metric fetching via modern REST Feedback API.
         """
+        if feature in (
+            FeatureKey.WATCHLIST,
+            FeatureKey.BIDDING,
+            FeatureKey.SELLER_LISTINGS,
+            FeatureKey.OFFERS,
+            FeatureKey.SOLD_UNSOLD,
+        ):
+            return ProviderType.TRADING_XML
+        if feature == FeatureKey.FEEDBACK:
+            return ProviderType.HYBRID
+        if feature in (
+            FeatureKey.ORDERS,
+            FeatureKey.SELLER_STANDARDS,
+            FeatureKey.MESSAGES,
+            FeatureKey.ANALYTICS,
+            FeatureKey.FINANCES,
+            FeatureKey.ACCOUNT_PRIVILEGES,
+        ):
+            return ProviderType.REST
         return ProviderType.TRADING_XML
 
     @classmethod
@@ -200,20 +455,53 @@ class MigrationPolicy:
         cls,
         feature: FeatureKey,
         options: Mapping[str, Any] | None = None,
+        readiness: FeatureReadiness | None = None,
     ) -> ProviderType:
         """Return the active provider for a feature.
 
-        Unless explicitly configured via validated options, defaults to TRADING_XML.
+        Strictly fails closed:
+        - If options is None or migration is not explicitly enabled, returns default provider.
+        - Requires an explicit opt-in flag in options ('enable_modern_api_migration'
+          or 'migrate_<feature>').
+        - Rejects unsupported providers for the feature.
+        - Requires a validated, ready FeatureReadiness assessment before activating
+          a candidate modern provider.
+        - Never activates an unverified or unready candidate provider.
         """
+        default_provider = cls.get_default_provider(feature)
         if options is None:
-            return cls.get_default_provider(feature)
+            return default_provider
+
+        migration_opt_in = bool(
+            options.get("enable_modern_api_migration")
+            or options.get(f"migrate_{feature}")
+        )
+        if not migration_opt_in:
+            return default_provider
 
         opt_key = f"provider_{feature}"
-        configured = options.get(opt_key)
-        if configured in (ProviderType.GRAPHQL, ProviderType.REST, ProviderType.HYBRID):
-            # Future expansion: only honored when migration flag is active
-            return ProviderType(configured)
-        return cls.get_default_provider(feature)
+        raw_configured = options.get(opt_key)
+        if not raw_configured:
+            return default_provider
+
+        try:
+            candidate = ProviderType(raw_configured)
+        except ValueError:
+            return default_provider
+
+        if candidate == default_provider:
+            return default_provider
+
+        supported = _SUPPORTED_CANDIDATE_PROVIDERS.get(feature, frozenset())
+        if candidate not in supported:
+            return default_provider
+
+        if readiness is None or not cls.validate_safe_transition(
+            feature, candidate, readiness
+        ):
+            return default_provider
+
+        return candidate
 
     @classmethod
     def evaluate_readiness(
@@ -223,35 +511,55 @@ class MigrationPolicy:
         evidence: ReadinessEvidence,
     ) -> FeatureReadiness:
         """Evaluate candidate provider readiness using strict fail-closed criteria."""
-        # 1. Trading XML is the established baseline: always ready with fallback available
-        if candidate_provider == ProviderType.TRADING_XML:
+        default_provider = cls.get_default_provider(feature)
+
+        # 1. Candidate is the established production baseline: always ready
+        if candidate_provider == default_provider:
             return FeatureReadiness(
                 feature=feature,
                 candidate_provider=candidate_provider,
                 state=ReadinessState.READY,
                 is_ready=True,
                 blocking_reasons=(),
-                sanitized_diagnostics={"provider": "production_trading_xml_baseline"},
+                sanitized_diagnostics={
+                    "provider": f"production_{default_provider}_baseline"
+                },
+            )
+
+        # 2. Candidate provider is unsupported for this feature domain
+        supported = _SUPPORTED_CANDIDATE_PROVIDERS.get(feature, frozenset())
+        if candidate_provider not in supported:
+            return FeatureReadiness(
+                feature=feature,
+                candidate_provider=candidate_provider,
+                state=ReadinessState.NOT_SUPPORTED,
+                is_ready=False,
+                blocking_reasons=(
+                    f"Provider {candidate_provider} is not supported for feature domain {feature}",
+                ),
+                sanitized_diagnostics={
+                    "supported_providers": [str(p) for p in supported]
+                },
             )
 
         blocking_reasons: list[str] = []
         state: ReadinessState = ReadinessState.READY
 
-        # 2. Invariant: A robust fallback to Trading XML must remain available
+        # 3. Invariant: For legacy baseline features, fallback to default provider must remain available
         if not evidence.fallback_available:
             blocking_reasons.append(
-                "Trading XML fallback is not configured or unavailable"
+                f"Fallback to established provider {default_provider} is not configured or unavailable"
             )
             state = ReadinessState.BLOCKED_NO_FALLBACK
 
-        # 3. Account identity continuity
+        # 4. Account identity continuity
         if not evidence.account_identity_consistent:
             blocking_reasons.append(
                 "Modern API response does not match the authenticated account identity"
             )
             state = ReadinessState.BLOCKED_IDENTITY
 
-        # 4. Scope authorization checks
+        # 5. Scope authorization checks
         missing_scopes = [
             s for s in evidence.required_scopes if s not in evidence.verified_scopes
         ]
@@ -262,7 +570,7 @@ class MigrationPolicy:
             )
             state = ReadinessState.BLOCKED_SCOPE
 
-        # 5. Permission / Entitlement / HTTP 403 / FORBIDDEN errors
+        # 6. Permission / Entitlement / HTTP 403 / FORBIDDEN errors
         if not evidence.api_permission_granted or evidence.permission_error_code:
             code = sanitize_diagnostic_token(evidence.permission_error_code)
             blocking_reasons.append(
@@ -270,13 +578,13 @@ class MigrationPolicy:
             )
             state = ReadinessState.BLOCKED_AUTHORIZATION
 
-        # 6. Schema validation
+        # 7. Schema validation
         if not evidence.schema_validated:
             blocking_reasons.append("Modern API response schema has not been validated")
             if state == ReadinessState.READY:
                 state = ReadinessState.BLOCKED_SCHEMA
 
-        # 7. Collection completeness / Census validation
+        # 8. Collection completeness / Census validation
         if not evidence.response_complete:
             blocking_reasons.append(
                 "Modern API does not provide a complete census of the collection"
@@ -284,7 +592,7 @@ class MigrationPolicy:
             if state == ReadinessState.READY:
                 state = ReadinessState.BLOCKED_COMPLETENESS
 
-        # 8. Pagination verification
+        # 9. Pagination verification
         if not evidence.pagination_verified:
             blocking_reasons.append(
                 "Pagination boundaries, continuity, or cursor reconciliation unverified"
@@ -292,7 +600,7 @@ class MigrationPolicy:
             if state == ReadinessState.READY:
                 state = ReadinessState.BLOCKED_PAGINATION
 
-        # 9. Field-level parity
+        # 10. Field-level parity
         if (
             not evidence.field_parity_verified
             or evidence.missing_fields
@@ -311,7 +619,7 @@ class MigrationPolicy:
                 details.append(f"unverified: {', '.join(unverified_tokens)}")
             detail_str = f" ({'; '.join(details)})" if details else ""
             blocking_reasons.append(
-                f"Field-level parity with Trading XML not established{detail_str}"
+                f"Field-level parity with baseline provider not established{detail_str}"
             )
             if state == ReadinessState.READY:
                 state = ReadinessState.BLOCKED_PARITY
@@ -320,7 +628,7 @@ class MigrationPolicy:
         if is_ready:
             state = ReadinessState.READY
 
-        sanitized_diag = {
+        sanitized_diag: dict[str, Any] = {
             "feature": str(feature),
             "candidate": str(candidate_provider),
             "permission_code": sanitize_diagnostic_token(
@@ -333,9 +641,9 @@ class MigrationPolicy:
             "missing_field_count": len(evidence.missing_fields),
             "unverified_field_count": len(evidence.unverified_fields),
             "fallback_available": evidence.fallback_available,
+            "account_identity_consistent": evidence.account_identity_consistent,
+            "has_notes": bool(evidence.notes),
         }
-        if evidence.notes:
-            sanitized_diag["notes"] = sanitize_diagnostic_token(evidence.notes)
 
         return FeatureReadiness(
             feature=feature,
@@ -356,10 +664,10 @@ class MigrationPolicy:
         """Validate whether a transition to a target provider is safe.
 
         Returns True only if the candidate provider matches and readiness is proven.
-        Always permits rolling back to TRADING_XML.
+        Always permits rolling back to the default production provider.
         """
-        # Rollback to Trading XML is always safe and permitted
-        if target_provider == ProviderType.TRADING_XML:
+        # Rollback to baseline default provider is always safe and permitted
+        if target_provider == cls.get_default_provider(feature):
             return True
 
         if readiness.feature != feature:
@@ -371,51 +679,92 @@ class MigrationPolicy:
         return readiness.is_ready
 
     @classmethod
+    def get_expected_unique_ids(
+        cls,
+        entry_id: str,
+        feature: FeatureKey,
+        item_ids: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        """Compute the expected entity unique IDs for a feature domain."""
+        fixed_keys = _SUMMARY_SENSOR_KEYS_BY_FEATURE.get(feature, ())
+        expected: list[str] = [f"{entry_id}_{key}" for key in fixed_keys]
+
+        kind = _ITEM_SENSOR_KIND_MAP.get(feature)
+        if kind and item_ids:
+            suffixes = _ITEM_SENSOR_SUFFIXES_BY_KIND.get(kind, ())
+            for item_id in item_ids:
+                for suffix in suffixes:
+                    expected.append(f"{entry_id}_{kind}_{item_id}_{suffix}")
+
+        return tuple(expected)
+
+    @classmethod
+    def get_expected_event_types(cls, feature: FeatureKey) -> tuple[str, ...]:
+        """Return the expected EventEntity event types for a feature domain."""
+        return _FEATURE_EVENT_TYPES.get(feature, ())
+
+    @classmethod
     def verify_contract_preservation(
         cls,
         entry_id: str,
         feature: FeatureKey,
         item_ids: Sequence[str] = (),
+        observed_unique_ids: Sequence[str] | None = None,
+        observed_event_types: Sequence[str] | None = None,
     ) -> FeatureContractPreservation:
-        """Verify that entity unique IDs and event types remain identical regardless of provider.
+        """Verify that observed entity unique IDs and event types match expected contracts.
 
-        Ensures that switching providers under the hood will never orphan existing
-        sensors or break existing Home Assistant automations.
+        Grounded in real Home Assistant entity registry and event constants.
+        Compares independently supplied observed outputs against expected contracts.
+        Fails when any expected ID or event is missing, extra, or mismatched.
         """
-        fixed_suffixes = _FIXED_FEATURE_UNIQUE_ID_SUFFIXES.get(feature, ())
-        expected_unique_ids: list[str] = [
-            f"{entry_id}_{suffix}" for suffix in fixed_suffixes
-        ]
-
-        # For item-level sensors
-        prefix_map = {
-            FeatureKey.WATCHLIST: "watch",
-            FeatureKey.BIDDING: "bid",
-            FeatureKey.SELLER_LISTINGS: "selling",
-        }
-        kind = prefix_map.get(feature)
-        if kind and item_ids:
-            for item_id in item_ids:
-                expected_unique_ids.append(f"{entry_id}_{kind}_{item_id}_price")
-
-        expected_events = _FEATURE_EVENT_TYPES.get(feature, ())
-
-        # Simulated preservation check: both XML and modern API must map to these exact IDs
-        preserved_unique_ids = tuple(expected_unique_ids)
-        preserved_events = tuple(expected_events)
+        expected_unique_ids = cls.get_expected_unique_ids(entry_id, feature, item_ids)
+        expected_event_types = cls.get_expected_event_types(feature)
 
         violations: list[str] = []
-        if len(preserved_unique_ids) != len(expected_unique_ids):
-            violations.append("Mismatch in generated unique ID count")
+
+        if observed_unique_ids is None:
+            violations.append("No observed unique IDs supplied for verification")
+            actual_observed_ids: tuple[str, ...] = ()
+        else:
+            actual_observed_ids = tuple(observed_unique_ids)
+            expected_id_set = set(expected_unique_ids)
+            observed_id_set = set(actual_observed_ids)
+            missing_ids = expected_id_set - observed_id_set
+            extra_ids = observed_id_set - expected_id_set
+            if missing_ids:
+                violations.append(f"Missing expected unique IDs: {sorted(missing_ids)}")
+            if extra_ids:
+                violations.append(f"Unexpected extra unique IDs: {sorted(extra_ids)}")
+
+        if observed_event_types is None:
+            violations.append("No observed event types supplied for verification")
+            actual_observed_events: tuple[str, ...] = ()
+        else:
+            actual_observed_events = tuple(observed_event_types)
+            expected_event_set = set(expected_event_types)
+            observed_event_set = set(actual_observed_events)
+            missing_events = expected_event_set - observed_event_set
+            extra_events = observed_event_set - expected_event_set
+            if missing_events:
+                violations.append(
+                    f"Missing expected event types: {sorted(missing_events)}"
+                )
+            if extra_events:
+                violations.append(
+                    f"Unexpected extra event types: {sorted(extra_events)}"
+                )
+
+        contracts_intact = len(violations) == 0
 
         return FeatureContractPreservation(
             feature=feature,
             entry_id=entry_id,
-            expected_unique_ids=tuple(expected_unique_ids),
-            preserved_unique_ids=preserved_unique_ids,
-            expected_event_types=expected_events,
-            preserved_event_types=preserved_events,
-            contracts_intact=len(violations) == 0,
+            expected_unique_ids=expected_unique_ids,
+            observed_unique_ids=actual_observed_ids,
+            expected_event_types=expected_event_types,
+            observed_event_types=actual_observed_events,
+            contracts_intact=contracts_intact,
             violations=tuple(violations),
         )
 

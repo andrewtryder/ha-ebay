@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from custom_components.ebay.const import (
+    BIDDING_EVENT_TYPES,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENTITY_MODE,
@@ -17,12 +18,17 @@ from custom_components.ebay.const import (
     CONF_RUNAME,
     CONF_SITE_ID,
     ENV_PRODUCTION,
+    SELLER_OPS_EVENT_TYPES,
+    SELLING_EVENT_TYPES,
+    WATCHING_EVENT_TYPES,
 )
 from custom_components.ebay.ending_soon_store import (
     deserialize_ending_soon_fired_key,
     serialize_ending_soon_fired_key,
 )
 from custom_components.ebay.migration_policy import (
+    REDACTED_DIAGNOSTIC,
+    _ITEM_SENSOR_SUFFIXES_BY_KIND,
     FeatureKey,
     FeatureReadiness,
     MigrationPolicy,
@@ -31,52 +37,200 @@ from custom_components.ebay.migration_policy import (
     ReadinessState,
     sanitize_diagnostic_token,
 )
+from custom_components.ebay.sensor import ITEM_SENSOR_FIELDS
 
 
-def test_default_provider_for_all_features_is_trading_xml() -> None:
-    """Every supported feature domain must default to TRADING_XML."""
-    for feature in FeatureKey:
-        default_p = MigrationPolicy.get_default_provider(feature)
-        assert default_p == ProviderType.TRADING_XML
+def test_production_default_providers_ground_truth() -> None:
+    """Verify that default baseline providers match the real production architecture."""
+    # XML baseline domains (Buying and Selling listings)
+    for xml_feat in (
+        FeatureKey.WATCHLIST,
+        FeatureKey.BIDDING,
+        FeatureKey.SELLER_LISTINGS,
+        FeatureKey.OFFERS,
+        FeatureKey.SOLD_UNSOLD,
+    ):
+        assert (
+            MigrationPolicy.get_default_provider(xml_feat) == ProviderType.TRADING_XML
+        )
+
+    # Hybrid baseline domain (GetUser XML + REST Feedback)
+    assert (
+        MigrationPolicy.get_default_provider(FeatureKey.FEEDBACK) == ProviderType.HYBRID
+    )
+
+    # REST baseline domains (Fulfillment orders, standards, messages, analytics, finances, privileges)
+    for rest_feat in (
+        FeatureKey.ORDERS,
+        FeatureKey.SELLER_STANDARDS,
+        FeatureKey.MESSAGES,
+        FeatureKey.ANALYTICS,
+        FeatureKey.FINANCES,
+        FeatureKey.ACCOUNT_PRIVILEGES,
+    ):
+        assert MigrationPolicy.get_default_provider(rest_feat) == ProviderType.REST
 
 
-def test_get_active_provider_fallback_to_trading_xml() -> None:
-    """Active provider must strictly fallback to TRADING_XML when unconfigured."""
+def test_get_active_provider_fails_closed_and_requires_verified_readiness() -> None:
+    """Active provider must fail closed without explicit opt-in and verified readiness."""
+    # 1. Unconfigured or None options returns default provider
     assert (
         MigrationPolicy.get_active_provider(FeatureKey.WATCHLIST)
         == ProviderType.TRADING_XML
     )
+    assert MigrationPolicy.get_active_provider(FeatureKey.ORDERS) == ProviderType.REST
     assert (
         MigrationPolicy.get_active_provider(FeatureKey.WATCHLIST, {})
         == ProviderType.TRADING_XML
     )
+
+    # 2. Options specify provider, but NO explicit migration opt-in flag -> fails closed
     assert (
         MigrationPolicy.get_active_provider(
-            FeatureKey.WATCHLIST, {"provider_watchlist": "invalid_provider"}
+            FeatureKey.WATCHLIST,
+            {"provider_watchlist": ProviderType.GRAPHQL},
         )
         == ProviderType.TRADING_XML
     )
-    # When explicitly configured with a supported enum value
+
+    # 3. Explicit opt-in present, but NO readiness assessment provided -> fails closed
     assert (
         MigrationPolicy.get_active_provider(
-            FeatureKey.WATCHLIST, {"provider_watchlist": ProviderType.GRAPHQL}
+            FeatureKey.WATCHLIST,
+            {
+                "enable_modern_api_migration": True,
+                "provider_watchlist": ProviderType.GRAPHQL,
+            },
+            readiness=None,
+        )
+        == ProviderType.TRADING_XML
+    )
+
+    # 4. Explicit opt-in present, but provider_<feature> missing or empty
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.WATCHLIST,
+            {"enable_modern_api_migration": True},
+        )
+        == ProviderType.TRADING_XML
+    )
+
+    # 5. Explicit opt-in present, but invalid provider string
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.WATCHLIST,
+            {
+                "enable_modern_api_migration": True,
+                "provider_watchlist": "invalid_unknown_provider",
+            },
+        )
+        == ProviderType.TRADING_XML
+    )
+
+    # 6. Explicit opt-in present, but candidate matches default provider
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.WATCHLIST,
+            {
+                "enable_modern_api_migration": True,
+                "provider_watchlist": ProviderType.TRADING_XML,
+            },
+        )
+        == ProviderType.TRADING_XML
+    )
+
+    # 7. Explicit opt-in present, but readiness indicates BLOCKED -> fails closed
+    unready = FeatureReadiness(
+        feature=FeatureKey.WATCHLIST,
+        candidate_provider=ProviderType.GRAPHQL,
+        state=ReadinessState.BLOCKED_AUTHORIZATION,
+        is_ready=False,
+        blocking_reasons=("FORBIDDEN",),
+    )
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.WATCHLIST,
+            {
+                "enable_modern_api_migration": True,
+                "provider_watchlist": ProviderType.GRAPHQL,
+            },
+            readiness=unready,
+        )
+        == ProviderType.TRADING_XML
+    )
+
+    # 8. Unsupported candidate provider (e.g. TRADING_XML on REST-native ORDERS) -> fails closed
+    ready_bogus = FeatureReadiness(
+        feature=FeatureKey.ORDERS,
+        candidate_provider=ProviderType.TRADING_XML,
+        state=ReadinessState.READY,
+        is_ready=True,
+    )
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.ORDERS,
+            {
+                "enable_modern_api_migration": True,
+                "provider_orders": ProviderType.TRADING_XML,
+            },
+            readiness=ready_bogus,
+        )
+        == ProviderType.REST
+    )
+
+    # 9. Opt-in present, candidate supported, and readiness is proven -> safely activated
+    ready_proven = FeatureReadiness(
+        feature=FeatureKey.WATCHLIST,
+        candidate_provider=ProviderType.GRAPHQL,
+        state=ReadinessState.READY,
+        is_ready=True,
+    )
+    assert (
+        MigrationPolicy.get_active_provider(
+            FeatureKey.WATCHLIST,
+            {
+                "enable_modern_api_migration": True,
+                "provider_watchlist": ProviderType.GRAPHQL,
+            },
+            readiness=ready_proven,
         )
         == ProviderType.GRAPHQL
     )
 
 
-def test_evaluate_readiness_trading_xml_baseline_always_ready() -> None:
-    """Trading XML is our production baseline and always evaluates to READY."""
+def test_evaluate_readiness_baseline_always_ready() -> None:
+    """The established baseline provider for any domain always evaluates to READY."""
     evidence = ReadinessEvidence(fallback_available=True)
-    res = MigrationPolicy.evaluate_readiness(
+    res_xml = MigrationPolicy.evaluate_readiness(
         FeatureKey.WATCHLIST, ProviderType.TRADING_XML, evidence
     )
-    assert res.is_ready is True
-    assert res.state == ReadinessState.READY
-    assert res.blocking_reasons == ()
-    assert "production_trading_xml_baseline" in res.sanitized_diagnostics.get(
+    assert res_xml.is_ready is True
+    assert res_xml.state == ReadinessState.READY
+    assert res_xml.blocking_reasons == ()
+    assert "production_trading_xml_baseline" in res_xml.sanitized_diagnostics.get(
         "provider", ""
     )
+
+    res_rest = MigrationPolicy.evaluate_readiness(
+        FeatureKey.ORDERS, ProviderType.REST, evidence
+    )
+    assert res_rest.is_ready is True
+    assert res_rest.state == ReadinessState.READY
+    assert res_rest.blocking_reasons == ()
+    assert "production_rest_baseline" in res_rest.sanitized_diagnostics.get(
+        "provider", ""
+    )
+
+
+def test_evaluate_readiness_unsupported_candidate_provider() -> None:
+    """Trading XML is not a valid candidate for REST-native features."""
+    evidence = ReadinessEvidence(fallback_available=True)
+    res = MigrationPolicy.evaluate_readiness(
+        FeatureKey.ORDERS, ProviderType.TRADING_XML, evidence
+    )
+    assert res.is_ready is False
+    assert res.state == ReadinessState.NOT_SUPPORTED
+    assert any("not supported for feature domain" in r for r in res.blocking_reasons)
 
 
 @pytest.mark.parametrize(
@@ -252,7 +406,7 @@ def test_evaluate_readiness_fully_proven_modern_provider() -> None:
         field_parity_verified=True,
         account_identity_consistent=True,
         fallback_available=True,
-        notes="Verified in sandbox test harness",
+        notes="Offline test harness verification",
     )
     res = MigrationPolicy.evaluate_readiness(
         FeatureKey.SELLER_LISTINGS, ProviderType.GRAPHQL, evidence
@@ -263,6 +417,7 @@ def test_evaluate_readiness_fully_proven_modern_provider() -> None:
     opt_dict = res.to_options_dict()
     assert opt_dict["is_ready"] is True
     assert opt_dict["state"] == "ready"
+    assert opt_dict["sanitized_diagnostics"]["has_notes"] is True
 
 
 def test_validate_safe_transition_logic() -> None:
@@ -281,7 +436,7 @@ def test_validate_safe_transition_logic() -> None:
         blocking_reasons=("FORBIDDEN",),
     )
 
-    # Rollback to Trading XML is ALWAYS permitted
+    # Rollback to default baseline provider is ALWAYS permitted
     assert (
         MigrationPolicy.validate_safe_transition(
             FeatureKey.WATCHLIST, ProviderType.TRADING_XML, unready_assessment
@@ -322,40 +477,181 @@ def test_validate_safe_transition_logic() -> None:
     )
 
 
-def test_contract_preservation_entity_unique_ids_and_events() -> None:
-    """Verify that entity unique IDs and events remain stable across providers."""
+def test_item_sensor_suffixes_match_sensor_module_constants() -> None:
+    """Verify that migration policy item sensor suffixes exactly match sensor.py."""
+    for kind, field_tuples in ITEM_SENSOR_FIELDS.items():
+        expected_suffixes = tuple(suffix for suffix, _, _ in field_tuples)
+        assert _ITEM_SENSOR_SUFFIXES_BY_KIND[kind] == expected_suffixes
+
+
+def test_event_types_match_const_module_definitions() -> None:
+    """Verify that expected event types match const.py EventEntity definitions."""
+    assert MigrationPolicy.get_expected_event_types(FeatureKey.WATCHLIST) == tuple(
+        WATCHING_EVENT_TYPES
+    )
+    assert MigrationPolicy.get_expected_event_types(FeatureKey.BIDDING) == tuple(
+        BIDDING_EVENT_TYPES
+    )
+    assert MigrationPolicy.get_expected_event_types(
+        FeatureKey.SELLER_LISTINGS
+    ) == tuple(SELLING_EVENT_TYPES)
+    # Check that orders, standards, feedback, and messages event types are all valid seller ops events
+    for feat in (
+        FeatureKey.ORDERS,
+        FeatureKey.SELLER_STANDARDS,
+        FeatureKey.FEEDBACK,
+        FeatureKey.MESSAGES,
+    ):
+        events = MigrationPolicy.get_expected_event_types(feat)
+        for ev in events:
+            assert ev in SELLER_OPS_EVENT_TYPES
+
+
+def test_contract_preservation_genuine_verification_passing() -> None:
+    """Genuinely verify contract preservation when observed inputs match real constants."""
     entry_id = "test_entry_abcdef"
 
-    # 1. Watchlist domain
-    watchlist_contract = MigrationPolicy.verify_contract_preservation(
-        entry_id, FeatureKey.WATCHLIST, item_ids=["1001", "1002"]
+    # 1. Watchlist with observed matching expected
+    exp_watchlist_ids = MigrationPolicy.get_expected_unique_ids(
+        entry_id, FeatureKey.WATCHLIST, item_ids=["1001"]
     )
-    assert watchlist_contract.contracts_intact is True
-    assert f"{entry_id}_watching" in watchlist_contract.expected_unique_ids
-    assert f"{entry_id}_watch_1001_price" in watchlist_contract.expected_unique_ids
-    assert f"{entry_id}_watch_1002_price" in watchlist_contract.expected_unique_ids
-    assert "ebay_watched_item_ending_soon" in watchlist_contract.expected_event_types
-    assert "ebay_price_drop" in watchlist_contract.expected_event_types
+    exp_watchlist_events = MigrationPolicy.get_expected_event_types(
+        FeatureKey.WATCHLIST
+    )
+    assert f"{entry_id}_watched_items" in exp_watchlist_ids
+    assert f"{entry_id}_watched_ending_soon" in exp_watchlist_ids
+    assert f"{entry_id}_watched_1001_price" in exp_watchlist_ids
+    assert f"{entry_id}_watched_1001_bids" in exp_watchlist_ids
+    assert f"{entry_id}_watched_1001_seconds_left" in exp_watchlist_ids
+    assert f"{entry_id}_watched_1001_end_time" in exp_watchlist_ids
 
-    # 2. Seller listings domain
-    seller_contract = MigrationPolicy.verify_contract_preservation(
+    res_watchlist = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        item_ids=["1001"],
+        observed_unique_ids=exp_watchlist_ids,
+        observed_event_types=exp_watchlist_events,
+    )
+    assert res_watchlist.contracts_intact is True
+    assert res_watchlist.violations == ()
+
+    # 2. Seller listings with observed matching expected
+    exp_seller_ids = MigrationPolicy.get_expected_unique_ids(
         entry_id, FeatureKey.SELLER_LISTINGS, item_ids=["2001"]
     )
-    assert seller_contract.contracts_intact is True
-    assert f"{entry_id}_active_listings" in seller_contract.expected_unique_ids
-    assert f"{entry_id}_sold_items" in seller_contract.expected_unique_ids
-    assert f"{entry_id}_unsold_items" in seller_contract.expected_unique_ids
-    assert f"{entry_id}_selling_2001_price" in seller_contract.expected_unique_ids
-    assert "ebay_seller_at_risk" in seller_contract.expected_event_types
-
-    # 3. Bidding domain
-    bidding_contract = MigrationPolicy.verify_contract_preservation(
-        entry_id, FeatureKey.BIDDING, item_ids=["3001"]
+    exp_seller_events = MigrationPolicy.get_expected_event_types(
+        FeatureKey.SELLER_LISTINGS
     )
-    assert bidding_contract.contracts_intact is True
-    assert f"{entry_id}_bidding" in bidding_contract.expected_unique_ids
-    assert f"{entry_id}_bid_3001_price" in bidding_contract.expected_unique_ids
-    assert "ebay_outbid" in bidding_contract.expected_event_types
+    assert f"{entry_id}_active_selling_items" in exp_seller_ids
+    assert f"{entry_id}_selling_total_bids" in exp_seller_ids
+    assert f"{entry_id}_selling_2001_price" in exp_seller_ids
+    assert f"{entry_id}_selling_2001_views" in exp_seller_ids
+
+    res_seller = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.SELLER_LISTINGS,
+        item_ids=["2001"],
+        observed_unique_ids=exp_seller_ids,
+        observed_event_types=exp_seller_events,
+    )
+    assert res_seller.contracts_intact is True
+    assert res_seller.violations == ()
+
+
+def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> None:
+    """Non-tautological verification: missing or extra contracts must fail."""
+    entry_id = "test_entry_mismatch"
+
+    # Case 1: Caller supplies NO observed contracts -> fails
+    res_none = MigrationPolicy.verify_contract_preservation(
+        entry_id, FeatureKey.WATCHLIST, item_ids=["1001"]
+    )
+    assert res_none.contracts_intact is False
+    assert any("No observed unique IDs" in v for v in res_none.violations)
+    assert any("No observed event types" in v for v in res_none.violations)
+
+    # Case 2: Observed unique IDs missing an expected entity
+    exp_ids = MigrationPolicy.get_expected_unique_ids(entry_id, FeatureKey.WATCHLIST)
+    exp_events = MigrationPolicy.get_expected_event_types(FeatureKey.WATCHLIST)
+    incomplete_ids = exp_ids[:-1]  # drop one
+    res_missing = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        observed_unique_ids=incomplete_ids,
+        observed_event_types=exp_events,
+    )
+    assert res_missing.contracts_intact is False
+    assert any("Missing expected unique IDs" in v for v in res_missing.violations)
+
+    # Case 3: Observed unique IDs contains unexpected altered ID
+    corrupted_ids = (*exp_ids, f"{entry_id}_altered_entity_key")
+    res_corrupted = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        observed_unique_ids=corrupted_ids,
+        observed_event_types=exp_events,
+    )
+    assert res_corrupted.contracts_intact is False
+    assert any("Unexpected extra unique IDs" in v for v in res_corrupted.violations)
+
+    # Case 4: Observed event types missing an expected event
+    incomplete_events = exp_events[:-1]
+    res_missing_event = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        observed_unique_ids=exp_ids,
+        observed_event_types=incomplete_events,
+    )
+    assert res_missing_event.contracts_intact is False
+    assert any(
+        "Missing expected event types" in v for v in res_missing_event.violations
+    )
+
+    # Case 5: Observed event types has unexpected extra event
+    extra_events = (*exp_events, "unexpected_event_foo")
+    res_extra_event = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        observed_unique_ids=exp_ids,
+        observed_event_types=extra_events,
+    )
+    assert res_extra_event.contracts_intact is False
+    assert any("Unexpected extra event types" in v for v in res_extra_event.violations)
+
+
+def test_strict_privacy_allowlist_redacts_secrets_pii_and_arbitrary_strings() -> None:
+    """Strict privacy allowlisting must redact secrets, tokens, usernames, and item IDs."""
+    # Safe symbolic codes and HTTP status codes pass through
+    assert sanitize_diagnostic_token("FORBIDDEN") == "FORBIDDEN"
+    assert sanitize_diagnostic_token("ACCESS_DENIED") == "ACCESS_DENIED"
+    assert sanitize_diagnostic_token("403") == "403"
+    assert sanitize_diagnostic_token("500") == "500"
+    assert sanitize_diagnostic_token(None) == "UNKNOWN"
+    assert sanitize_diagnostic_token("") == "EMPTY"
+
+    # Safe scopes and fields pass through
+    assert (
+        sanitize_diagnostic_token(
+            "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+        )
+        == "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+    )
+    assert sanitize_diagnostic_token("current_price") == "current_price"
+    assert sanitize_diagnostic_token("bid_count") == "bid_count"
+
+    # Adversarial strings, client secrets, refresh tokens, usernames, item IDs must be REDACTED
+    assert (
+        sanitize_diagnostic_token("v^1.1#i^1#r^0#p^3#I^3#f^0#t^H4sIAAAAAAAAA")
+        == REDACTED_DIAGNOSTIC
+    )
+    assert sanitize_diagnostic_token("client_secret_xyz12345") == REDACTED_DIAGNOSTIC
+    assert sanitize_diagnostic_token("123456789012") == REDACTED_DIAGNOSTIC
+    assert sanitize_diagnostic_token("cool_ebay_seller_99") == REDACTED_DIAGNOSTIC
+    assert (
+        sanitize_diagnostic_token("https://api.ebay.com/arbitrary/secret/url?token=xyz")
+        == REDACTED_DIAGNOSTIC
+    )
+    assert sanitize_diagnostic_token("a" * 80) == REDACTED_DIAGNOSTIC
 
 
 def test_existing_config_entry_identity_preservation() -> None:
@@ -389,26 +685,20 @@ def test_existing_config_entry_identity_preservation() -> None:
     assert saved_options == raw_options
 
     # Contract verification operates purely on entry_id and item_ids
-    contract = MigrationPolicy.verify_contract_preservation(
+    exp_ids = MigrationPolicy.get_expected_unique_ids(
         entry_id, FeatureKey.WATCHLIST, saved_options[CONF_PINNED_ITEM_IDS]
     )
-    assert contract.contracts_intact is True
-    assert f"{entry_id}_watching" in contract.preserved_unique_ids
-    assert f"{entry_id}_watch_123456789012_price" in contract.preserved_unique_ids
-
-
-def test_sanitization_diagnostics_privacy() -> None:
-    """Ensure diagnostic tokens and error summaries never leak secrets or PII."""
-    assert sanitize_diagnostic_token("FORBIDDEN") == "FORBIDDEN"
-    assert sanitize_diagnostic_token("INVALID_SCOPE") == "INVALID_SCOPE"
-    assert sanitize_diagnostic_token(None) == "UNKNOWN"
-    assert sanitize_diagnostic_token("") == "EMPTY"
-    # Long or malformed token with punctuation or secrets
-    assert (
-        sanitize_diagnostic_token("v1//token#secret-string-with-punctuation!@#$%^&*()")
-        == "MALFORMED_OR_OPAQUE_DIAGNOSTIC"
+    exp_events = MigrationPolicy.get_expected_event_types(FeatureKey.WATCHLIST)
+    contract = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        saved_options[CONF_PINNED_ITEM_IDS],
+        observed_unique_ids=exp_ids,
+        observed_event_types=exp_events,
     )
-    assert sanitize_diagnostic_token("a" * 100) == "MALFORMED_OR_OPAQUE_DIAGNOSTIC"
+    assert contract.contracts_intact is True
+    assert f"{entry_id}_watched_items" in contract.expected_unique_ids
+    assert f"{entry_id}_watched_123456789012_price" in contract.expected_unique_ids
 
 
 def test_get_all_feature_readiness_and_export_summary() -> None:
@@ -430,32 +720,51 @@ def test_get_all_feature_readiness_and_export_summary() -> None:
         )
         for feat in FeatureKey
     }
-    summary_ready = MigrationPolicy.export_sanitized_readiness_summary(ev_all_ready)
-    assert summary_ready["all_ready"] is True
-    for feat_dict in summary_ready["features"].values():
-        assert feat_dict["is_ready"] is True
-        assert feat_dict["state"] == "ready"
+    summary_ready = MigrationPolicy.export_sanitized_readiness_summary(
+        ev_all_ready, candidate_provider=ProviderType.TRADING_XML
+    )
+    # XML baseline features are ready; REST-native features evaluate XML as NOT_SUPPORTED
+    assert summary_ready["features"]["orders"]["state"] == str(
+        ReadinessState.NOT_SUPPORTED
+    )
+    assert summary_ready["features"]["watchlist"]["state"] == str(ReadinessState.READY)
 
 
 def test_contract_preservation_for_orders_and_feedback() -> None:
     """Test contract preservation for non-item features like orders and feedback."""
     entry_id = "test_entry_non_item"
+    exp_orders_ids = MigrationPolicy.get_expected_unique_ids(
+        entry_id, FeatureKey.ORDERS
+    )
+    exp_orders_events = MigrationPolicy.get_expected_event_types(FeatureKey.ORDERS)
+    assert f"{entry_id}_orders_overdue" in exp_orders_ids
+    assert f"{entry_id}_open_payment_disputes" in exp_orders_ids
+    assert "shipment_overdue" in exp_orders_events
+    assert "order_received" in exp_orders_events
+
     orders_contract = MigrationPolicy.verify_contract_preservation(
-        entry_id, FeatureKey.ORDERS, item_ids=["ignored_item_id"]
+        entry_id,
+        FeatureKey.ORDERS,
+        observed_unique_ids=exp_orders_ids,
+        observed_event_types=exp_orders_events,
     )
     assert orders_contract.contracts_intact is True
-    assert f"{entry_id}_orders_overdue" in orders_contract.expected_unique_ids
-    assert "ebay_order_overdue" in orders_contract.expected_event_types
 
-    feedback_contract = MigrationPolicy.verify_contract_preservation(
+    exp_feedback_ids = MigrationPolicy.get_expected_unique_ids(
         entry_id, FeatureKey.FEEDBACK
     )
-    assert feedback_contract.contracts_intact is True
-    assert f"{entry_id}_feedback_score" in feedback_contract.expected_unique_ids
-    assert (
-        f"{entry_id}_positive_feedback_percent" in feedback_contract.expected_unique_ids
+    exp_feedback_events = MigrationPolicy.get_expected_event_types(FeatureKey.FEEDBACK)
+    assert f"{entry_id}_feedback_score" in exp_feedback_ids
+    assert f"{entry_id}_positive_feedback_percent" in exp_feedback_ids
+    assert "feedback_received" in exp_feedback_events
+
+    feedback_contract = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.FEEDBACK,
+        observed_unique_ids=exp_feedback_ids,
+        observed_event_types=exp_feedback_events,
     )
-    assert feedback_contract.expected_event_types == ()
+    assert feedback_contract.contracts_intact is True
 
 
 def test_deduplication_stores_remain_compatible() -> None:

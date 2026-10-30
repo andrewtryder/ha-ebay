@@ -48,6 +48,11 @@ show_missing = true
 skip_covered = false
 
 [tool.ruff]
+# Target version is intentionally py313 because Ruff 0.16.0 with py314 strips
+# parentheses around exception tuples in except clauses (e.g. `except (TypeError, ValueError):`
+# -> `except TypeError, ValueError:`), which alters standard exception handling style.
+# Retaining py313 ensures clean, standard Python formatting across the repository
+# while runtime and pytest testing run on Python >=3.14.2 with Home Assistant 2026.10.0.
 target-version = "py313"
 line-length = 88
 
