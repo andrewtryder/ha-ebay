@@ -295,57 +295,78 @@ async def async_fetch_bounded_graphql_pages(
     paginate: bool = False,
     max_pages: int = MAX_PAGES,
 ) -> list[dict[str, Any]]:
-    """Execute a validated GraphQL probe, with optional bounded offset pagination."""
-    if not paginate:
-        single_result = await client.async_request_graphql(
-            probe.query,
-            operation_name=probe.operation_name,
-            variables=probe.variables,
-        )
-        return [single_result]
+    """Execute a validated GraphQL probe, with optional bounded offset pagination.
 
-    pages: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    limit = 100
-    offset = 0
+    When ``paginate=False`` (default for unverified contract discovery), executes
+    only a single request. When ``paginate=True`` and the probe uses integer
+    ``limit`` and ``offset`` variables, fetches up to ``max_pages`` pages and stops
+    immediately if a page returns no new unique item IDs, encounters duplicate/missing
+    IDs, or reaches ``reported_total``.
+    """
+    first_page = await client.async_post_graphql(
+        probe.query,
+        variables=probe.variables,
+        operation_name=probe.operation_name,
+    )
+    pages: list[dict[str, Any]] = [first_page]
+    if not paginate or max_pages <= 1:
+        return pages
 
-    declared = probe.variables or {}
-    if "limit" in declared and isinstance(declared["limit"], int):
-        limit = max(1, declared["limit"])
-    if "offset" in declared and isinstance(declared["offset"], int):
-        offset = max(0, declared["offset"])
+    if not isinstance(first_page, Mapping):
+        return pages
 
-    for _page_idx in range(max_pages):
-        current_vars = dict(declared)
-        current_vars["limit"] = limit
-        current_vars["offset"] = offset
+    base_vars = dict(probe.variables) if isinstance(probe.variables, Mapping) else {}
+    limit = base_vars.get("limit")
+    offset = base_vars.get("offset", 0)
+    if (
+        not isinstance(limit, int)
+        or limit <= 0
+        or not isinstance(offset, int)
+        or offset < 0
+    ):
+        return pages
 
-        page_result = await client.async_request_graphql(
-            probe.query,
-            operation_name=probe.operation_name,
-            variables=current_vars,
-        )
-        pages.append(page_result)
+    norm_first = normalize_graphql_seller_payload(first_page)
+    reported_total = norm_first["reported_total"]
+    if (
+        not norm_first["items_list_present"]
+        or reported_total is None
+        or norm_first["raw_item_count"] <= 0
+        or norm_first["raw_item_count"] >= reported_total
+        or norm_first["duplicate_id_count"] > 0
+        or norm_first["missing_id_count"] > 0
+    ):
+        return pages
 
-        try:
-            merged_so_far = merge_graphql_seller_pages([page_result])
-            page_items = merged_so_far["items_by_id"]
-            new_ids = set(page_items.keys()) - seen_ids
-            seen_ids.update(page_items.keys())
-            reported_total = merged_so_far["reported_total"]
+    seen_ids = set(norm_first["items_by_id"].keys())
+    total_raw_retrieved = norm_first["raw_item_count"]
+    current_offset = offset
 
-            if not new_ids:
-                break
-            if reported_total is not None and len(seen_ids) >= reported_total:
-                break
-            if merged_so_far["duplicate_id_count"] > 0:
-                break
-            if len(page_items) < limit:
-                break
-        except Exception:
+    for _ in range(1, max_pages):
+        if total_raw_retrieved >= reported_total:
             break
-
-        offset += limit
+        current_offset += limit
+        page_vars = {**base_vars, "limit": limit, "offset": current_offset}
+        next_page = await client.async_post_graphql(
+            probe.query,
+            variables=page_vars,
+            operation_name=probe.operation_name,
+        )
+        pages.append(next_page)
+        if not isinstance(next_page, Mapping):
+            break
+        norm_page = normalize_graphql_seller_payload(next_page)
+        page_ids = set(norm_page["items_by_id"].keys())
+        new_ids = page_ids - seen_ids
+        total_raw_retrieved += norm_page["raw_item_count"]
+        if (
+            norm_page["raw_item_count"] == 0
+            or not new_ids
+            or norm_page["duplicate_id_count"] > 0
+            or norm_page["missing_id_count"] > 0
+        ):
+            break
+        seen_ids.update(new_ids)
 
     return pages
 
@@ -1008,24 +1029,24 @@ async def _async_main(argv: list[str] | None = None) -> int:
             ha_entry_id=args.ha_entry_id,
         )
 
-        access_token = creds.get("access_token") or None
-        expires_in = 7200
-        raw_exp = creds.get("access_token_expires_in")
-        if raw_exp and raw_exp.isdigit():
-            expires_in = int(raw_exp)
-
         async with aiohttp.ClientSession() as session:
             client = EbayApiClient(
                 session,
-                client_id=creds["client_id"],
-                client_secret=creds["client_secret"],
-                runame=creds["runame"],
-                refresh_token=creds["refresh_token"],
-                access_token=access_token,
-                access_token_expires_in=expires_in,
                 environment=creds["environment"],
+                client_id=creds["client_id"] or "unused-client-id",
+                client_secret=creds["client_secret"] or "unused-client-secret",
+                runame=creds["runame"] or "unused-runame",
+                refresh_token=creds["refresh_token"] or None,
                 site_id=creds["site_id"],
             )
+            if creds.get("access_token"):
+                expires_in = int(creds.get("access_token_expires_in") or 7200)
+                client._store_access_token(
+                    {
+                        "access_token": creds["access_token"],
+                        "expires_in": expires_in,
+                    }
+                )
             report = await run_live_seller_validation(
                 client,
                 custom_probe=custom_probe,

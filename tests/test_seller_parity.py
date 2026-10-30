@@ -8,12 +8,13 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import aiohttp
 import pytest
 
 import scripts.validate_seller_parity as cli_harness
+from custom_components.ebay.api import EbayApiClient
 from custom_components.ebay.clients.errors import (
     EbayApiError,
     EbayAuthError,
@@ -23,6 +24,7 @@ from custom_components.ebay.clients.errors import (
     EbayParseError,
 )
 from custom_components.ebay.parsers.seller_parity import (
+    MONITORED_SELLER_FIELDS,
     PARITY_DIFFERENT_SEMANTICS,
     PARITY_EQUIVALENT_NORMALIZED,
     PARITY_EXACT_MATCH,
@@ -736,7 +738,7 @@ def test_run_live_seller_validation_with_mocked_client() -> None:
 
     mock_client.async_call_trading_api = AsyncMock(return_value=ET.fromstring(xml_demo))
     gql_dict = json.loads(gql_demo)["data"]
-    mock_client.async_request_graphql = AsyncMock(return_value=gql_dict)
+    mock_client.async_post_graphql = AsyncMock(return_value=gql_dict)
 
     report = asyncio.run(cli_harness.run_live_seller_validation(mock_client))
     assert report["mode"] == "live_authenticated"
@@ -2115,3 +2117,264 @@ def test_compare_seller_snapshots_edge_branches() -> None:
     assert (
         res_diff_total["fields"]["selling_count"]["classification"] == PARITY_UNVERIFIED
     )
+
+
+def test_cli_live_with_real_client_constructor_and_mocked_http(tmp_path: Path) -> None:
+    """CLI --live executes with real EbayApiClient constructor and real async_post_graphql interface."""
+    env_file = tmp_path / ".env.local"
+    env_file.write_text(
+        "EBAY_ACCESS_TOKEN=short-lived-test-token-xyz\n"
+        "EBAY_SITE_ID=0\n"
+        "EBAY_ENVIRONMENT=production\n",
+        encoding="utf-8",
+    )
+    out_md = tmp_path / "seller_parity.local.md"
+
+    xml_demo, gql_demo = cli_harness._synthetic_demo_fixtures()
+    gql_data = json.loads(gql_demo)["data"]
+
+    with (
+        patch.object(
+            EbayApiClient,
+            "async_call_trading_api",
+            new_callable=AsyncMock,
+            return_value=ET.fromstring(xml_demo),
+        ) as mock_trading,
+        patch.object(
+            EbayApiClient,
+            "async_post_graphql",
+            new_callable=AsyncMock,
+            return_value=gql_data,
+        ) as mock_graphql,
+    ):
+        exit_code = asyncio.run(
+            cli_harness._async_main(
+                [
+                    "--live",
+                    "--env-file",
+                    str(env_file),
+                    "--output",
+                    str(out_md),
+                ]
+            )
+        )
+
+    assert exit_code == 0
+    assert mock_trading.called
+    assert mock_graphql.called
+    assert out_md.exists()
+    content = out_md.read_text(encoding="utf-8")
+    assert (
+        "# eBay Active Seller Listings API Contract and Parity Validation Report"
+        in content
+    )
+    assert "short-lived-test-token-xyz" not in content
+
+
+def test_multipage_conflicting_totals_fail_closed() -> None:
+    """Conflicting reported totals across pages (e.g. 2 vs 3) fail closed to inconsistent_total and unverified."""
+    page1 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [
+                {
+                    "itemId": "101",
+                    "title": "Widget One",
+                    "currentPrice": {"value": 10.0, "currency": "USD"},
+                    "quantity": 1,
+                    "quantityAvailable": 1,
+                    "quantitySold": 0,
+                    "watchers": 2,
+                    "views": 20,
+                    "questions": 0,
+                    "bestOfferCount": 0,
+                    "listingDetails": {"endTime": "2026-11-01T00:00:00Z"},
+                    "listingType": "FixedPriceItem",
+                    "viewItemUrl": "https://www.ebay.com/itm/101",
+                    "pictureDetails": {"galleryUrl": "https://img.ebay.com/101.jpg"},
+                }
+            ],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page2 = {
+        "sellerListingSearch": {
+            "total": 3,
+            "items": [
+                {
+                    "itemId": "102",
+                    "title": "Widget Two",
+                    "currentPrice": {"value": 20.0, "currency": "USD"},
+                    "quantity": 1,
+                    "quantityAvailable": 1,
+                    "quantitySold": 0,
+                    "watchers": 5,
+                    "views": 50,
+                    "questions": 1,
+                    "bestOfferCount": 0,
+                    "listingDetails": {"endTime": "2026-11-02T00:00:00Z"},
+                    "listingType": "FixedPriceItem",
+                    "viewItemUrl": "https://www.ebay.com/itm/102",
+                    "pictureDetails": {"galleryUrl": "https://img.ebay.com/102.jpg"},
+                }
+            ],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+
+    # 1. merge_graphql_seller_pages fails closed on contradictory totals
+    merged = merge_graphql_seller_pages([page1, page2])
+    assert merged["graphql_complete"] is False
+    assert merged["pagination_status"] == "inconsistent_total"
+    assert merged["raw_item_count"] == 2
+    assert len(merged["items_by_id"]) == 2
+
+    # 2. compare_seller_snapshots with matching 2 items in XML must fail closed
+    xml_items = {
+        "101": {
+            "item_id": "101",
+            "title": "Widget One",
+            "current_price": 10.0,
+            "currency": "USD",
+            "quantity": 1,
+            "quantity_available": 1,
+            "quantity_sold": 0,
+            "views": 20,
+            "watchers": 2,
+            "questions": 0,
+            "offers": 0,
+            "end_time": "2026-11-01T00:00:00Z",
+            "listing_type": "FixedPriceItem",
+            "url": "https://www.ebay.com/itm/101",
+            "image": "https://img.ebay.com/101.jpg",
+        },
+        "102": {
+            "item_id": "102",
+            "title": "Widget Two",
+            "current_price": 20.0,
+            "currency": "USD",
+            "quantity": 1,
+            "quantity_available": 1,
+            "quantity_sold": 0,
+            "views": 50,
+            "watchers": 5,
+            "questions": 1,
+            "offers": 0,
+            "end_time": "2026-11-02T00:00:00Z",
+            "listing_type": "FixedPriceItem",
+            "url": "https://www.ebay.com/itm/102",
+            "image": "https://img.ebay.com/102.jpg",
+        },
+    }
+
+    comparison = compare_seller_snapshots(xml_items, [page1, page2])
+    assert comparison["status"] == "inconclusive"
+    assert comparison["graphql_complete"] is False
+    assert comparison["pagination_status"] == "inconsistent_total"
+
+    # All 16 monitored fields MUST be classified unverified
+    for field_name in MONITORED_SELLER_FIELDS:
+        field_result = comparison["fields"][field_name]
+        assert field_result["classification"] == PARITY_UNVERIFIED, (
+            f"Field {field_name} was {field_result['classification']}, expected {PARITY_UNVERIFIED}"
+        )
+
+
+def test_multipage_continuation_and_consistent_totals() -> None:
+    """Test conflicting continuation indicators and fully consistent multi-page collections."""
+    page_no_next = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "101", "title": "Item 1"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    page_extra = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "102", "title": "Item 2"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+
+    # Prior page claimed hasNextPage: False, but subsequent page followed -> conflicting continuation
+    merged_conflict = merge_graphql_seller_pages([page_no_next, page_extra])
+    assert merged_conflict["graphql_complete"] is False
+    assert merged_conflict["pagination_status"] == "conflicting_continuation"
+
+    # Multi-page consistent complete retrieval
+    page_consistent_1 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [
+                {
+                    "itemId": "101",
+                    "title": "Item 1",
+                    "currentPrice": {"value": 10.0, "currency": "USD"},
+                    "quantity": 1,
+                    "quantityAvailable": 1,
+                    "quantitySold": 0,
+                    "views": 10,
+                    "watchers": 1,
+                    "questions": 0,
+                    "bestOfferCount": 0,
+                    "listingDetails": {"endTime": "2026-11-01T00:00:00Z"},
+                    "listingType": "FixedPriceItem",
+                    "viewItemUrl": "https://www.ebay.com/itm/101",
+                    "pictureDetails": {"galleryUrl": "https://img.ebay.com/101.jpg"},
+                }
+            ],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page_consistent_2 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [
+                {
+                    "itemId": "102",
+                    "title": "Item 2",
+                    "currentPrice": {"value": 20.0, "currency": "USD"},
+                    "quantity": 1,
+                    "quantityAvailable": 1,
+                    "quantitySold": 0,
+                    "views": 20,
+                    "watchers": 2,
+                    "questions": 0,
+                    "bestOfferCount": 0,
+                    "listingDetails": {"endTime": "2026-11-02T00:00:00Z"},
+                    "listingType": "FixedPriceItem",
+                    "viewItemUrl": "https://www.ebay.com/itm/102",
+                    "pictureDetails": {"galleryUrl": "https://img.ebay.com/102.jpg"},
+                }
+            ],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+
+    merged_consistent = merge_graphql_seller_pages(
+        [page_consistent_1, page_consistent_2]
+    )
+    assert merged_consistent["graphql_complete"] is True
+    assert merged_consistent["pagination_status"] == "complete"
+    assert merged_consistent["reported_total"] == 2
+    assert len(merged_consistent["items_by_id"]) == 2
+
+    # Incomplete pagination (total reported 3, but only 2 retrieved)
+    page_inc_1 = {
+        "sellerListingSearch": {
+            "total": 3,
+            "items": [{"itemId": "101", "title": "Item 1"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page_inc_2 = {
+        "sellerListingSearch": {
+            "total": 3,
+            "items": [{"itemId": "102", "title": "Item 2"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_inc = merge_graphql_seller_pages([page_inc_1, page_inc_2])
+    assert merged_inc["graphql_complete"] is False
+    assert merged_inc["pagination_status"] == "truncated"
