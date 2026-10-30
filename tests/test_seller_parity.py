@@ -2378,3 +2378,237 @@ def test_multipage_continuation_and_consistent_totals() -> None:
     merged_inc = merge_graphql_seller_pages([page_inc_1, page_inc_2])
     assert merged_inc["graphql_complete"] is False
     assert merged_inc["pagination_status"] == "truncated"
+
+
+@pytest.mark.parametrize(
+    "page2_info",
+    [
+        None,  # pageInfo key omitted entirely (handled in test)
+        "omitted",
+        {"pageInfo": None},
+        {"pageInfo": "malformed_string"},
+        {"pageInfo": {"hasNextPage": None}},
+        {"pageInfo": {"hasNextPage": True}},
+        {"pageInfo": {"hasNextPage": False}},
+    ],
+)
+def test_subsequent_page_after_has_next_false_always_fails_closed(
+    page2_info: Any,
+) -> None:
+    """Any subsequent page after an explicit hasNextPage=false must fail closed."""
+    page1 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [
+                {
+                    "itemId": "101",
+                    "title": "Widget One",
+                    "currentPrice": {"value": 10.0, "currency": "USD"},
+                    "quantity": 1,
+                    "quantityAvailable": 1,
+                    "quantitySold": 0,
+                    "views": 20,
+                    "watchers": 2,
+                    "questions": 0,
+                    "bestOfferCount": 0,
+                    "listingDetails": {"endTime": "2026-11-01T00:00:00Z"},
+                    "listingType": "FixedPriceItem",
+                    "viewItemUrl": "https://www.ebay.com/itm/101",
+                    "pictureDetails": {"galleryUrl": "https://img.ebay.com/101.jpg"},
+                }
+            ],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+
+    container_page2: dict[str, Any] = {
+        "total": 2,
+        "items": [
+            {
+                "itemId": "102",
+                "title": "Widget Two",
+                "currentPrice": {"value": 20.0, "currency": "USD"},
+                "quantity": 1,
+                "quantityAvailable": 1,
+                "quantitySold": 0,
+                "views": 50,
+                "watchers": 5,
+                "questions": 1,
+                "bestOfferCount": 0,
+                "listingDetails": {"endTime": "2026-11-02T00:00:00Z"},
+                "listingType": "FixedPriceItem",
+                "viewItemUrl": "https://www.ebay.com/itm/102",
+                "pictureDetails": {"galleryUrl": "https://img.ebay.com/102.jpg"},
+            }
+        ],
+    }
+    if page2_info == "omitted":
+        pass  # pageInfo omitted
+    elif isinstance(page2_info, dict):
+        container_page2.update(page2_info)
+
+    page2 = {"sellerListingSearch": container_page2}
+
+    merged = merge_graphql_seller_pages([page1, page2])
+    assert merged["graphql_complete"] is False
+    assert merged["pagination_status"] == "conflicting_continuation"
+    assert merged["graphql_truncated"] is True
+
+    # When compared against 2 matching XML items, must fail closed
+    xml_items = {
+        "101": {
+            "item_id": "101",
+            "title": "Widget One",
+            "current_price": 10.0,
+            "currency": "USD",
+            "quantity": 1,
+            "quantity_available": 1,
+            "quantity_sold": 0,
+            "views": 20,
+            "watchers": 2,
+            "questions": 0,
+            "offers": 0,
+            "end_time": "2026-11-01T00:00:00Z",
+            "listing_type": "FixedPriceItem",
+            "url": "https://www.ebay.com/itm/101",
+            "image": "https://img.ebay.com/101.jpg",
+        },
+        "102": {
+            "item_id": "102",
+            "title": "Widget Two",
+            "current_price": 20.0,
+            "currency": "USD",
+            "quantity": 1,
+            "quantity_available": 1,
+            "quantity_sold": 0,
+            "views": 50,
+            "watchers": 5,
+            "questions": 1,
+            "offers": 0,
+            "end_time": "2026-11-02T00:00:00Z",
+            "listing_type": "FixedPriceItem",
+            "url": "https://www.ebay.com/itm/102",
+            "image": "https://img.ebay.com/102.jpg",
+        },
+    }
+
+    comparison = compare_seller_snapshots(xml_items, [page1, page2])
+    assert comparison["status"] == "inconclusive"
+    assert comparison["graphql_complete"] is False
+    assert comparison["pagination_status"] == "conflicting_continuation"
+
+    for field_name in MONITORED_SELLER_FIELDS:
+        field_res = comparison["fields"][field_name]
+        assert field_res["classification"] == PARITY_UNVERIFIED, (
+            f"Field {field_name} must be unverified, got {field_res['classification']}"
+        )
+
+
+def test_multipage_duplicate_ids_missing_ids_and_boundaries() -> None:
+    """Test duplicate IDs across pages, missing item IDs, empty final pages, and bounds."""
+    # 1. Duplicated IDs across pages
+    page_dup_1 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "101", "title": "A"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page_dup_2 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "101", "title": "A copy"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_dup = merge_graphql_seller_pages([page_dup_1, page_dup_2])
+    assert merged_dup["duplicate_id_count"] == 1
+    assert merged_dup["graphql_complete"] is False
+    assert merged_dup["pagination_status"] == "incomplete_identity"
+
+    # 2. Missing item ID in record
+    page_missing_id = {
+        "sellerListingSearch": {
+            "total": 1,
+            "items": [{"title": "No ID here"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_missing = merge_graphql_seller_pages([page_missing_id])
+    assert merged_missing["missing_id_count"] == 1
+    assert merged_missing["graphql_complete"] is False
+    assert merged_missing["pagination_status"] == "incomplete_identity"
+
+    # 3. Empty final page with reported_total not reached
+    page_empty_final_1 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "101", "title": "A"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    page_empty_final_2 = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_empty_final = merge_graphql_seller_pages(
+        [page_empty_final_1, page_empty_final_2]
+    )
+    assert merged_empty_final["raw_item_count"] == 1
+    assert merged_empty_final["reported_total"] == 2
+    assert merged_empty_final["graphql_complete"] is False
+    assert merged_empty_final["pagination_status"] == "truncated"
+
+    # 4. Missing total count metadata
+    page_no_total = {
+        "sellerListingSearch": {
+            "items": [{"itemId": "101", "title": "A"}],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_no_total = merge_graphql_seller_pages([page_no_total])
+    assert merged_no_total["reported_total"] is None
+    assert merged_no_total["graphql_complete"] is False
+    assert merged_no_total["pagination_status"] == "unverified"
+
+    # 5. Malformed page objects
+    valid_page = {
+        "sellerListingSearch": {
+            "total": 2,
+            "items": [{"itemId": "101", "title": "A"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    merged_malformed = merge_graphql_seller_pages([valid_page, "malformed_page_string"])  # type: ignore[list-item]
+    assert merged_malformed["graphql_complete"] is False
+    assert merged_malformed["pagination_status"] == "malformed_page"
+
+    # 6. Pagination boundary reached before all items retrieved (max_pages reached)
+    p1 = {
+        "sellerListingSearch": {
+            "total": 10,
+            "items": [{"itemId": "101"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    p2 = {
+        "sellerListingSearch": {
+            "total": 10,
+            "items": [{"itemId": "102"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    p3 = {
+        "sellerListingSearch": {
+            "total": 10,
+            "items": [{"itemId": "103"}],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    merged_boundary = merge_graphql_seller_pages([p1, p2, p3], max_pages=2)
+    assert merged_boundary["page_count"] == 2
+    assert merged_boundary["graphql_complete"] is False
+    assert merged_boundary["pagination_status"] == "truncated"

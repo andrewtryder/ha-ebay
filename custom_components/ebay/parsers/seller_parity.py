@@ -1182,9 +1182,14 @@ def merge_graphql_seller_pages(
     seen_reported_totals: list[int] = []
     has_conflicting_continuation = False
     prior_page_had_no_next = False
+    malformed_page_count = 0
 
     for page in bounded_pages:
+        if prior_page_had_no_next:
+            has_conflicting_continuation = True
+
         if not isinstance(page, Mapping):
+            malformed_page_count += 1
             continue
         container_key, container = _find_seller_container(page)
         if container_key:
@@ -1192,6 +1197,7 @@ def merge_graphql_seller_pages(
                 sanitize_graphql_field_name(container_key, kind="container")
             )
         if not isinstance(container, Mapping):
+            malformed_page_count += 1
             continue
 
         page_reported_total: int | None = None
@@ -1222,8 +1228,6 @@ def merge_graphql_seller_pages(
             page_has_next = page_info.get("hasNextPage")
             if page_has_next is not None:
                 has_next_bool = bool(page_has_next)
-                if prior_page_had_no_next:
-                    has_conflicting_continuation = True
                 if not has_next_bool:
                     prior_page_had_no_next = True
                 last_has_next_page = has_next_bool
@@ -1271,6 +1275,10 @@ def merge_graphql_seller_pages(
         graphql_truncated = True
         graphql_complete = False
         pagination_status = "conflicting_continuation"
+    elif malformed_page_count > 0:
+        graphql_truncated = False
+        graphql_complete = False
+        pagination_status = "malformed_page"
     elif last_has_next_page and (reported_total == 0 or raw_item_count == 0):
         graphql_truncated = True
         graphql_complete = False
