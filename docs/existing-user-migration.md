@@ -13,7 +13,7 @@ The integration does **not** treat all feature domains as legacy Trading XML. Di
 | **Watchlist** (`FeatureKey.WATCHLIST`) | `TRADING_XML` | `GetMyeBayBuying` (`WatchList`) | Yes (Candidate: GraphQL `userWatchList`) |
 | **Bidding** (`FeatureKey.BIDDING`) | `TRADING_XML` | `GetMyeBayBuying` (`BidList`) | Yes (Candidate: GraphQL `userBiddingActivity`) |
 | **Seller Listings** (`FeatureKey.SELLER_LISTINGS`) | `TRADING_XML` | `GetMyeBaySelling` (`ActiveList`) | Yes (Candidate: GraphQL `activeSellerListings`) |
-| **Offers** (`FeatureKey.OFFERS`) | `TRADING_XML` | `GetMyeBaySelling` (Best offer fields) | Yes (Candidate: REST / GraphQL) |
+| **Offers** (`FeatureKey.OFFERS`) | `TRADING_XML` | `GetBestOffers` (active offer counts per item) | Yes (Candidate: GraphQL `sellerNegotiationHistory`; validation complete, cutover blocked) |
 | **Sold / Unsold** (`FeatureKey.SOLD_UNSOLD`) | `TRADING_XML` | `GetMyeBaySelling` (`SoldList`, `UnsoldList`) | Yes (Candidate: REST / GraphQL) |
 | **Fulfillment Orders** (`FeatureKey.ORDERS`) | `REST` | `/sell/fulfillment/v1/order` & dispute APIs | **No** (Already modern REST; XML is not a fallback) |
 | **Seller Standards** (`FeatureKey.SELLER_STANDARDS`) | `REST` | `/sell/analytics/v1/seller_standards_profile` | **No** (Already modern REST; XML is not a fallback) |

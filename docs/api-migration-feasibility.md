@@ -132,18 +132,17 @@ The validation harness includes 6 built-in probes for safe schema and contract d
 
 | Dimension | Details & Assessment |
 |---|---|
-| **1. Existing Source** | Trading XML `GetBestOffers` (for seller) and `GetMyeBayBuying` `BestOfferList` (for buyer) **[OFFICIAL SPEC]** **[LIVE TESTED]**. |
-| **2. Modern Replacement** | eBay GraphQL **Offer API** (`buyerNegotiationHistory`) and REST **Sell Negotiation API** (`GET /sell/negotiation/v1/offer`) **[OFFICIAL SPEC]**. |
-| **3. Exact Operation Name** | `query GetBuyerOffers { buyerNegotiationHistory { ... } }` and REST `findEligibleItems` / `getOffers` **[OFFICIAL SPEC]**. |
-| **4. Required Fields & Semantics** | Offer ID, item ID, offer amount, status (`Pending`, `Accepted`, `Declined`, `Countered`, `Expired`), buyer/seller message, expiration time **[OFFICIAL SPEC]**. Note: `ha-ebay` is strictly read-only; mutation operations (`makeOffer`, `acceptOffer`, `counterOffer`, `declineOffer`) are prohibited. |
+| **1. Existing Source** | Trading XML `GetBestOffers` (seller) and `GetMyeBayBuying` `BestOfferList` (buyer validation baseline) **[OFFICIAL SPEC]** **[REPO_VERIFIED]**. |
+| **2. Modern Replacement** | eBay GraphQL **Offer API** (`sellerNegotiationHistory` for seller, `buyerNegotiationHistory` for buyer) **[OFFICIAL SPEC]**. Initial release published October 26, 2026. |
+| **3. Exact Operation Names** | `query GetSellerNegotiations { sellerNegotiationHistory(limit: $limit, offset: $offset) { ... } }` and `query GetBuyerNegotiations { buyerNegotiationHistory(limit: $limit, offset: $offset) { ... } }` **[OFFICIAL SPEC]**. |
+| **4. Required Fields & Semantics** | `negotiation_id`, `item_id`, `role`, `status`, `price`, `currency`, `quantity`, `created_at`, `expires_at`, `counteroffer_price`, `selling_total_offers`, `active_offers_by_item_id`. |
 | **5. Token Requirements** | User Access Token **[OFFICIAL SPEC]**. |
-| **6. Required Scopes** | `https://api.ebay.com/oauth/api_scope/buy.offer.auction` (buyer) or `https://api.ebay.com/oauth/api_scope/sell.negotiation` (seller) **[OFFICIAL SPEC]**. |
-| **7. Entitlement / Approval** | Buy Offer API is a Limited Release API; Sell Negotiation is generally available to sellers **[OFFICIAL SPEC]**. |
-| **8. Pagination & Date Window** | Supports filtering by offer status, user role, and date range **[OFFICIAL SPEC]**. |
-| **9. Call Limits & Polling** | Standard Sell Negotiation limits: 5,000 calls/day **[OFFICIAL SPEC]**. |
-| **10. HA Entities Dependent** | `sensor.ebay_selling_total_offers`, per-item offers count, `event.ebay_seller_ops_activity` (`best_offer_received`). |
-| **11. Verified Limitations** | Buy-side offer negotiation history requires buyer offer scopes and potential partner approval. |
-| **12. Migration Priority** | **PLANNED (Milestone 6)**: Maintain Trading XML fallback. |
+| **6. Required Scopes** | For candidate GraphQL queries, verified scope requirements are unconfirmed by eBay (`scopes_contract_established=False`) **[UNVERIFIED]**. (Documented REST scopes: `https://api.ebay.com/oauth/api_scope/sell.negotiation` for Sell Negotiation discount eligibility, `https://api.ebay.com/oauth/api_scope/buy.offer.auction` for REST Buy Offer). |
+| **7. Entitlement / Approval** | GraphQL Offer API resolver authorization remains unconfirmed on general keysets **[UNVERIFIED]**. Buy Offer REST API is a Limited Release API requiring application approval **[OFFICIAL SPEC]**. |
+| **8. Critical Contract Distinctions** | **REST Sell Negotiation**: `find_eligible_items` only identifies listings eligible for seller discount offers; it does **NOT** provide incoming Best Offer negotiation history **[REPO_VERIFIED]**. `sendOfferToInterestedBuyers` is mutating and strictly prohibited. **REST Sell Inventory**: `getOffer` retrieves inventory listing-offer objects, not negotiation records; inventory offer IDs must never be confused with negotiation offer IDs **[REPO_VERIFIED]**. |
+| **9. Pagination & Completeness** | Candidate queries use offset/limit pagination. Harness enforces loop detection, max page bounds (25), contradictory total detection, and fail-closed handling of HTTP 200 with `errors[]` **[REPO_VERIFIED]**. |
+| **10. HA Entities Dependent** | `sensor.ebay_selling_total_offers`, per-item `offers` sensors, Home Assistant bus event `offer_received`. |
+| **11. Production Status** | **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Trading XML `GetBestOffers` remains authoritative for production polling **[REPO_VERIFIED]**. |
 
 ---
 

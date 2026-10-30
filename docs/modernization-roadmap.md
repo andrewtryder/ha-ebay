@@ -24,9 +24,9 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned (Pending M2 authorization resolution) |
 | **Milestone 4** | Auction & Bidding Modernization Preparation & Parity Harness | `feat/ebay-auction-validation` | [#97](https://github.com/andrewtryder/ha-ebay/pull/97) | **Merged** (`4c2f394`) |
 | **Milestone 5** | Active Seller Listings Normalization and Parity Validation | `feat/ebay-seller-listings-validation` | [#98](https://github.com/andrewtryder/ha-ebay/pull/98) | **Merged** (`4ac5c80`) |
-| **Tooling & Foundation** | Modernize uv Tooling & Prepare Existing-User Migration | `chore/uv-ha-2026-10-migration-foundation` | PR | **In Progress** (HA 2026.10.0, uv, single CI target, migration policy layer) |
-| **Milestone 6** | Best Offers & Negotiation History Modernization Package | `feat/ebay-offers-modernization` | TBD | Planned |
-| **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | TBD | Planned |
+| **Tooling & Foundation** | Modernize uv Tooling & Prepare Existing-User Migration | `chore/uv-ha-2026-10-migration-foundation` | [#99](https://github.com/andrewtryder/ha-ebay/pull/99) | **Merged** (`e0a957b`) |
+| **Milestone 6** | Best Offers & Negotiation History Modernization Package | `feat/ebay-offers-modernization` | PR | **Completed** (Read-only validation package completed; production migration blocked pending live entitlement and parity evidence) |
+| **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | TBD | **Next Planned Workstream** |
 | **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | TBD | Planned |
 | **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | TBD | Planned |
 | **Milestone 10** | One-Click eBay OAuth Architecture Assessment | Design deliverable | TBD | Planned |
@@ -102,3 +102,16 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Implemented 8 strict fail-closed readiness gates for evaluating candidate modern API providers without modifying production polling coordinators.
   - Proved contract preservation for entity unique IDs, options, pinned items, price targets, and automation event payloads.
   - Designed future user-controlled migration rollout with shadow validation and instant rollback to Trading XML.
+
+### 7. Best Offers and Negotiation History Validation (Milestone 6)
+- **Authoritative API Research & Contract Discovery**:
+  - Researched eBay GraphQL Offer API (`sellerNegotiationHistory`, `buyerNegotiationHistory`, released October 26, 2026).
+  - Established critical distinctions between incoming Best Offer negotiations, REST Sell Negotiation discount eligibility (`find_eligible_items`), and REST Sell Inventory listing-offer objects (`getOffer`).
+  - Preserved existing production baseline: seller `GetBestOffers` active offer counts (`active_offers_by_item_id()`) feeding `{entry_id}_selling_total_offers`, per-item `offers` sensors, and `offer_received` events.
+  - Maintained zero production buyer offer polling to prevent exposing unfinished buyer entities.
+- **Read-Only Offers Parity Validation Module & Offline Harness**:
+  - Added [`custom_components/ebay/parsers/offers_parity.py`](../custom_components/ebay/parsers/offers_parity.py) and CLI harness [`scripts/validate_offers_parity.py`](../scripts/validate_offers_parity.py).
+  - Built typed, immutable models (`NormalizedNegotiation`, `OfferCollectionResult`) and 8 strictly read-only GraphQL candidate probes.
+  - Evaluates all monitored offer fields across the 6-state parity taxonomy with fail-closed pagination and loop detection.
+  - Preserved privacy protections: zero tokens, secrets, client credentials, buyer usernames, or private offer prices in reports.
+  - Milestone status: **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Next planned workstream: **Milestone 7 (Sold/Unsold Listing Classification Package)**.
