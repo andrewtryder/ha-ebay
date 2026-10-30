@@ -249,11 +249,15 @@ def test_evaluate_readiness_blocked_authorization(
     """Authorization failure or explicit FORBIDDEN code strictly blocks readiness."""
     evidence = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
         api_permission_granted=granted,
         permission_error_code=error_code,
         response_complete=True,
         pagination_verified=True,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res = MigrationPolicy.evaluate_readiness(
@@ -270,12 +274,14 @@ def test_evaluate_readiness_blocked_missing_scope() -> None:
     """Missing required OAuth scopes must fail closed with BLOCKED_SCOPE."""
     evidence = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
         required_scopes=("buy.watchlist.read",),
         verified_scopes=(),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=True,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res = MigrationPolicy.evaluate_readiness(
@@ -286,15 +292,101 @@ def test_evaluate_readiness_blocked_missing_scope() -> None:
     assert any("buy.watchlist.read" in r for r in res.blocking_reasons)
 
 
+def test_evaluate_readiness_blocked_scope_contract_unestablished() -> None:
+    """Unestablished OAuth scope contract must block readiness even with empty required scopes."""
+    evidence = ReadinessEvidence(
+        schema_validated=True,
+        scopes_contract_established=False,
+        required_scopes=(),
+        verified_scopes=(),
+        api_permission_granted=True,
+        response_complete=True,
+        pagination_verified=True,
+        field_parity_verified=True,
+        account_identity_consistent=True,
+        fallback_available=True,
+    )
+    res = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, evidence
+    )
+    assert res.is_ready is False
+    assert res.state == ReadinessState.BLOCKED_SCOPE
+    assert any(
+        "OAuth scope contract has not been established" in r
+        for r in res.blocking_reasons
+    )
+
+
+def test_evaluate_readiness_blocked_empty_required_scopes() -> None:
+    """Established scope contract with empty required scopes fails closed."""
+    evidence = ReadinessEvidence(
+        schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=(),
+        verified_scopes=(),
+        api_permission_granted=True,
+        response_complete=True,
+        pagination_verified=True,
+        field_parity_verified=True,
+        account_identity_consistent=True,
+        fallback_available=True,
+    )
+    res = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, evidence
+    )
+    assert res.is_ready is False
+    assert res.state == ReadinessState.BLOCKED_SCOPE
+    assert any(
+        "OAuth scope requirements are unknown" in r for r in res.blocking_reasons
+    )
+
+
+def test_evaluate_readiness_minimal_false_ready_bypass_rejected() -> None:
+    """Minimal evidence with all other booleans True fails closed when identity/fallback/scopes are omitted."""
+    evidence = ReadinessEvidence(
+        schema_validated=True,
+        api_permission_granted=True,
+        response_complete=True,
+        pagination_verified=True,
+        field_parity_verified=True,
+        # omitted: scopes_contract_established (defaults to False)
+        # omitted: account_identity_consistent (defaults to False)
+        # omitted: fallback_available (defaults to False)
+    )
+    res = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, evidence
+    )
+    assert res.is_ready is False
+    assert res.state != ReadinessState.READY
+    # All three fail-closed requirements must be flagged in blocking reasons
+    assert any("Fallback to established provider" in r for r in res.blocking_reasons)
+    assert any(
+        "does not match the authenticated account identity" in r
+        for r in res.blocking_reasons
+    )
+    assert any(
+        "OAuth scope contract has not been established" in r
+        for r in res.blocking_reasons
+    )
+
+
 def test_evaluate_readiness_blocked_schema_and_census() -> None:
     """Unvalidated schema and incomplete census must block readiness."""
     # 1. Schema unvalidated
     ev_schema = ReadinessEvidence(
         schema_validated=False,
+        scopes_contract_established=True,
+        required_scopes=(
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        ),
+        verified_scopes=(
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        ),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=True,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res_schema = MigrationPolicy.evaluate_readiness(
@@ -306,10 +398,18 @@ def test_evaluate_readiness_blocked_schema_and_census() -> None:
     # 2. Incomplete census / response incomplete
     ev_census = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=(
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        ),
+        verified_scopes=(
+            "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        ),
         api_permission_granted=True,
         response_complete=False,
         pagination_verified=True,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res_census = MigrationPolicy.evaluate_readiness(
@@ -324,10 +424,14 @@ def test_evaluate_readiness_blocked_pagination_and_parity() -> None:
     # 1. Pagination unverified
     ev_pag = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=False,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res_pag = MigrationPolicy.evaluate_readiness(
@@ -339,12 +443,16 @@ def test_evaluate_readiness_blocked_pagination_and_parity() -> None:
     # 2. Missing/unverified fields
     ev_parity = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=True,
         field_parity_verified=False,
         missing_fields=("current_price",),
         unverified_fields=("views",),
+        account_identity_consistent=True,
         fallback_available=True,
     )
     res_parity = MigrationPolicy.evaluate_readiness(
@@ -361,6 +469,9 @@ def test_evaluate_readiness_blocked_identity_and_no_fallback() -> None:
     # 1. Account identity mismatch
     ev_ident = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=True,
@@ -377,10 +488,14 @@ def test_evaluate_readiness_blocked_identity_and_no_fallback() -> None:
     # 2. Missing fallback
     ev_nofallback = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
         api_permission_granted=True,
         response_complete=True,
         pagination_verified=True,
         field_parity_verified=True,
+        account_identity_consistent=True,
         fallback_available=False,
     )
     res_nofallback = MigrationPolicy.evaluate_readiness(
@@ -394,6 +509,7 @@ def test_evaluate_readiness_fully_proven_modern_provider() -> None:
     """When all evidence criteria are satisfied, readiness is granted."""
     evidence = ReadinessEvidence(
         schema_validated=True,
+        scopes_contract_established=True,
         required_scopes=(
             "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
         ),
@@ -472,6 +588,35 @@ def test_validate_safe_transition_logic() -> None:
     assert (
         MigrationPolicy.validate_safe_transition(
             FeatureKey.WATCHLIST, ProviderType.REST, ready_assessment
+        )
+        is False
+    )
+
+    # Contradictory assessments: is_ready=True but state is BLOCKED_*
+    contra_state = FeatureReadiness(
+        feature=FeatureKey.WATCHLIST,
+        candidate_provider=ProviderType.GRAPHQL,
+        state=ReadinessState.BLOCKED_AUTHORIZATION,
+        is_ready=True,
+    )
+    assert (
+        MigrationPolicy.validate_safe_transition(
+            FeatureKey.WATCHLIST, ProviderType.GRAPHQL, contra_state
+        )
+        is False
+    )
+
+    # Contradictory assessments: is_ready=True but blocking_reasons is non-empty
+    contra_reasons = FeatureReadiness(
+        feature=FeatureKey.WATCHLIST,
+        candidate_provider=ProviderType.GRAPHQL,
+        state=ReadinessState.READY,
+        is_ready=True,
+        blocking_reasons=("Some unexpected blocking reason",),
+    )
+    assert (
+        MigrationPolicy.validate_safe_transition(
+            FeatureKey.WATCHLIST, ProviderType.GRAPHQL, contra_reasons
         )
         is False
     )
@@ -567,8 +712,8 @@ def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> Non
         entry_id, FeatureKey.WATCHLIST, item_ids=["1001"]
     )
     assert res_none.contracts_intact is False
-    assert any("No observed unique IDs" in v for v in res_none.violations)
-    assert any("No observed event types" in v for v in res_none.violations)
+    assert any("NO_OBSERVED_UNIQUE_IDS" in v for v in res_none.violations)
+    assert any("NO_OBSERVED_EVENT_TYPES" in v for v in res_none.violations)
 
     # Case 2: Observed unique IDs missing an expected entity
     exp_ids = MigrationPolicy.get_expected_unique_ids(entry_id, FeatureKey.WATCHLIST)
@@ -581,7 +726,7 @@ def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> Non
         observed_event_types=exp_events,
     )
     assert res_missing.contracts_intact is False
-    assert any("Missing expected unique IDs" in v for v in res_missing.violations)
+    assert any("MISSING_EXPECTED_UNIQUE_IDS" in v for v in res_missing.violations)
 
     # Case 3: Observed unique IDs contains unexpected altered ID
     corrupted_ids = (*exp_ids, f"{entry_id}_altered_entity_key")
@@ -592,7 +737,7 @@ def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> Non
         observed_event_types=exp_events,
     )
     assert res_corrupted.contracts_intact is False
-    assert any("Unexpected extra unique IDs" in v for v in res_corrupted.violations)
+    assert any("UNEXPECTED_EXTRA_UNIQUE_IDS" in v for v in res_corrupted.violations)
 
     # Case 4: Observed event types missing an expected event
     incomplete_events = exp_events[:-1]
@@ -604,7 +749,7 @@ def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> Non
     )
     assert res_missing_event.contracts_intact is False
     assert any(
-        "Missing expected event types" in v for v in res_missing_event.violations
+        "MISSING_EXPECTED_EVENT_TYPES" in v for v in res_missing_event.violations
     )
 
     # Case 5: Observed event types has unexpected extra event
@@ -616,7 +761,55 @@ def test_contract_preservation_fails_on_missing_or_mismatched_contracts() -> Non
         observed_event_types=extra_events,
     )
     assert res_extra_event.contracts_intact is False
-    assert any("Unexpected extra event types" in v for v in res_extra_event.violations)
+    assert any("UNEXPECTED_EXTRA_EVENT_TYPES" in v for v in res_extra_event.violations)
+
+
+def test_contract_preservation_privacy_adversarial_protection() -> None:
+    """Ensure contract preservation violations and diagnostics never leak private IDs or tokens."""
+    entry_id = "entry_private_user_456"
+    private_item_id = "112233445566"
+    private_token = "v^1.1#i^1#r^0#p^3#secret_token_12345"
+    private_username = "secret_ebay_user_99"
+
+    # Adversarial observed IDs containing raw private item IDs and tokens
+    adversarial_observed_ids = [
+        f"{entry_id}_watched_items",
+        f"corrupted_{private_item_id}_suffix",
+        private_token,
+        private_username,
+    ]
+    adversarial_observed_events = [
+        "watched_item_ending_soon",
+        f"event_{private_item_id}",
+        private_token,
+    ]
+
+    res = MigrationPolicy.verify_contract_preservation(
+        entry_id,
+        FeatureKey.WATCHLIST,
+        item_ids=[private_item_id],
+        observed_unique_ids=adversarial_observed_ids,
+        observed_event_types=adversarial_observed_events,
+    )
+    assert res.contracts_intact is False
+
+    # Check violations: MUST NOT leak private item ID, token, username, or entry_id
+    all_violations_text = " ".join(res.violations)
+    assert private_item_id not in all_violations_text
+    assert private_token not in all_violations_text
+    assert private_username not in all_violations_text
+    assert entry_id not in all_violations_text
+
+    # Diagnostic dictionary export must be fully sanitized
+    diag = res.to_diagnostics_dict()
+    diag_str = str(diag)
+    assert private_item_id not in diag_str
+    assert private_token not in diag_str
+    assert private_username not in diag_str
+    assert entry_id not in diag_str
+    assert diag["contracts_intact"] is False
+    assert "violation_count" in diag
+    assert "violations" in diag
 
 
 def test_strict_privacy_allowlist_redacts_secrets_pii_and_arbitrary_strings() -> None:

@@ -13,12 +13,18 @@ Key Invariants:
     and Account Privileges baseline strictly on modern eBay REST APIs.
     (Trading XML is NOT a fallback and XML-to-REST migration is NOT needed).
   - Feedback is hybrid (Trading XML GetUser username resolution + REST Feedback).
-- Fail-Closed Readiness: Speculative queries, synthetic fixtures, or unverified
-  scopes never qualify a candidate provider as ready. Unverified pagination,
-  incomplete censuses, missing fields, or FORBIDDEN errors strictly block readiness.
-- Privacy & Secret Redaction: Readiness diagnostics are strictly allowlisted.
-  Arbitrary strings, client secrets, OAuth tokens, listing IDs, and usernames
-  are always redacted to 'REDACTED_OR_OPAQUE_DIAGNOSTIC'.
+- Fail-Closed Readiness & Scope Proof:
+  - Account identity continuity, fallback availability, and scope-contract status
+    require explicit positive evidence.
+  - Unknown OAuth scope requirements must not be treated as an empty requirement set.
+    Candidate scopes are not invented.
+  - Contradictory readiness states (e.g. is_ready=True with blocked state or
+    blocking reasons) are strictly rejected.
+- Privacy & Secret Redaction:
+  - Readiness diagnostics are strictly allowlisted.
+  - Contract preservation violations and diagnostic exports report safe symbolic
+    reason codes and counts only, never leaking raw entity unique IDs, config-entry
+    IDs, item IDs, or token strings.
 - Zero Runtime Mutation: This module is pure and decoupled from live production
   polling coordinators, config entries, and entities.
 """
@@ -359,6 +365,7 @@ class ReadinessEvidence:
     """Observed offline or validation evidence for evaluating a candidate provider."""
 
     schema_validated: bool = False
+    scopes_contract_established: bool = False
     verified_scopes: tuple[str, ...] = ()
     required_scopes: tuple[str, ...] = ()
     api_permission_granted: bool = False
@@ -368,8 +375,8 @@ class ReadinessEvidence:
     field_parity_verified: bool = False
     unverified_fields: tuple[str, ...] = ()
     missing_fields: tuple[str, ...] = ()
-    account_identity_consistent: bool = True
-    fallback_available: bool = True
+    account_identity_consistent: bool = False
+    fallback_available: bool = False
     probe_error_summary: str | None = None
     notes: str | None = None
 
@@ -409,6 +416,22 @@ class FeatureContractPreservation:
     observed_event_types: tuple[str, ...]
     contracts_intact: bool
     violations: tuple[str, ...] = ()
+
+    def to_diagnostics_dict(self) -> dict[str, Any]:
+        """Convert preservation results to a safe, non-sensitive dictionary for diagnostics.
+
+        Never exports raw unique IDs, config-entry IDs, item IDs, or token strings.
+        """
+        return {
+            "feature": str(self.feature),
+            "contracts_intact": self.contracts_intact,
+            "expected_unique_id_count": len(self.expected_unique_ids),
+            "observed_unique_id_count": len(self.observed_unique_ids),
+            "expected_event_type_count": len(self.expected_event_types),
+            "observed_event_type_count": len(self.observed_event_types),
+            "violation_count": len(self.violations),
+            "violations": list(self.violations),
+        }
 
 
 class MigrationPolicy:
@@ -560,15 +583,28 @@ class MigrationPolicy:
             state = ReadinessState.BLOCKED_IDENTITY
 
         # 5. Scope authorization checks
-        missing_scopes = [
-            s for s in evidence.required_scopes if s not in evidence.verified_scopes
-        ]
-        if missing_scopes:
-            sanitized_scopes = [sanitize_diagnostic_token(s) for s in missing_scopes]
+        if not evidence.scopes_contract_established:
             blocking_reasons.append(
-                f"Missing verified OAuth scopes: {', '.join(sanitized_scopes)}"
+                "OAuth scope contract has not been established or verified for candidate provider"
             )
             state = ReadinessState.BLOCKED_SCOPE
+        elif not evidence.required_scopes:
+            blocking_reasons.append(
+                "OAuth scope requirements are unknown or unverified for candidate provider"
+            )
+            state = ReadinessState.BLOCKED_SCOPE
+        else:
+            missing_scopes = [
+                s for s in evidence.required_scopes if s not in evidence.verified_scopes
+            ]
+            if missing_scopes:
+                sanitized_scopes = [
+                    sanitize_diagnostic_token(s) for s in missing_scopes
+                ]
+                blocking_reasons.append(
+                    f"Missing verified OAuth scopes: {', '.join(sanitized_scopes)}"
+                )
+                state = ReadinessState.BLOCKED_SCOPE
 
         # 6. Permission / Entitlement / HTTP 403 / FORBIDDEN errors
         if not evidence.api_permission_granted or evidence.permission_error_code:
@@ -635,6 +671,7 @@ class MigrationPolicy:
                 evidence.permission_error_code
             ),
             "schema_validated": evidence.schema_validated,
+            "scopes_contract_established": evidence.scopes_contract_established,
             "response_complete": evidence.response_complete,
             "pagination_verified": evidence.pagination_verified,
             "field_parity_verified": evidence.field_parity_verified,
@@ -665,6 +702,8 @@ class MigrationPolicy:
 
         Returns True only if the candidate provider matches and readiness is proven.
         Always permits rolling back to the default production provider.
+        Rejects contradictory readiness assessments where is_ready is True but
+        the state is blocked or blocking reasons are present.
         """
         # Rollback to baseline default provider is always safe and permitted
         if target_provider == cls.get_default_provider(feature):
@@ -676,7 +715,17 @@ class MigrationPolicy:
         if readiness.candidate_provider != target_provider:
             return False
 
-        return readiness.is_ready
+        # Reject contradictory assessments
+        if not readiness.is_ready:
+            return False
+
+        if readiness.state != ReadinessState.READY:
+            return False
+
+        if len(readiness.blocking_reasons) > 0:
+            return False
+
+        return True
 
     @classmethod
     def get_expected_unique_ids(
@@ -717,6 +766,8 @@ class MigrationPolicy:
         Grounded in real Home Assistant entity registry and event constants.
         Compares independently supplied observed outputs against expected contracts.
         Fails when any expected ID or event is missing, extra, or mismatched.
+        Emits safe reason codes and counts only; never leaks raw entity IDs, item IDs,
+        or token strings in violation reports or diagnostic outputs.
         """
         expected_unique_ids = cls.get_expected_unique_ids(entry_id, feature, item_ids)
         expected_event_types = cls.get_expected_event_types(feature)
@@ -724,7 +775,7 @@ class MigrationPolicy:
         violations: list[str] = []
 
         if observed_unique_ids is None:
-            violations.append("No observed unique IDs supplied for verification")
+            violations.append("NO_OBSERVED_UNIQUE_IDS")
             actual_observed_ids: tuple[str, ...] = ()
         else:
             actual_observed_ids = tuple(observed_unique_ids)
@@ -733,12 +784,16 @@ class MigrationPolicy:
             missing_ids = expected_id_set - observed_id_set
             extra_ids = observed_id_set - expected_id_set
             if missing_ids:
-                violations.append(f"Missing expected unique IDs: {sorted(missing_ids)}")
+                violations.append(
+                    f"MISSING_EXPECTED_UNIQUE_IDS: count={len(missing_ids)}"
+                )
             if extra_ids:
-                violations.append(f"Unexpected extra unique IDs: {sorted(extra_ids)}")
+                violations.append(
+                    f"UNEXPECTED_EXTRA_UNIQUE_IDS: count={len(extra_ids)}"
+                )
 
         if observed_event_types is None:
-            violations.append("No observed event types supplied for verification")
+            violations.append("NO_OBSERVED_EVENT_TYPES")
             actual_observed_events: tuple[str, ...] = ()
         else:
             actual_observed_events = tuple(observed_event_types)
@@ -748,11 +803,11 @@ class MigrationPolicy:
             extra_events = observed_event_set - expected_event_set
             if missing_events:
                 violations.append(
-                    f"Missing expected event types: {sorted(missing_events)}"
+                    f"MISSING_EXPECTED_EVENT_TYPES: count={len(missing_events)}"
                 )
             if extra_events:
                 violations.append(
-                    f"Unexpected extra event types: {sorted(extra_events)}"
+                    f"UNEXPECTED_EXTRA_EVENT_TYPES: count={len(extra_events)}"
                 )
 
         contracts_intact = len(violations) == 0
@@ -778,7 +833,7 @@ class MigrationPolicy:
         evidence_dict = evidence_map or {}
         results: dict[FeatureKey, FeatureReadiness] = {}
         for feature in FeatureKey:
-            ev = evidence_dict.get(feature, ReadinessEvidence(fallback_available=True))
+            ev = evidence_dict.get(feature, ReadinessEvidence())
             results[feature] = cls.evaluate_readiness(feature, candidate_provider, ev)
         return results
 

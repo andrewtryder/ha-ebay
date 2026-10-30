@@ -60,6 +60,7 @@ To safeguard existing Home Assistant installations, every modern API migration m
 4. **Production Baseline & Options Flow Gating**:
    - Every feature defaults strictly to its established baseline provider in production runtime.
    - `MigrationPolicy.get_active_provider()` fails closed: candidate providers are never activated without explicit user opt-in (`enable_modern_api_migration`), supported provider matching, and proven readiness.
+   - `MigrationPolicy.validate_safe_transition()` strictly rejects contradictory assessments (e.g. `is_ready=True` combined with a non-`READY` state or non-empty blocking reasons).
 
 5. **Instant Fallback and Rollback**:
    - For legacy baseline features, if a candidate modern API provider encounters errors, rate limits, or unexpected schema changes, execution safely falls back to Trading XML.
@@ -73,9 +74,9 @@ A candidate modern provider (GraphQL or REST) must satisfy **all eight readiness
 
 | Gate | Requirement | Failure Consequence |
 |---|---|---|
-| **1. Fallback Available** | Baseline provider is functional and configured as fallback | `BLOCKED_NO_FALLBACK`: Migration rejected |
-| **2. Account Identity** | Modern API response matches authenticated account identity | `BLOCKED_IDENTITY`: Migration rejected |
-| **3. Verified Scopes** | All required OAuth scopes are present in the granted token | `BLOCKED_SCOPE`: Migration rejected |
+| **1. Fallback Available** | Baseline provider is functional and positive fallback proof supplied (`fallback_available=True`) | `BLOCKED_NO_FALLBACK`: Migration rejected |
+| **2. Account Identity** | Positive proof modern API response matches authenticated identity (`account_identity_consistent=True`) | `BLOCKED_IDENTITY`: Migration rejected |
+| **3. Verified Scopes** | Scope contract explicitly established (`scopes_contract_established=True`) and all required scopes verified | `BLOCKED_SCOPE`: Migration rejected |
 | **4. Entitlement & Auth** | Live resolver/endpoint returns HTTP 200 without `FORBIDDEN` | `BLOCKED_AUTHORIZATION`: Migration rejected |
 | **5. Schema Validation** | Query document and response types pass schema validation | `BLOCKED_SCHEMA`: Migration rejected |
 | **6. Complete Census** | Response represents 100% of the active collection | `BLOCKED_COMPLETENESS`: Migration rejected |
@@ -83,7 +84,10 @@ A candidate modern provider (GraphQL or REST) must satisfy **all eight readiness
 | **8. Field-Level Parity** | All monitored fields match baseline semantics | `BLOCKED_PARITY`: Migration rejected |
 
 > [!IMPORTANT]
-> A speculative GraphQL query, synthetic offline fixture, or partial SKU inventory response **never** satisfies readiness. A `FORBIDDEN` error (such as observed on `userWatchList`) or unverified pagination strictly blocks migration readiness.
+> **Offline Test Evidence vs. Live API Access**:
+> Offline fixtures and test suites verify query syntax, data models, and normalization logic, but **never** prove live API readiness.
+> Unknown scope requirements must not be treated as an empty requirement set. Candidate scopes (e.g. `buy.watchlist.read`) remain unverified until confirmed by eBay.
+> A live `FORBIDDEN` error (as observed on `userWatchList`) or unestablished scope contract strictly blocks migration readiness fail-closed.
 
 ---
 
@@ -92,7 +96,8 @@ A candidate modern provider (GraphQL or REST) must satisfy **all eight readiness
 The contract preservation engine in `MigrationPolicy.verify_contract_preservation()` performs a genuine, non-tautological comparison:
 - Computes `expected_unique_ids` and `expected_event_types` from authoritative `sensor.py`, `const.py`, and `event.py` definitions.
 - Compares against independently supplied `observed_unique_ids` and `observed_event_types` (derived from candidate provider outputs or entity registry fixtures).
-- Fails closed (`contracts_intact = False`) and records specific violations whenever any expected ID or event is missing, extra, or misspelled.
+- Fails closed (`contracts_intact = False`) and records specific violations whenever any expected ID or event is missing, extra, or mismatched.
+- **Privacy Safe Violation Reporting**: Violation messages and diagnostic dictionaries emit safe reason codes and counts only (e.g. `MISSING_EXPECTED_UNIQUE_IDS: count=2`), **never** raw entity unique IDs, config-entry IDs, eBay item IDs, or token strings.
 
 Distinction between Environments:
 - **Unit & Regression Tests**: Use independently constructed fixtures grounded in production constants to assert that migration logic detects discrepancies.
@@ -106,6 +111,7 @@ Diagnostic tokens, scopes, and field names pass through `sanitize_diagnostic_tok
 - Only known safe symbolic error codes (`FORBIDDEN`, `ACCESS_DENIED`, etc.), HTTP status codes (`403`, `500`), known safe OAuth scopes, and public schema fields are permitted.
 - Any unrecognized string, client secret, OAuth access/refresh token, raw listing identifier, item title, or user handle is redacted to `REDACTED_OR_OPAQUE_DIAGNOSTIC`.
 - Free-form user notes are omitted from diagnostic dictionaries to prevent sensitive information leakage.
+- `FeatureContractPreservation.to_diagnostics_dict()` exports only counts and safe violation codes, strictly protecting all private identifiers.
 
 ---
 
