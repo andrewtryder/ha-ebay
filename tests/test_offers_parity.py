@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
@@ -683,7 +684,10 @@ def test_sanitize_offers_parity_report_removes_sensitive_keys_and_tokens() -> No
 
     assert "secret_bearer_token" not in str(sanitized)
     assert "another_token_here" not in str(sanitized)
-    assert "[REDACTED_TOKEN]" in sanitized["errors"][0]["diagnostic"]
+    assert (
+        sanitized["errors"][0]["diagnostic"]
+        == "An unclassified or unverified error occurred"
+    )
 
 
 def test_render_offers_parity_markdown_and_json() -> None:
@@ -1657,7 +1661,7 @@ def test_privacy_adversarial_tokens_credentials_and_emails_scrubbed() -> None:
         assert "110000000001" not in key
         assert "110000000002" not in key
 
-    # 3. String notes and diagnostics must have tokens and secrets redacted
+    # 3. String notes and diagnostics must not contain any leaked credentials or raw tokens
     md_text = render_offers_parity_markdown(dirty_report)
     json_text = render_offers_parity_json(dirty_report)
 
@@ -1666,9 +1670,11 @@ def test_privacy_adversarial_tokens_credentials_and_emails_scrubbed() -> None:
         assert "user@example.com" not in text
         assert "secret_refresh_val" not in text
         assert "very_secret_key" not in text
+        assert "tok123" not in text
         assert "should-be-dropped" not in text
-        assert "[REDACTED_TOKEN]" in text
-        assert "[REDACTED_EMAIL]" in text
+        # Under default-deny, raw notes and error diagnostics are replaced with fixed generic strings
+        assert "Access forbidden; insufficient permissions or scope" in text
+        assert "Exact match between baseline and candidate" in text
 
 
 def test_pseudonymize_identifier_and_sanitize_diagnostic_string() -> None:
@@ -2132,15 +2138,178 @@ def test_privacy_default_deny_schema_drops_arbitrary_nested_and_markdown_injecti
     assert sanitized["errors"][0]["code"] == "MALFORMED_ERROR"
     # Second error code mapped to UNKNOWN_ERROR because code was not in whitelist
     assert sanitized["errors"][1]["code"] == "UNKNOWN_ERROR"
-    # Diagnostic has HTML tag, amount, and ID redacted
+    # Diagnostic is mapped to safe generic message under default-deny
     diag2 = sanitized["errors"][1]["diagnostic"]
     assert "<script>" not in diag2
     assert "49.99" not in diag2
     assert "987654321012" not in diag2
-    assert "[REDACTED_TAG]" in diag2
-    assert "[REDACTED_AMOUNT]" in diag2
-    assert "[REDACTED_ID]" in diag2
+    assert diag2 == "An unclassified or unverified error occurred"
 
-    # Render markdown and verify pipes are escaped and links are stripped
+    # Render markdown and verify pipes are escaped, links are stripped, and arbitrary tags do not appear
     md = render_offers_parity_markdown(sanitized)
     assert "https://malicious.site" not in md
+    assert "<script>" not in md
+
+
+def test_privacy_adversarial_handles_word_amounts_and_malicious_item_keys() -> None:
+    """Comprehensive test ensuring short handles, word-form amounts, malicious item_ keys, and XML tags never leak."""
+    dirty_report = {
+        "role": "seller",
+        "overall_status": "fail",
+        "active_offers_by_item_id": {
+            "item_private_seller_xyz": 3,
+            "item_secret123": 1,
+            "item_110000000001": 2,  # Raw 12-digit numeric ID spoofing item_ prefix
+            "110000000002": 4,  # Raw numeric ID
+            "item_0b0f5cc1cb42": 5,  # Legitimate pre-computed pseudonym
+        },
+        "field_comparisons": {
+            "status": {
+                "status": "different_semantics",
+                "note": "buyer private_seller_xyz offered eighty dollars and forty five bucks for user123",
+            },
+            "selling_total_offers": {
+                "status": "exact_match",
+                "note": "seller_abc9 accepted twelve euros; secret key sk_live_998877665544 topsecretpassword",
+            },
+            "negotiation_id": {
+                "status": "exact_match",
+                "note": "All 5 negotiation IDs matched exactly",  # Safe template
+            },
+        },
+        "errors": [
+            {
+                "code": "XML_ACK_MISSING",
+                "diagnostic": "Missing or unrecognized Ack: MaliciousAckValue",
+            },
+            {
+                "code": "INVALID_XML_ROOT",
+                "diagnostic": "Expected GetBestOffersResponse root, got EvilRootResponse",
+            },
+            {
+                "code": "1001",
+                "diagnostic": "Internal private message: db query failed on user table",
+            },
+            {
+                "code": "CUSTOM_ARBITRARY_CODE",
+                "diagnostic": "Custom secret error details with password123",
+            },
+        ],
+    }
+
+    sanitized = sanitize_offers_parity_report(dirty_report)
+
+    # 1. Verify active_offers_by_item_id keys are strictly validated pseudonyms
+    item_keys = sanitized["active_offers_by_item_id"]
+    assert "item_private_seller_xyz" not in item_keys
+    assert "item_secret123" not in item_keys
+    assert "item_110000000001" not in item_keys
+    assert "110000000002" not in item_keys
+    assert "item_0b0f5cc1cb42" in item_keys
+
+    # Every emitted key must strictly conform to ^item_[0-9a-f]{12}$
+    item_re = re.compile(r"^item_[0-9a-f]{12}$")
+    for key in item_keys:
+        assert item_re.fullmatch(key) is not None
+        # Must not be a raw 12-digit number with item_ prefix
+        assert not key[5:].isdigit()
+
+    # 2. Verify safe note templates are preserved while arbitrary notes are replaced
+    comps = sanitized["field_comparisons"]
+    assert (
+        comps["status"]["note"]
+        == "Value or semantic difference between baseline and candidate"
+    )
+    assert (
+        comps["selling_total_offers"]["note"]
+        == "Exact match between baseline and candidate"
+    )
+    assert comps["negotiation_id"]["note"] == "All 5 negotiation IDs matched exactly"
+
+    # 3. Verify diagnostics are mapped to safe generic messages
+    errs = sanitized["errors"]
+    assert (
+        errs[0]["diagnostic"]
+        == "Trading XML returned missing or unrecognized Ack value"
+    )
+    assert (
+        errs[1]["diagnostic"]
+        == "Trading XML root element does not match expected operation"
+    )
+    assert errs[2]["code"] == "1001"
+    assert errs[2]["diagnostic"] == "eBay error code 1001"
+    assert errs[3]["code"] == "UNKNOWN_ERROR"
+    assert errs[3]["diagnostic"] == "An unclassified or unverified error occurred"
+
+    # 4. Render markdown and JSON and verify NO leaks
+    md_output = render_offers_parity_markdown(dirty_report)
+    json_output = render_offers_parity_json(dirty_report)
+
+    for output in (md_output, json_output):
+        assert "private_seller_xyz" not in output
+        assert "seller_abc9" not in output
+        assert "user123" not in output
+        assert "eighty dollars" not in output
+        assert "forty five bucks" not in output
+        assert "twelve euros" not in output
+        assert "sk_live_998877665544" not in output
+        assert "topsecretpassword" not in output
+        assert "password123" not in output
+        assert "item_private_seller_xyz" not in output
+        assert "item_secret123" not in output
+        assert "item_110000000001" not in output
+        assert "110000000002" not in output
+        assert "MaliciousAckValue" not in output
+        assert "EvilRootResponse" not in output
+        assert "Internal private message" not in output
+
+
+def test_xml_normalization_unexpected_tags_and_acks_never_leak_in_errors() -> None:
+    """XML parsers reject unexpected root tags and Ack values without leaking them in diagnostics."""
+    # Unexpected root tag
+    bad_root_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <MaliciousRootResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+    </MaliciousRootResponse>"""
+    seller_res = normalize_trading_xml_seller_offers(bad_root_xml)
+    assert seller_res.is_complete is False
+    assert seller_res.errors[0]["code"] == "INVALID_XML_ROOT"
+    assert (
+        seller_res.errors[0]["diagnostic"]
+        == "Trading XML root element does not match expected operation"
+    )
+    assert "MaliciousRootResponse" not in str(seller_res.errors)
+
+    buyer_res = normalize_trading_xml_buyer_offers(bad_root_xml)
+    assert buyer_res.is_complete is False
+    assert buyer_res.errors[0]["code"] == "INVALID_XML_ROOT"
+    assert (
+        buyer_res.errors[0]["diagnostic"]
+        == "Trading XML root element does not match expected operation"
+    )
+    assert "MaliciousRootResponse" not in str(buyer_res.errors)
+
+    # Unexpected Ack value
+    bad_ack_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>CustomPrivateAckValue</Ack>
+    </GetBestOffersResponse>"""
+    ack_res = normalize_trading_xml_seller_offers(bad_ack_xml)
+    assert any(e["code"] == "XML_ACK_MISSING" for e in ack_res.errors)
+    for err in ack_res.errors:
+        assert "CustomPrivateAckValue" not in err.get("diagnostic", "")
+
+    # XML error with sensitive short message
+    err_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Failure</Ack>
+        <Errors>
+            <ErrorCode>1001</ErrorCode>
+            <SeverityCode>Error</SeverityCode>
+            <ShortMessage>Sensitive DB Error: table users column email</ShortMessage>
+        </Errors>
+    </GetBestOffersResponse>"""
+    err_res = normalize_trading_xml_seller_offers(err_xml)
+    assert any(e["code"] == "1001" for e in err_res.errors)
+    for err in err_res.errors:
+        assert "Sensitive DB Error" not in err.get("diagnostic", "")

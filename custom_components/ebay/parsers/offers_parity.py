@@ -276,38 +276,130 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
 )
 
 GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
-    "HANDSHAKE_ONLY": "Transport connectivity handshake only; no negotiation records retrieved",
+    "ACCESS_DENIED": "Access denied; authorization check failed",
+    "BAD_GATEWAY": "Bad gateway encountered communicating with remote service",
+    "BAD_USER_INPUT": "Invalid argument or input parameter provided",
+    "CONTRADICTORY_PAGINATION_TOTALS": "Declared pagination totals changed across pages",
+    "COUNT_ONLY_OPERATION": "Count-only operation does not retrieve negotiation records",
     "COUNT_ONLY_QUERY": "Count-only operation does not retrieve negotiation records",
-    "MISSING_PAGINATION_METADATA": "Response lacks required pagination metadata",
-    "MALFORMED_PAGE_INFO": "Pagination pageInfo is malformed or non-boolean",
-    "TOTAL_RECORDS_MISMATCH": "Total collected records does not match declared total count",
-    "MISSING_NEGOTIATION_ID": "Negotiation record missing required identifier",
+    "DOWNSTREAM_SERVICE_ERROR": "Downstream service error encountered",
     "DUPLICATE_OFFER_ID": "Duplicate offer identifier encountered within page",
     "DUPLICATE_OFFER_ID_ACROSS_PAGES": "Duplicate offer identifier encountered across pages",
-    "ROLE_MISMATCH": "Negotiation record role does not match expected role",
-    "NO_PAGES_PROVIDED": "No response pages provided for collection",
-    "MALFORMED_PAGE": "Response page is not a valid structured payload",
-    "PAGINATION_CYCLE_DETECTED": "Duplicate page payload detected during pagination",
-    "PAGES_AFTER_END_DECLARED": "Extra page received after final page was declared",
-    "CONTRADICTORY_PAGINATION_TOTALS": "Declared pagination totals changed across pages",
-    "MAX_PAGES_EXCEEDED": "Total pages exceeded maximum allowed limit of 25",
-    "PENDING_CONTINUATION": "Final page has pending continuation; collection incomplete",
-    "UNVERIFIED_COLLECTION_CENSUS": "No declared total count available to verify census completeness",
-    "XML_ACK_FAILURE": "Trading XML returned failure response",
-    "XML_ACK_PARTIAL_FAILURE": "Trading XML returned partial failure response",
-    "XML_ACK_MISSING": "Trading XML returned missing or unrecognized Ack value",
-    "INVALID_XML_ROOT": "Trading XML root element does not match expected operation",
+    "ELIGIBLE_ITEMS_MISMATCH": "Eligible items container does not match negotiation records",
     "EMPTY_XML_PAYLOAD": "Trading XML payload is empty or whitespace",
-    "XML_PARSE_ERROR": "Failed to parse XML response payload",
-    "MISSING_REQUIRED_CONTAINER": "Missing required data container in response",
-    "INVENTORY_OFFER_MISMATCH": "Detected REST Sell Inventory payload; inventory offers are not negotiation records",
-    "NO_OFFERS_CONTAINER": "No negotiation container found in GraphQL data",
+    "FIELD_UNDEFINED": "Field undefined in GraphQL schema",
     "FORBIDDEN": "Access forbidden; insufficient permissions or scope",
-    "UNAUTHORIZED": "Request unauthorized; invalid or expired credentials",
-    "VALIDATION_ERROR": "GraphQL query validation failed against schema",
+    "GATEWAY_TIMEOUT": "Gateway timeout communicating with remote service",
+    "GRAPHQL_ERROR": "GraphQL service returned an error condition",
+    "GRAPHQL_PARSE_FAILED": "Failed to parse GraphQL document",
+    "GRAPHQL_VALIDATION_ERROR": "GraphQL query validation failed against schema",
+    "GRAPHQL_VALIDATION_FAILED": "GraphQL query validation failed against schema",
+    "HANDSHAKE_ONLY": "Transport connectivity handshake only; no negotiation records retrieved",
+    "INSUFFICIENT_SCOPE": "Insufficient OAuth scope for requested resource",
+    "INTERNAL_SERVER_ERROR": "Internal server error encountered",
+    "INTROSPECTION_DISABLED": "GraphQL schema introspection is disabled",
+    "INVALID_ACCESS_TOKEN": "Access token is invalid or expired",
+    "INVALID_QUERY": "Invalid GraphQL query document",
+    "INVALID_TOKEN": "Access token is invalid",
+    "INVALID_XML_ROOT": "Trading XML root element does not match expected operation",
+    "INVENTORY_OFFER_MISMATCH": "Detected REST Sell Inventory payload; inventory offers are not negotiation records",
+    "ITEM_NOT_FOUND": "Item identifier was not found",
+    "LISTING_NOT_FOUND": "Listing identifier was not found",
+    "MALFORMED_ERROR": "Malformed error object encountered in response",
+    "MALFORMED_PAGE": "Response page is not a valid structured payload",
+    "MALFORMED_PAGE_INFO": "Pagination pageInfo is malformed or non-boolean",
+    "MAX_PAGES_EXCEEDED": "Total pages exceeded maximum allowed limit of 25",
+    "MISSING_DATA": "Response missing expected data field",
+    "MISSING_NEGOTIATION_ID": "Negotiation record missing required identifier",
+    "MISSING_PAGINATION_METADATA": "Response lacks required pagination metadata",
+    "MISSING_REQUIRED_CONTAINER": "Missing required data container in response",
+    "MISSING_SCOPE": "Missing required OAuth scope",
+    "NEGOTIATION_NOT_FOUND": "Negotiation identifier was not found",
+    "NO_OFFERS_CONTAINER": "No negotiation container found in GraphQL data",
+    "NO_PAGES_PROVIDED": "No response pages provided for collection",
+    "NOT_AUTHORIZED": "Not authorized to access requested resource",
+    "OFFER_NOT_FOUND": "Offer identifier was not found",
+    "OPERATION_RESOLUTION_FAILURE": "Unable to resolve GraphQL operation",
+    "PAGES_AFTER_END_DECLARED": "Extra page received after final page was declared",
+    "PAGINATION_CYCLE_DETECTED": "Duplicate page payload detected during pagination",
     "PAGINATION_SEQUENCE_ERROR": "Pagination page numbers out of sequence",
+    "PENDING_CONTINUATION": "Final page has pending continuation; collection incomplete",
+    "PERSISTED_QUERY_NOT_FOUND": "Persisted query identifier not found",
+    "PERSISTED_QUERY_NOT_SUPPORTED": "Persisted queries not supported by endpoint",
+    "RATE_LIMITED": "Request rate limit exceeded",
+    "RATE_LIMIT_EXCEEDED": "Request rate limit exceeded",
+    "ROLE_MISMATCH": "Negotiation record role does not match expected role",
+    "SERVICE_UNAVAILABLE": "Remote service is temporarily unavailable",
+    "SYSTEM_ERROR": "System error encountered during operation",
+    "THROTTLED": "Request throttled by remote service",
+    "TOKEN_EXPIRED": "OAuth access token has expired",
+    "TOO_MANY_REQUESTS": "Too many requests; rate limited by server",
+    "TOTAL_RECORDS_MISMATCH": "Total collected records does not match declared total count",
+    "UNAUTHENTICATED": "Request unauthenticated; credentials missing or invalid",
+    "UNAUTHORIZED": "Request unauthorized; invalid or expired credentials",
     "UNKNOWN_ERROR": "An unclassified or unverified error occurred",
+    "UNVERIFIED_COLLECTION_CENSUS": "No declared total count available to verify census completeness",
+    "VALIDATION_ERROR": "GraphQL query validation failed against schema",
+    "XML_ACK_FAILURE": "Trading XML returned failure response",
+    "XML_ACK_MISSING": "Trading XML returned missing or unrecognized Ack value",
+    "XML_ACK_PARTIAL_FAILURE": "Trading XML returned partial failure response",
+    "XML_ACK_UNKNOWN": "Trading XML returned unknown Ack value",
+    "XML_PARSE_ERROR": "Failed to parse XML response payload",
 }
+
+GENERIC_FIELD_PARITY_NOTES: dict[str, str] = {
+    PARITY_EXACT_MATCH: "Exact match between baseline and candidate",
+    PARITY_EQUIVALENT_NORMALIZED: "Equivalent values after normalization",
+    PARITY_DIFFERENT_SEMANTICS: "Value or semantic difference between baseline and candidate",
+    PARITY_MISSING_FIELD: "Field present in baseline but missing in candidate",
+    PARITY_UNVERIFIED: "Field unverified or collection incomplete",
+    PARITY_UNSUPPORTED: "Field not supported by candidate API",
+}
+
+SAFE_FIELD_NOTE_EXACT_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "Snapshot is incomplete, truncated, or contains errors; fail-closed",
+        "Verified empty collection; no records available to evaluate record-level field",
+    }
+)
+
+_SAFE_FIELD_NOTE_PATTERNS = (
+    re.compile(r"^All \d+ negotiation IDs matched exactly$"),
+    re.compile(
+        r"^No matching negotiation IDs between XML \(\d+\) and candidate \(\d+\)$"
+    ),
+    re.compile(r"^Identity mismatch: \d+ missing in candidate$"),
+    re.compile(r"^Identity mismatch: \d+ extra in candidate$"),
+    re.compile(
+        r"^Identity mismatch: \d+ missing in candidate; \d+ extra in candidate$"
+    ),
+    re.compile(r"^Evaluated across \d+ matched negotiations$"),
+)
+
+_ITEM_PSEUDONYM_RE = re.compile(r"^item_[0-9a-f]{12}$")
+
+
+def _is_safe_item_pseudonym(key: str) -> bool:
+    """Validate that key matches genuine item pseudonym format ^item_[0-9a-f]{12}$ and is not a raw numeric ID."""
+    if not _ITEM_PSEUDONYM_RE.fullmatch(key):
+        return False
+    suffix = key[5:]
+    if suffix.isdigit():
+        return False
+    return True
+
+
+def _resolve_safe_field_comparison_note(status: str, raw_note: Any) -> str:
+    """Resolve a safe field comparison note using strict allowlists and generic fallbacks."""
+    if raw_note is not None and isinstance(raw_note, str):
+        cleaned_note = raw_note.strip()
+        if cleaned_note in SAFE_FIELD_NOTE_EXACT_ALLOWLIST:
+            return cleaned_note
+        for pat in _SAFE_FIELD_NOTE_PATTERNS:
+            if pat.fullmatch(cleaned_note):
+                return cleaned_note
+    return GENERIC_FIELD_PARITY_NOTES.get(status, "Field comparison evaluated")
+
 
 ALLOWED_NUMERIC_ERROR_CODES: frozenset[str] = frozenset(
     {
@@ -1155,7 +1247,7 @@ def normalize_trading_xml_seller_offers(
             )
         try:
             root = ET.fromstring(cleaned)
-        except ET.ParseError as exc:
+        except ET.ParseError:
             return OfferCollectionResult(
                 negotiations=(),
                 total_count=None,
@@ -1166,7 +1258,7 @@ def normalize_trading_xml_seller_offers(
                 errors=(
                     {
                         "code": "XML_PARSE_ERROR",
-                        "diagnostic": sanitize_diagnostic_string(str(exc)),
+                        "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_PARSE_ERROR"],
                     },
                 ),
             )
@@ -1193,7 +1285,7 @@ def normalize_trading_xml_seller_offers(
             errors=(
                 {
                     "code": "INVALID_XML_ROOT",
-                    "diagnostic": f"Expected GetBestOffersResponse root, got {root.tag}",
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["INVALID_XML_ROOT"],
                 },
             ),
         )
@@ -1204,21 +1296,21 @@ def normalize_trading_xml_seller_offers(
         errors.append(
             {
                 "code": "XML_ACK_FAILURE",
-                "diagnostic": "Trading XML returned Ack=Failure",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_FAILURE"],
             }
         )
     elif ack == "PartialFailure":
         errors.append(
             {
                 "code": "XML_ACK_PARTIAL_FAILURE",
-                "diagnostic": "Trading XML returned Ack=PartialFailure",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_PARTIAL_FAILURE"],
             }
         )
     elif ack not in ("Success", "Warning"):
         errors.append(
             {
                 "code": "XML_ACK_MISSING",
-                "diagnostic": f"Missing or unrecognized Ack: {ack}",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_MISSING"],
             }
         )
 
@@ -1226,14 +1318,17 @@ def normalize_trading_xml_seller_offers(
     for err in root.findall("e:Errors", namespaces=NS):
         code = _text(err, "e:ErrorCode")
         severity = _text(err, "e:SeverityCode")
-        short_msg = _text(err, "e:ShortMessage")
         if code:
+            token_code = sanitize_diagnostic_token(code, kind="error_code")
             errors.append(
                 {
-                    "code": sanitize_diagnostic_token(code, kind="error_code"),
+                    "code": token_code,
                     "severity": sanitize_diagnostic_token(severity, kind="category"),
-                    "diagnostic": sanitize_diagnostic_string(
-                        short_msg or f"XML error {code}"
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES.get(
+                        token_code,
+                        f"eBay error code {token_code}"
+                        if token_code in ALLOWED_NUMERIC_ERROR_CODES
+                        else "Trading XML reported an error condition",
                     ),
                 }
             )
@@ -1621,7 +1716,7 @@ def normalize_trading_xml_buyer_offers(
             )
         try:
             root = ET.fromstring(cleaned)
-        except ET.ParseError as exc:
+        except ET.ParseError:
             return OfferCollectionResult(
                 negotiations=(),
                 total_count=None,
@@ -1632,7 +1727,7 @@ def normalize_trading_xml_buyer_offers(
                 errors=(
                     {
                         "code": "XML_PARSE_ERROR",
-                        "diagnostic": sanitize_diagnostic_string(str(exc)),
+                        "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_PARSE_ERROR"],
                     },
                 ),
             )
@@ -1659,7 +1754,7 @@ def normalize_trading_xml_buyer_offers(
             errors=(
                 {
                     "code": "INVALID_XML_ROOT",
-                    "diagnostic": f"Expected GetMyeBayBuyingResponse root, got {root.tag}",
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["INVALID_XML_ROOT"],
                 },
             ),
         )
@@ -1670,35 +1765,38 @@ def normalize_trading_xml_buyer_offers(
         errors.append(
             {
                 "code": "XML_ACK_FAILURE",
-                "diagnostic": "Trading XML returned Ack=Failure",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_FAILURE"],
             }
         )
     elif ack == "PartialFailure":
         errors.append(
             {
                 "code": "XML_ACK_PARTIAL_FAILURE",
-                "diagnostic": "Trading XML returned Ack=PartialFailure",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_PARTIAL_FAILURE"],
             }
         )
     elif ack not in ("Success", "Warning"):
         errors.append(
             {
                 "code": "XML_ACK_MISSING",
-                "diagnostic": f"Missing or unrecognized Ack: {ack}",
+                "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["XML_ACK_MISSING"],
             }
         )
 
     for err in root.findall("e:Errors", namespaces=NS):
         code = _text(err, "e:ErrorCode")
         severity = _text(err, "e:SeverityCode")
-        short_msg = _text(err, "e:ShortMessage")
         if code:
+            token_code = sanitize_diagnostic_token(code, kind="error_code")
             errors.append(
                 {
-                    "code": sanitize_diagnostic_token(code, kind="error_code"),
-                    "severity": severity,
-                    "diagnostic": sanitize_diagnostic_string(
-                        short_msg or f"XML error {code}"
+                    "code": token_code,
+                    "severity": sanitize_diagnostic_token(severity, kind="category"),
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES.get(
+                        token_code,
+                        f"eBay error code {token_code}"
+                        if token_code in ALLOWED_NUMERIC_ERROR_CODES
+                        else "Trading XML reported an error condition",
                     ),
                 }
             )
@@ -3095,11 +3193,8 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 if st not in PARITY_LABELS:
                     st = PARITY_UNVERIFIED
                 lbl = PARITY_LABELS.get(st, "Unverified")
-                raw_note = fld_data.get("note")
-                clean_note = (
-                    sanitize_diagnostic_string(str(raw_note))
-                    if raw_note is not None
-                    else ""
+                clean_note = _resolve_safe_field_comparison_note(
+                    st, fld_data.get("note")
                 )
                 sanitized_comps[fld] = {
                     "status": str(st),
@@ -3127,10 +3222,12 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(raw_items, Mapping):
         sanitized_items: dict[str, int] = {}
         for item_id, count in raw_items.items():
-            key_str = str(item_id)
+            key_str = str(item_id).strip()
+            if not key_str:
+                continue
             clean_key = (
                 key_str
-                if key_str.startswith("item_")
+                if _is_safe_item_pseudonym(key_str)
                 else pseudonymize_identifier(key_str, prefix="item")
             )
             try:
@@ -3140,7 +3237,7 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
             sanitized_items[clean_key] = clean_count
         sanitized["active_offers_by_item_id"] = sanitized_items
 
-    # 8. Errors (default-deny: symbolic codes only, sanitized generic diagnostics, no raw payloads)
+    # 8. Errors (default-deny: symbolic codes only, safe generic diagnostics, no raw payloads)
     raw_errors = report.get("errors")
     sanitized_errors: list[dict[str, str]] = []
     if isinstance(raw_errors, Sequence) and not isinstance(raw_errors, (str, bytes)):
@@ -3149,7 +3246,7 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 sanitized_errors.append(
                     {
                         "code": "MALFORMED_ERROR",
-                        "diagnostic": "Malformed error object encountered in response",
+                        "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["MALFORMED_ERROR"],
                     }
                 )
                 continue
@@ -3167,11 +3264,10 @@ def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 if sev in ("Error", "Warning", "Info"):
                     clean_err["severity"] = sev
 
-            raw_diag = err.get("diagnostic")
-            if raw_diag is not None:
-                clean_err["diagnostic"] = sanitize_diagnostic_string(str(raw_diag))
-            elif token_code in GENERIC_DIAGNOSTIC_MESSAGES:
+            if token_code in GENERIC_DIAGNOSTIC_MESSAGES:
                 clean_err["diagnostic"] = GENERIC_DIAGNOSTIC_MESSAGES[token_code]
+            elif token_code in ALLOWED_NUMERIC_ERROR_CODES:
+                clean_err["diagnostic"] = f"eBay error code {token_code}"
             else:
                 clean_err["diagnostic"] = "An error occurred during verification"
 
