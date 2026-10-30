@@ -41,8 +41,10 @@ from custom_components.ebay.parsers.bidding_parity import (
     render_bidding_parity_json,
     render_bidding_parity_markdown,
     sanitize_bidding_parity_report,
+    sanitize_bidding_probe_key,
     sanitize_diagnostic_token,
     sanitize_graphql_field_name,
+    sanitize_graphql_operation_name,
     summarize_bidding_probe_exception,
     validate_all_bidding_contract_probes,
 )
@@ -1453,3 +1455,416 @@ def test_contradictory_pagination_fails_closed() -> None:
     assert merged_3["graphql_complete"] is True
     assert merged_3["graphql_truncated"] is False
     assert merged_3["pagination_status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_probe_error_isolation_live_harness() -> None:
+    """Verify failed candidate probes do not contaminate a successful selected probe."""
+    client = Mock()
+    client.environment = "production"
+    client.site_id = "0"
+    client.refresh_token = "token123"
+
+    sample_xml_item = {
+        "111": {
+            "item_id": "111",
+            "title": "Item 1",
+            "current_price": 10.0,
+            "currency": "USD",
+            "max_bid": 15.0,
+            "winning": True,
+            "bid_count": 3,
+            "end_time": datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc),
+            "listing_type": "Chinese",
+            "url": "https://www.ebay.com/itm/111",
+            "image": "https://i.ebayimg.com/images/g/a/s-l140.jpg",
+        }
+    }
+    successful_gql_page = {
+        "userBiddingActivity": {
+            "total": 1,
+            "items": [
+                {
+                    "itemId": "111",
+                    "title": "Item 1",
+                    "currentPrice": {"value": 10.0, "currency": "USD"},
+                    "maxBid": {"value": 15.0, "currency": "USD"},
+                    "winning": True,
+                    "bidCount": 3,
+                    "itemEndDate": "2026-11-01T12:00:00Z",
+                    "formatType": "AUCTION",
+                    "itemWebUrl": "https://www.ebay.com/itm/111",
+                    "image": {
+                        "imageUrl": "https://i.ebayimg.com/images/g/a/s-l140.jpg"
+                    },
+                }
+            ],
+        }
+    }
+
+    # Case A: Probe 1 succeeds with complete items; Probe 2 fails with FORBIDDEN.
+    with (
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=(sample_xml_item, False)),
+        )
+
+        async def _mock_fetch_pages_a(c, probe, paginate=False):
+            if probe.key == "typename_handshake":
+                return [{"__typename": "Query"}]
+            if probe.key == "user_bidding_activity_paginated":
+                return [successful_gql_page]
+            # Other probes fail with FORBIDDEN
+            raise EbayGraphQLError(
+                "Resolver FORBIDDEN",
+                status=403,
+                errors=[{"message": "forbidden", "extensions": {"code": "FORBIDDEN"}}],
+            )
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch_pages_a,
+        )
+
+        report = await cli_harness.run_live_bidding_validation(client)
+
+        # The successful probe must be selected, NOT contaminated by the failed probe
+        assert report["selected_probe_key"] == "user_bidding_activity_paginated"
+        assert report["selected_probe"]["outcome"] == "success"
+        assert report["graphql_error_summary"] is None
+        assert report["status"] == "parity_verified"
+        assert report["graphql_complete"] is True
+        assert report["graphql_available"] is True
+
+        # But the failed probes must preserve their own errors independently
+        failed_probes = [p for p in report["probes"] if p["outcome"] == "error"]
+        assert len(failed_probes) > 0
+        for fp in failed_probes:
+            assert fp["error"]["code"] == "FORBIDDEN"
+            assert fp["error"]["is_scope_or_permission_error"] is True
+
+    # Case B: Probe 1 fails with VALIDATION_ERROR; Probe 2 succeeds.
+    with (
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=(sample_xml_item, False)),
+        )
+
+        async def _mock_fetch_pages_b(c, probe, paginate=False):
+            if probe.key == "typename_handshake":
+                raise EbayGraphQLError(
+                    "Validation failed",
+                    status=400,
+                    errors=[
+                        {
+                            "message": "Validation error",
+                            "extensions": {"code": "VALIDATION_ERROR"},
+                        }
+                    ],
+                )
+            if probe.key == "user_bidding_activity_paginated":
+                return [successful_gql_page]
+            return [{"userBiddingActivity": {"total": 1}}]
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch_pages_b,
+        )
+
+        report_b = await cli_harness.run_live_bidding_validation(client)
+        assert report_b["selected_probe_key"] == "user_bidding_activity_paginated"
+        assert report_b["graphql_error_summary"] is None
+        assert report_b["status"] == "parity_verified"
+        assert report_b["probes"][0]["outcome"] == "error"
+        assert report_b["probes"][0]["error"]["is_validation_error"] is True
+
+    # Case C: All candidate probes fail.
+    with (
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=(sample_xml_item, False)),
+        )
+
+        async def _mock_fetch_pages_c(c, probe, paginate=False):
+            raise EbayGraphQLError(
+                "Access Denied",
+                status=403,
+                errors=[
+                    {"message": "access denied", "extensions": {"code": "FORBIDDEN"}}
+                ],
+            )
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch_pages_c,
+        )
+
+        report_c = await cli_harness.run_live_bidding_validation(client)
+        assert report_c["selected_probe"] is None
+        assert report_c["status"] == "unverified"
+        assert report_c["graphql_available"] == "unauthorized"
+        assert report_c["graphql_error_summary"] is not None
+        assert report_c["graphql_error_summary"]["code"] == "FORBIDDEN"
+
+    # Case D: Selected probe returns partial data + errors.
+    with (
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=(sample_xml_item, False)),
+        )
+
+        partial_data_with_err = {
+            "data": successful_gql_page,
+            "errors": [
+                {
+                    "message": "partial error",
+                    "extensions": {"code": "FORBIDDEN"},
+                }
+            ],
+            "userBiddingActivity": successful_gql_page["userBiddingActivity"],
+        }
+
+        async def _mock_fetch_pages_d(c, probe, paginate=False):
+            if probe.key == "typename_handshake":
+                return [{"__typename": "Query"}]
+            if probe.key == "user_bidding_activity_paginated":
+                return [partial_data_with_err]
+            raise EbayGraphQLError(
+                "Resolver FORBIDDEN",
+                status=403,
+                errors=[{"message": "forbidden", "extensions": {"code": "FORBIDDEN"}}],
+            )
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch_pages_d,
+        )
+
+        report_d = await cli_harness.run_live_bidding_validation(client)
+        assert report_d["selected_probe_key"] == "user_bidding_activity_paginated"
+        assert report_d["graphql_error_summary"] is not None
+        assert report_d["status"] == "inconclusive"
+        assert report_d["graphql_complete"] is False
+        assert report_d["graphql_available"] == "unauthorized"
+
+    # Case E: Successful probe with unverified pagination.
+    with (
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=(sample_xml_item, False)),
+        )
+
+        unverified_pag_page = {
+            "userBiddingActivity": {
+                # No reported total -> pagination_status == 'unverified'
+                "items": successful_gql_page["userBiddingActivity"]["items"],
+            }
+        }
+
+        async def _mock_fetch_pages_e(c, probe, paginate=False):
+            if probe.key == "typename_handshake":
+                return [{"__typename": "Query"}]
+            if probe.key == "user_bidding_activity_paginated":
+                return [unverified_pag_page]
+            raise EbayGraphQLError(
+                "Resolver FORBIDDEN",
+                status=403,
+                errors=[{"message": "forbidden", "extensions": {"code": "FORBIDDEN"}}],
+            )
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch_pages_e,
+        )
+
+        report_e = await cli_harness.run_live_bidding_validation(client)
+        assert report_e["selected_probe_key"] == "user_bidding_activity_paginated"
+        assert report_e["graphql_error_summary"] is None
+        assert report_e["status"] == "inconclusive"
+        assert report_e["graphql_complete"] is False
+        assert report_e["graphql_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_custom_operation_name_privacy_gap(tmp_path: Path) -> None:
+    """Verify custom GraphQL operation names containing private handles are replaced with [CUSTOM_OPERATION]."""
+    private_handle = "private_account_john_doe_999"
+    custom_query_content = f"""
+    query {private_handle} {{
+        userBiddingActivity {{
+            total
+        }}
+    }}
+    """
+    query_file = tmp_path / "custom_test.graphql"
+    query_file.write_text(custom_query_content, encoding="utf-8")
+
+    custom_probe = cli_harness.build_custom_probe(query_file)
+    assert custom_probe.operation_name == private_handle
+    assert sanitize_graphql_operation_name(private_handle) == "[CUSTOM_OPERATION]"
+    assert (
+        sanitize_graphql_operation_name("GetUserBiddingActivity")
+        == "GetUserBiddingActivity"
+    )
+    assert sanitize_graphql_operation_name("[CUSTOM_OPERATION]") == "[CUSTOM_OPERATION]"
+    assert sanitize_graphql_operation_name(None) is None
+
+    assert sanitize_bidding_probe_key("custom_query_file") == "custom_query_file"
+    assert sanitize_bidding_probe_key("unknown_private_probe_123") == "[CUSTOM_PROBE]"
+    assert sanitize_bidding_probe_key(None) == "[CUSTOM_PROBE]"
+
+    client = Mock()
+    client.environment = "production"
+    client.site_id = "0"
+    client.refresh_token = "valid_token"
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            cli_harness,
+            "_fetch_xml_bidding_only",
+            AsyncMock(return_value=({}, False)),
+        )
+
+        async def _mock_fetch(c, probe, paginate=False):
+            if probe.key == "custom_query_file":
+                return [{"userBiddingActivity": {"total": 0, "items": []}}]
+            return [{"__typename": "Query"}]
+
+        mp.setattr(
+            cli_harness,
+            "async_fetch_bounded_graphql_pages",
+            _mock_fetch,
+        )
+
+        report = await cli_harness.run_live_bidding_validation(
+            client, custom_probe=custom_probe
+        )
+
+        # Selected probe operation name must be replaced by [CUSTOM_OPERATION]
+        custom_probe_result = next(
+            p for p in report["probes"] if p["key"] == "custom_query_file"
+        )
+        assert custom_probe_result["operation_name"] == "[CUSTOM_OPERATION]"
+        assert report["selected_probe"]["operation_name"] == "[CUSTOM_OPERATION]"
+
+        # Render to Markdown and JSON
+        rendered_md = render_bidding_parity_markdown(report)
+        rendered_json = render_bidding_parity_json(report)
+
+        # The private handle MUST NOT appear anywhere in the rendered reports
+        assert private_handle not in rendered_md
+        assert private_handle not in rendered_json
+        assert "[CUSTOM_OPERATION]" in rendered_md
+        assert "[CUSTOM_OPERATION]" in rendered_json
+
+
+def test_field_level_fail_closed_on_incomplete_or_errored_collection() -> None:
+    """Verify that when collection completeness cannot be established, every field is unverified."""
+    xml_items = {
+        "101": {
+            "item_id": "101",
+            "title": "XML Camera Lens",
+            "current_price": 50.0,
+            "currency": "USD",
+            "max_bid": 60.0,
+            "winning": True,
+            "bid_count": 5,
+            "end_time": datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc),
+            "listing_type": "Chinese",
+            "url": "https://www.ebay.com/itm/101",
+            "image": "https://i.ebayimg.com/images/g/a/s-l140.jpg",
+        }
+    }
+    # Deliberately mismatching values and absent image in GraphQL
+    gql_partial = {
+        "userBiddingActivity": {
+            "total": 1,
+            "items": [
+                {
+                    "itemId": "101",
+                    "title": "Completely Different Title",  # mismatch
+                    "currentPrice": {
+                        "amount": 999.0,
+                        "currencyCode": "EUR",
+                    },  # mismatch
+                    "maxBid": None,  # null
+                    "winning": False,  # mismatch
+                    "bidCount": 99,  # mismatch
+                    "itemEndDate": "2029-01-01T00:00:00Z",  # mismatch
+                    "formatType": "FIXED_PRICE",  # mismatch
+                    "itemWebUrl": "https://www.ebay.com/itm/other",  # mismatch
+                    "image": None,  # absent in GQL, present in XML
+                }
+            ],
+        }
+    }
+
+    # Case 1: Incomplete collection due to GraphQL partial errors
+    comp_with_errors = compare_bidding_snapshots(
+        xml_items,
+        gql_partial,
+        graphql_error_summary={"error_count": 1, "code": "FORBIDDEN"},
+    )
+    assert comp_with_errors["status"] == "inconclusive"
+    assert comp_with_errors["graphql_complete"] is False
+
+    fields = comp_with_errors["fields"]
+    # Every single monitored field MUST be classified as unverified
+    for field_name in (
+        "bidding_count",
+        "item_id",
+        "title",
+        "current_price",
+        "currency",
+        "max_bid",
+        "winning",
+        "bid_count",
+        "end_time",
+        "listing_type",
+        "url",
+        "image",
+    ):
+        f = fields[field_name]
+        assert f["classification"] == PARITY_UNVERIFIED, (
+            f"Field {field_name} was {f['classification']}"
+        )
+        assert f["classification_label"] == "Unverified"
+
+    # Verify diagnostic aggregate counts are still preserved for inspection
+    assert fields["title"]["mismatch_count"] == 1
+    assert fields["current_price"]["mismatch_count"] == 1
+    assert fields["currency"]["mismatch_count"] == 1
+    assert fields["image"]["xml_present_count"] == 1
+    assert fields["image"]["graphql_present_count"] == 0
+
+    # Case 2: Incomplete collection due to XML truncation
+    comp_xml_trunc = compare_bidding_snapshots(
+        xml_items,
+        gql_partial,
+        xml_truncated=True,
+    )
+    assert comp_xml_trunc["status"] == "inconclusive"
+    for field_name in fields:
+        assert (
+            comp_xml_trunc["fields"][field_name]["classification"] == PARITY_UNVERIFIED
+        )

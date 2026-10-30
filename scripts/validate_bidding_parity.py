@@ -54,7 +54,9 @@ from custom_components.ebay.parsers.bidding_parity import (  # noqa: E402
     render_bidding_parity_json,
     render_bidding_parity_markdown,
     sanitize_bidding_parity_report,
+    sanitize_bidding_probe_key,
     sanitize_graphql_field_name,
+    sanitize_graphql_operation_name,
     summarize_bidding_probe_exception,
     validate_all_bidding_contract_probes,
 )
@@ -394,10 +396,16 @@ def _collect_client_forbidden_strings(
                 if isinstance(val, str) and val.strip():
                     forbidden.append(val.strip())
 
-    if custom_probe and isinstance(custom_probe.variables, Mapping):
-        for var_val in custom_probe.variables.values():
-            if isinstance(var_val, str) and len(var_val.strip()) >= 4:
-                forbidden.append(var_val.strip())
+    if custom_probe:
+        if (
+            custom_probe.operation_name
+            and len(custom_probe.operation_name.strip()) >= 4
+        ):
+            forbidden.append(custom_probe.operation_name.strip())
+        if isinstance(custom_probe.variables, Mapping):
+            for var_val in custom_probe.variables.values():
+                if isinstance(var_val, str) and len(var_val.strip()) >= 4:
+                    forbidden.append(var_val.strip())
 
     return forbidden
 
@@ -448,7 +456,8 @@ async def run_live_bidding_validation(
     best_graphql_pages: list[dict[str, Any]] | None = None
     best_rank: tuple[Any, ...] | None = None
     selected_probe_key: str | None = None
-    last_error_summary: dict[str, Any] | None = None
+    selected_error_summary: dict[str, Any] | None = None
+    last_candidate_error_summary: dict[str, Any] | None = None
 
     has_refresh_token = bool(
         getattr(client, "refresh_token", None)
@@ -481,26 +490,56 @@ async def run_live_bidding_validation(
                 else []
             )
 
-            if probe.key == "typename_handshake":
-                probe_results.append(
-                    {
-                        "key": probe.key,
-                        "operation_name": probe.operation_name,
-                        "outcome": "success",
-                        "parity_eligible": False,
-                        "top_level_keys": top_keys,
-                        "reported_total": None,
-                        "graphql_bidding_count": 0,
-                        "pagination_status": "handshake",
-                        "summary": f"Succeeded; top-level keys={top_keys}",
-                    }
+            # Inspect page responses for embedded partial errors
+            probe_page_errors: list[dict[str, Any]] = []
+            for p in pages:
+                if isinstance(p, Mapping):
+                    raw_errs = p.get("errors") or p.get("error")
+                    if isinstance(raw_errs, list):
+                        for e in raw_errs:
+                            if isinstance(e, dict):
+                                probe_page_errors.append(e)
+                            else:
+                                probe_page_errors.append(
+                                    {"code": "MALFORMED_ERROR", "message": str(e)}
+                                )
+                    elif isinstance(raw_errs, dict):
+                        probe_page_errors.append(raw_errs)
+
+            current_probe_err_summary: dict[str, Any] | None = None
+            if probe_page_errors:
+                exc_partial = EbayGraphQLError(
+                    "GraphQL probe returned partial errors",
+                    errors=probe_page_errors,
                 )
+                current_probe_err_summary = summarize_bidding_probe_exception(
+                    exc_partial
+                )
+
+            sanitized_op = sanitize_graphql_operation_name(probe.operation_name)
+            sanitized_key = sanitize_bidding_probe_key(probe.key)
+
+            if probe.key == "typename_handshake":
+                probe_dict_handshake: dict[str, Any] = {
+                    "key": sanitized_key,
+                    "operation_name": sanitized_op,
+                    "outcome": "error" if current_probe_err_summary else "success",
+                    "parity_eligible": False,
+                    "top_level_keys": top_keys,
+                    "reported_total": None,
+                    "graphql_bidding_count": 0,
+                    "pagination_status": "handshake",
+                    "summary": f"Succeeded; top-level keys={top_keys}",
+                }
+                if current_probe_err_summary:
+                    probe_dict_handshake["error"] = current_probe_err_summary
+                probe_results.append(probe_dict_handshake)
                 continue
 
             merged_preview = merge_graphql_bidding_pages(pages)
             is_custom = probe.key == "custom_query_file"
             candidate_dict = {
-                "outcome": "success",
+                "outcome": "error" if current_probe_err_summary else "success",
                 "pagination_status": merged_preview["pagination_status"],
                 "graphql_bidding_count": len(merged_preview["items_by_id"]),
                 "items_list_present": merged_preview["items_list_present"],
@@ -512,29 +551,31 @@ async def run_live_bidding_validation(
             }
             candidate_rank = rank_bidding_probe_candidate(candidate_dict)
 
-            probe_results.append(
-                {
-                    "key": probe.key,
-                    "operation_name": probe.operation_name,
-                    "outcome": "success",
-                    "parity_eligible": True,
-                    "top_level_keys": top_keys,
-                    "pagination_status": merged_preview["pagination_status"],
-                    "reported_total": merged_preview["reported_total"],
-                    "graphql_bidding_count": len(merged_preview["items_by_id"]),
-                    "pages_fetched": len(pages),
-                    "summary": (
-                        f"Succeeded; top-level keys={top_keys}, "
-                        f"container_keys={merged_preview['container_keys']}, "
-                        f"pagination_status={merged_preview['pagination_status']}"
-                    ),
-                }
-            )
+            probe_dict_candidate: dict[str, Any] = {
+                "key": sanitized_key,
+                "operation_name": sanitized_op,
+                "outcome": "error" if current_probe_err_summary else "success",
+                "parity_eligible": not current_probe_err_summary,
+                "top_level_keys": top_keys,
+                "pagination_status": merged_preview["pagination_status"],
+                "reported_total": merged_preview["reported_total"],
+                "graphql_bidding_count": len(merged_preview["items_by_id"]),
+                "pages_fetched": len(pages),
+                "summary": (
+                    f"Succeeded; top-level keys={top_keys}, "
+                    f"container_keys={merged_preview['container_keys']}, "
+                    f"pagination_status={merged_preview['pagination_status']}"
+                ),
+            }
+            if current_probe_err_summary:
+                probe_dict_candidate["error"] = current_probe_err_summary
+            probe_results.append(probe_dict_candidate)
 
             if best_rank is None or candidate_rank > best_rank:
                 best_graphql_pages = pages
                 best_rank = candidate_rank
                 selected_probe_key = probe.key
+                selected_error_summary = current_probe_err_summary
         except (
             EbayError,
             aiohttp.ClientError,
@@ -544,11 +585,13 @@ async def run_live_bidding_validation(
             TypeError,
         ) as exc:
             err_summary = summarize_bidding_probe_exception(exc)
-            last_error_summary = err_summary
+            last_candidate_error_summary = err_summary
             probe_results.append(
                 {
-                    "key": probe.key,
-                    "operation_name": probe.operation_name,
+                    "key": sanitize_bidding_probe_key(probe.key),
+                    "operation_name": sanitize_graphql_operation_name(
+                        probe.operation_name
+                    ),
                     "outcome": "error",
                     "parity_eligible": False,
                     "reported_total": None,
@@ -569,12 +612,12 @@ async def run_live_bidding_validation(
     selected_probe_dict: dict[str, Any] | None = None
     if best_graphql_pages and selected_probe_key:
         matched = [p for p in probes_to_run if p.key == selected_probe_key]
-        op_name = matched[0].operation_name if matched else None
+        raw_op_name = matched[0].operation_name if matched else None
         merged_best = merge_graphql_bidding_pages(best_graphql_pages)
         selected_probe_dict = {
-            "key": selected_probe_key,
-            "operation_name": op_name,
-            "outcome": "success",
+            "key": sanitize_bidding_probe_key(selected_probe_key),
+            "operation_name": sanitize_graphql_operation_name(raw_op_name),
+            "outcome": "error" if selected_error_summary else "success",
             "items_field": merged_best["items_field_name"],
             "total_field": merged_best["total_field_name"],
             "reported_total": merged_best["reported_total"],
@@ -582,13 +625,19 @@ async def run_live_bidding_validation(
             "pagination_status": merged_best["pagination_status"],
         }
 
+    graphql_error_for_comparison = (
+        selected_error_summary
+        if best_graphql_pages is not None
+        else last_candidate_error_summary
+    )
+
     comparison = compare_bidding_snapshots(
         xml_bidding,
         best_graphql_pages,
         xml_available=xml_available,
         xml_truncated=xml_truncated,
         xml_error_summary=xml_error_summary,
-        graphql_error_summary=last_error_summary,
+        graphql_error_summary=graphql_error_for_comparison,
     )
 
     forbidden = _collect_client_forbidden_strings(client, xml_bidding, custom_probe)

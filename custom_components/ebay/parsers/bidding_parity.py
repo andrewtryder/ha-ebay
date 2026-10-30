@@ -265,9 +265,63 @@ CANONICAL_BIDDING_FIELD_NAMES: frozenset[str] = frozenset(
     }
 )
 
+CANONICAL_BIDDING_OPERATION_NAMES: frozenset[str] = frozenset(
+    {
+        "Handshake",
+        "GetBiddingTotal",
+        "GetBiddingCountAlt",
+        "GetUserBiddingActivity",
+        "GetUserBiddingActivityAlt",
+        "GetItemBiddingActivity",
+        "OfflineFixture",
+    }
+)
+
+CANONICAL_BIDDING_PROBE_KEYS: frozenset[str] = frozenset(
+    {
+        "typename_handshake",
+        "user_bidding_activity_total",
+        "user_bidding_activity_count_alt",
+        "user_bidding_activity_paginated",
+        "user_bidding_activity_bids_alt",
+        "item_bidding_activity_probe",
+        "offline_fixture",
+        "custom_query_file",
+    }
+)
+
 REDACTED_ERROR_CODE = "UNKNOWN_CODE"
 REDACTED_CATEGORY = "UNKNOWN_CATEGORY"
 REDACTED_DOMAIN = "UNKNOWN_DOMAIN"
+
+
+def sanitize_graphql_operation_name(name: Any) -> str | None:
+    """Sanitize a GraphQL operation name against canonical allowlists.
+
+    Preserves canonical built-in operation names and replaces custom,
+    unknown, or caller-controlled operation names (which may contain private
+    account handles or identifiers) with '[CUSTOM_OPERATION]'.
+    """
+    if name is None or isinstance(name, bool):
+        return None
+    raw = str(name).strip()
+    if not raw or raw in ("-", "None"):
+        return None
+    if raw in CANONICAL_BIDDING_OPERATION_NAMES or raw == "[CUSTOM_OPERATION]":
+        return raw
+    return "[CUSTOM_OPERATION]"
+
+
+def sanitize_bidding_probe_key(key: Any) -> str:
+    """Sanitize a probe key against canonical allowlists."""
+    if key is None or isinstance(key, bool):
+        return "[CUSTOM_PROBE]"
+    raw = str(key).strip()
+    if not raw or raw in ("-", "None"):
+        return "[CUSTOM_PROBE]"
+    if raw in CANONICAL_BIDDING_PROBE_KEYS:
+        return raw
+    return "[CUSTOM_PROBE]"
 
 
 def sanitize_graphql_field_name(
@@ -1374,7 +1428,42 @@ def _compare_single_bidding_field(
     else:
         coverage = "partial"
 
-    if both_present_count == 0:
+    if not collection_complete:
+        classification = PARITY_UNVERIFIED
+        if mismatch_count > 0:
+            notes = (
+                f"Observed {mismatch_count} value differences among compared sample items, "
+                "but collection completeness is not established or response contains errors; "
+                "field parity unverified."
+            )
+        elif both_present_count == 0:
+            if xml_present_count > 0 and gql_present_count == 0:
+                notes = (
+                    "Field was absent across compared candidate items, but collection completeness "
+                    "is not established or response contains errors; field parity unverified."
+                )
+            elif xml_present_count == 0 and gql_present_count > 0:
+                notes = (
+                    "Field was present in candidate items but absent in XML sample, and collection "
+                    "completeness is not established; field parity unverified."
+                )
+            else:
+                notes = (
+                    "No compared items populated this field in either source and collection "
+                    "completeness is not established; field parity unverified."
+                )
+        elif both_absent_count > 0:
+            notes = (
+                f"Matched on {both_present_count} sample items ({both_absent_count} null on both sides), "
+                "but collection completeness is not established or response contains errors; "
+                "field parity unverified."
+            )
+        else:
+            notes = (
+                f"Matched on all {both_present_count} compared sample items, but "
+                "full Bidding collection is truncated, contains errors, or is unreconciled."
+            )
+    elif both_present_count == 0:
         if xml_present_count > 0 and gql_present_count == 0:
             classification = PARITY_MISSING_FIELD
             notes = "Field is present in Trading XML but absent across candidate GraphQL records."
@@ -1399,12 +1488,6 @@ def _compare_single_bidding_field(
             f"Matched on {both_present_count} of {total} items, but "
             f"{both_absent_count} items were null in both sources "
             "(partial coverage; full parity unverified)."
-        )
-    elif not collection_complete:
-        classification = PARITY_UNVERIFIED
-        notes = (
-            f"Matched on all {both_present_count} compared sample items, but "
-            "full Bidding collection is truncated or unreconciled."
         )
     elif normalized_count == 0:
         classification = PARITY_EXACT_MATCH
@@ -1873,6 +1956,21 @@ def sanitize_bidding_parity_report(
                     value, str
                 ):
                     scrubbed[key_str] = sanitize_graphql_field_name(value, kind="field")
+                    continue
+                if key_str == "operation_name":
+                    scrubbed[key_str] = (
+                        sanitize_graphql_operation_name(value)
+                        if value is not None
+                        else None
+                    )
+                    continue
+                if key_str in ("selected_probe_key", "probe_key"):
+                    scrubbed[key_str] = (
+                        sanitize_bidding_probe_key(value) if value is not None else None
+                    )
+                    continue
+                if key_str == "key" and isinstance(value, str):
+                    scrubbed[key_str] = sanitize_bidding_probe_key(value)
                     continue
                 scrubbed[key_str] = _walk(value)
             return scrubbed
