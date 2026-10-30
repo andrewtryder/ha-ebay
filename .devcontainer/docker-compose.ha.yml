@@ -1,6 +1,6 @@
 services:
   homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:2026.8.0
+    image: ghcr.io/home-assistant/home-assistant:2026.10.0
     container_name: ha-ebay-homeassistant
     volumes:
       - ./ha-config:/config

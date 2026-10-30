@@ -58,7 +58,7 @@ def test_blueprint_structure(filename: str, event_type: str) -> None:
     assert meta["name"].startswith("eBay - ")
     assert "source_url" in meta
     assert meta["source_url"].endswith(filename)
-    assert meta["homeassistant"]["min_version"] == "2026.8.0"
+    assert meta["homeassistant"]["min_version"] == "2026.10.0"
     assert "notify_entity" in meta["input"]
     assert data["mode"] == "queued"
     assert data["triggers"]

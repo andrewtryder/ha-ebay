@@ -247,12 +247,10 @@ The validation harness (`scripts/validate_watchlist_parity.py`) makes **zero net
 
 ```bash
 # 1. Offline synthetic demo (zero network calls, no credentials required):
-uv run --python 3.14 --with-requirements requirements-ha-current.txt \
-  python scripts/validate_watchlist_parity.py --synthetic-demo
+uv run python scripts/validate_watchlist_parity.py --synthetic-demo
 
 # 2. Recommended first live probe using a git-ignored .env.local file:
-uv run --python 3.14 --with-requirements requirements-ha-current.txt \
-  python scripts/validate_watchlist_parity.py --live \
+uv run python scripts/validate_watchlist_parity.py --live \
   --env-file .env.local \
   --output watchlist_parity.local.md
 ```
@@ -266,8 +264,7 @@ If the built-in candidate probes return `VALIDATION_ERROR`, you can copy the wor
 3. Run the harness with `--query-file` and `--variables-file` (the single operation name is inferred automatically when `--operation-name` is omitted):
 
 ```bash
-uv run --python 3.14 --with-requirements requirements-ha-current.txt \
-  python scripts/validate_watchlist_parity.py --live \
+uv run python scripts/validate_watchlist_parity.py --live \
   --env-file .env.local \
   --query-file watchlist_query.local.graphql \
   --variables-file watchlist_vars.local.json \

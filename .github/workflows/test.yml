@@ -2,6 +2,8 @@ name: Test
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -10,73 +12,40 @@ permissions:
 
 jobs:
   python:
-    name: Python (HA ${{ matrix.ha-label }})
+    name: Python (HA 2026.10.0)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Declared HACS minimum is 2026.8.0 (pytest-homeassistant-custom-component==0.13.354).
-          - python-version: "3.14"
-            ha-label: "2026.8.0-minimum"
-            requirements-ha: requirements-ha-min.txt
-          - python-version: "3.14"
-            ha-label: "2026.9.2-current"
-            requirements-ha: requirements-ha-current.txt
 
     steps:
       # actions/checkout@v4
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: Set up Python ${{ matrix.python-version }}
-        # actions/setup-python@v5
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - name: Install uv
+        # astral-sh/setup-uv@v5.4.2
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
+          enable-cache: true
+
+      - name: Set up Python 3.14
+        run: uv python install 3.14
 
       - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Verify Home Assistant version
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements-dev.txt ]; then
-            python -m pip install -r requirements-dev.txt
-          else
-            python -m pip install pytest pytest-cov ruff pillow
-          fi
-          if [ -f "${{ matrix.requirements-ha }}" ]; then
-            python -m pip install -r "${{ matrix.requirements-ha }}"
-          else
-            python -m pip install pytest-homeassistant-custom-component
-          fi
+          uv run --locked python -c "import homeassistant.const, importlib.metadata; v1 = homeassistant.const.__version__; v2 = importlib.metadata.version('homeassistant'); print(f'Installed HA: const={v1}, metadata={v2}'); assert v1 == '2026.10.0' and v2 == '2026.10.0', (v1, v2)"
 
       - name: Pre-commit (all files)
-        if: matrix.ha-label == '2026.9.2-current'
-        run: pre-commit run --all-files
+        run: uv run --locked pre-commit run --all-files
 
-      - name: Ruff
-        run: |
-          if [ -d custom_components ]; then
-            paths=(custom_components)
-            if [ -d tests ]; then
-              paths+=(tests)
-            fi
-            ruff check "${paths[@]}" --output-format=github
-          else
-            echo "No custom_components directory yet; skipping ruff."
-          fi
+      - name: Ruff check
+        run: uv run --locked ruff check . --output-format=github
+
+      - name: Ruff format verification
+        run: uv run --locked ruff format --check .
 
       - name: Compile
-        run: |
-          if [ -d custom_components ]; then
-            python -m compileall custom_components
-          else
-            echo "No custom_components directory yet; skipping compileall."
-          fi
+        run: uv run --locked python -m compileall custom_components scripts tests
 
       - name: Tests with coverage
-        run: |
-          if [ -d tests ]; then
-            pytest -q
-          else
-            echo "No tests directory yet; skipping pytest."
-          fi
+        run: uv run --locked pytest -q

@@ -7,17 +7,14 @@ secrets, private item IDs, titles, prices, or raw account responses.
 
 Examples:
   # Run offline synthetic parity verification (no network, no credentials):
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_seller_parity.py --synthetic-demo
+  uv run python scripts/validate_seller_parity.py --synthetic-demo
 
   # Compare local XML and GraphQL response fixtures offline:
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_seller_parity.py \\
+  uv run python scripts/validate_seller_parity.py \
     --xml-fixture path/to/selling.xml --graphql-fixture path/to/seller_listings.json
 
   # Run live read-only validation against eBay using a local git-ignored .env file:
-  uv run --python 3.14 --with-requirements requirements-ha-current.txt \\
-    python scripts/validate_seller_parity.py --live --env-file .env.local \\
+  uv run python scripts/validate_seller_parity.py --live --env-file .env.local \
     --output seller_parity.local.md
 """
 
@@ -59,7 +56,6 @@ from custom_components.ebay.parsers.seller_parity import (  # noqa: E402
     sanitize_seller_parity_report,
     sanitize_seller_probe_key,
     summarize_seller_probe_exception,
-    validate_all_seller_contract_probes,
 )
 from custom_components.ebay.parsers.trading_builders import (  # noqa: E402
     SELLING_CALL_NAME,

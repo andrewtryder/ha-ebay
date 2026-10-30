@@ -1,2 +1,0 @@
-# Published harness targeting HACS minimum homeassistant==2026.8.0.
-pytest-homeassistant-custom-component==0.13.354
