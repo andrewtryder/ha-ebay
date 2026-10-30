@@ -57,8 +57,7 @@ All claims and classifications in this document adhere to strict verification ta
 | **8. Pagination & Date Window** | Documented support for date range filters (`startAtRange`, `endAtRange`) and standard pagination controls **[OFFICIAL SPEC]**. Inactive/ended auctions fall outside active bid lists. |
 | **9. Call Limits & Polling** | Auction API operations have tracked call limits managed via Developer Technical Support (DTS) **[OFFICIAL SPEC]**. Rate limiting applies at the operation level. Single combined polling cadence matches coordinator interval. |
 | **10. HA Entities Dependent** | `sensor.ebay_bidding_items` (count), per-item bidding sensors (`current_price`, `max_bid`, `seconds_left`, `end_time`), `event.ebay_bidding_activity` (`bid_item_added`, `outbid`, `winning`, `bidding_item_ending_soon`, `bid_item_ended`, `bid_item_disappeared_unknown`), `calendar.ebay_bidding_items`, and blueprint `notify_when_outbid.yaml`. |
-| **11. Verified Limitations** | REST Offer API only checks bidding per-item (`/bidding/{item_id}`), requiring $N$ calls and partner approval. GraphQL `userBiddingActivity` provides collection retrieval but shares the modern GraphQL gateway that gated `userWatchList`. Must build offline parity harness before any live trial. |
-| **12. Migration Priority** | **CURRENT FOCUS (Milestone 4)**: Implement offline normalizer, parity validation harness, and Explorer test procedures. Production remains on Trading XML. |
+| **12. Migration Priority** | **COMPLETED & MERGED (Milestone 4)**: Normalizer, parity validation harness, and Explorer procedures implemented and merged via PR #97. Production remains on Trading XML. |
 
 ---
 
@@ -67,17 +66,65 @@ All claims and classifications in this document adhere to strict verification ta
 | Dimension | Details & Assessment |
 |---|---|
 | **1. Existing Source** | Trading XML `GetMyeBaySelling` (`ActiveList`, `SellingSummary`) and `GetSellerEvents` **[OFFICIAL SPEC]** **[LIVE TESTED]**. |
-| **2. Modern Replacement** | eBay GraphQL **Listing API** (`sellerListingSearch`) **[OFFICIAL SPEC]** or REST **Sell Inventory API** (`GET /sell/inventory/v1/inventory_item`) / **Sell Fulfillment API** **[OFFICIAL SPEC]**. |
-| **3. Exact Operation Name** | `query GetSellerListings { sellerListingSearch { ... } }` **[OFFICIAL SPEC]**. |
-| **4. Required Fields & Semantics** | Monitored: `item_id`, `title`, `current_price`, `currency`, `quantity`, `quantity_available`, `quantity_sold`, `watchers`, `views`, `questions`, `offers`, `end_time`, `url`, `image`. Semantic differences: Inventory API uses SKU/offer architecture; `sellerListingSearch` retains listing-level item IDs and supports `startAtRange`, `modifiedAtRange`, `endAtRange` **[OFFICIAL SPEC]**. |
+| **2. Modern Replacement** | eBay GraphQL **Listing API** (candidate operation `sellerListingSearch` **[UNVERIFIED]**) or REST **Sell Inventory API** (`GET /sell/inventory/v1/inventory_item`) / **Sell Fulfillment API** **[OFFICIAL SPEC]**. |
+| **3. Exact Operation Name** | Candidate `query GetSellerListings { sellerListingSearch { ... } }` **[UNVERIFIED]**. |
+| **4. Required Fields & Semantics** | Monitored: `item_id`, `title`, `current_price`, `currency`, `quantity`, `quantity_available`, `quantity_sold`, `watchers`, `views`, `questions`, `offers`, `end_time`, `url`, `image`. Semantic differences: Inventory API uses SKU/offer architecture; candidate `sellerListingSearch` retains listing-level item IDs and candidate date range filters **[UNVERIFIED]**. |
 | **5. Token Requirements** | User Access Token with selling privileges **[OFFICIAL SPEC]**. |
-| **6. Required Scopes** | `https://api.ebay.com/oauth/api_scope/sell.inventory` or `sell.inventory.readonly` for Inventory API; GraphQL listing queries typically require `sell.inventory.readonly` or base sell scopes **[OFFICIAL SPEC]**. |
-| **7. Entitlement / Approval** | Sell Inventory and Listing APIs are standard Public APIs for registered eBay sellers **[OFFICIAL SPEC]**. |
+| **6. Required Scopes** | Documented REST Sell Inventory scope is `https://api.ebay.com/oauth/api_scope/sell.inventory` or `sell.inventory.readonly` **[OFFICIAL SPEC]**. Whether modern GraphQL seller listing queries inherit standard sell scopes, require specific developer entitlements, or require custom scopes remains **[UNVERIFIED]**. |
+| **7. Entitlement / Approval** | REST Sell Inventory and Fulfillment APIs are standard Public APIs for registered eBay sellers **[OFFICIAL SPEC]**. Modern GraphQL seller listing queries and access rules are operation-level; whether modern GraphQL seller endpoints are generally available or gated by application entitlement remains **[UNVERIFIED]**. |
 | **8. Pagination & Date Window** | Standard pagination (`limit`, `offset`); date window filters required for large listing catalogs **[OFFICIAL SPEC]**. |
 | **9. Call Limits & Polling** | Sell Inventory: 2,000,000 calls/day standard limit **[OFFICIAL SPEC]**. Easily supports 15-minute polling. |
 | **10. HA Entities Dependent** | `sensor.ebay_selling_active_items`, `sensor.ebay_selling_total_views`, `sensor.ebay_selling_total_watchers`, `sensor.ebay_selling_total_bids`, `sensor.ebay_selling_total_offers`, `sensor.ebay_active_listings_quantity_sold`, per-item selling sensors, `calendar.ebay_selling_items`, `event.ebay_seller_ops_activity`. |
-| **11. Verified Limitations** | Selling metrics (`views`, `watchers`, `questions`) may require combining `sellerListingSearch` with Sell Analytics. |
-| **12. Migration Priority** | **PLANNED (Milestone 5)**: Strong modern candidate; evaluate after M4. |
+| **11. Verified Limitations** | Selling metrics (`views`, `watchers`, `questions`) may require combining `sellerListingSearch` with Sell Analytics. GraphQL inventory probes do not prove that the separate REST Sell Inventory API is accessible or exhaustive. SKU-based inventory records do not represent a complete census of active listings. |
+| **12. Migration Priority** | **CURRENT FOCUS (Milestone 5)**: Implement offline normalizer, 16-field parity validation harness, probe definitions, and SKU/inventory vs listing ID identity analysis. Production remains on Trading XML. |
+
+#### Active Seller Listings Architecture & Identity Findings (Milestone 5)
+
+##### 1. Listing Identity: Inventory API vs. Trading XML ItemID
+A central finding of Milestone 5 research is that **eBay Sell Inventory API entities are not a drop-in census of active listings**:
+- **Trading XML ItemID**: Every active listing on eBay has a unique 12-digit numeric `ItemID`. This represents the actual public listing with its auction or fixed-price lifecycle, watcher count, views, and bids.
+- **Inventory API SKU & Offers**: The Sell Inventory API models the seller's catalog as inventory items indexed by merchant `SKU`, and commercial terms as `offers`.
+  - An inventory item can exist without being published to any listing.
+  - A published offer has a `listingId` that corresponds to an `ItemID`, but multiple SKUs can be bundled or mapped into multi-variation listings.
+  - Listings created directly on eBay's consumer web or mobile interfaces (or via older listing tools) often do not have associated Inventory API records or SKUs unless migrated by the seller.
+- **Fail-Closed Census Rule**: **Inventory API records must never be treated as a complete census of active seller listings unless completeness is proven**. The validation harness flags any SKU-based probe without verified listing IDs as `unsupported` or `different_semantics` rather than claiming parity. Furthermore, probing GraphQL inventory fields does not establish that the separate REST Sell Inventory API is accessible or complete.
+
+##### 2. Monitored Fields & Parity Classification Taxonomy
+The Milestone 5 normalization module (`custom_components/ebay/parsers/seller_parity.py`) evaluates 16 seller fields using the established 6-state taxonomy:
+
+| Monitored Field | Trading XML Source | Modern GraphQL / REST Candidate | Parity Status / Semantic Notes |
+|---|---|---|---|
+| `selling_count` | `ActiveList.PaginationResult.TotalNumberOfEntries` | `sellerListingSearch.total` or connection length | `exact_match` when both sides match; fails closed on truncation or inconsistent totals. |
+| `item_id` | `Item.ItemID` | `item.itemId` / `legacyItemId` | `equivalent_after_normalization` (handles prefix `v1\|...\|0`). |
+| `title` | `Item.Title` | `item.title` | `exact_match` or `equivalent_after_normalization` (whitespace). |
+| `current_price` | `Item.SellingStatus.CurrentPrice` | `item.currentPrice.value` | `exact_match` (float rounded to 2 decimals). |
+| `currency` | `Item.SellingStatus.CurrentPrice[@currencyID]` | `item.currentPrice.currency` | `exact_match` (uppercase normalized). |
+| `quantity` | `Item.Quantity` | `item.quantity` / `item.availableQuantity + item.quantitySold` | `exact_match` (total quantity listed). |
+| `quantity_available` | `Item.QuantityAvailable` (or `Quantity - QuantitySold`) | `item.availableQuantity` / `item.quantityAvailable` | `exact_match` or `equivalent_after_normalization`. |
+| `quantity_sold` | `Item.SellingStatus.QuantitySold` | `item.quantitySold` | `exact_match` (cumulative units sold on listing). |
+| `views` | `Item.WatchCount` / `Item.HitCount` | Analytics API / `item.views` | `unverified` or `missing_field` on basic listing payloads. |
+| `watchers` | `Item.WatchCount` | `item.watchCount` / `item.watchers` | `exact_match` when present; otherwise `missing_field`. |
+| `questions` | `Item.QuestionCount` | None (Post-Order only) | `missing_field` / `unsupported` in modern listing queries. |
+| `offers` | `Item.BestOfferDetails.BestOfferCount` | `item.bestOfferCount` / Negotiation API | `equivalent_after_normalization` or `missing_field`. |
+| `end_time` | `Item.ListingDetails.EndTime` | `item.listingDetails.endTime` / `item.endAt` | `equivalent_after_normalization` (ISO-8601 UTC). |
+| `listing_type` | `Item.ListingType` | `item.format` / `item.listingType` | `exact_match` or `different_semantics` (e.g. ChineseAuction vs FixedPriceItem). |
+| `url` | `Item.ListingDetails.ViewItemURL` | `item.itemWebUrl` / `item.itemAffiliateWebUrl` | `equivalent_after_normalization` (strips tracking query params). |
+| `image` | `Item.PictureDetails.GalleryURL` | `item.image.imageUrl` / `item.thumbnailImages` | `equivalent_after_normalization` (protocol/dimension variations). |
+
+##### 3. Built-In Seller Contract Probes
+The validation harness includes 6 built-in probes for safe schema and contract discovery:
+1. `typename_handshake`: `query Handshake { __typename }` (verifies gateway connectivity and OAuth validity).
+2. `seller_listings_total`: Probes candidate `sellerListingSearch { total }` to discover root field support **[UNVERIFIED]**.
+3. `seller_listings_count_alt`: Probes candidate `sellerListingSearch { activeListingCount totalCount }` alternate count probe **[UNVERIFIED]**.
+4. `seller_listings_paginated`: Probes paginated candidate `sellerListingSearch(limit: $limit, offset: $offset) { total items { itemId title currentPrice { value currency } quantity quantityAvailable quantitySold views watchers questions offers itemEndDate itemWebUrl image { imageUrl } formatType } }` for item records **[UNVERIFIED]**.
+5. `seller_listings_alt_fields`: Probes candidate alternate fields via `sellerListings { totalCount listings { listingId title price { amount currencyCode } availableQuantity soldQuantity hitCount watchCount questionCount bestOfferCount endTime listingUrl imageUrl listingFormat status } }` for field coverage discovery **[UNVERIFIED]**.
+6. `seller_inventory_probe`: Probes candidate supplementary inventory schema via `sellerInventory { total inventoryItems { sku listingId title price { value currency } availableQuantity } }` **[UNVERIFIED]**. Note that GraphQL inventory probes are not proof that the separate REST Sell Inventory API is accessible or exhaustive, and SKU-based inventory data does not constitute a complete seller listing census.
+
+##### 4. Read-Only Safety & Error Isolation
+- **Strictly Read-Only**: `custom_components/ebay/parsers/seller_parity.py` validates queries using `infer_and_validate_query_operation()`, strictly rejecting any GraphQL operations containing `mutation` or disallowed operations.
+- **Probe Error Isolation**: Each candidate probe preserves its own error summary (`last_error_summary`). A failure on one probe does not taint a successfully selected item-bearing probe.
+- **Privacy Sanitization**: All error messages, client secrets, tokens, account names, item IDs, prices, bids, and URLs are stripped from reports via `sanitize_seller_parity_report()`.
+
 
 ---
 
@@ -138,23 +185,23 @@ All claims and classifications in this document adhere to strict verification ta
 [Milestone 1: Watchlist Harness] -> MERGED (PR #95) [External userWatchList: FORBIDDEN]
              │
              ▼
-[Milestone 4: Auction/Bidding Parity Harness] (CURRENT)
-  - Isolated normalizer: custom_components/ebay/parsers/bidding_parity.py
-  - Standalone validation CLI: scripts/validate_bidding_parity.py
+[Milestone 4: Auction/Bidding Parity Harness] -> MERGED (PR #97)
+             │
+             ▼
+[Milestone 5: Active Seller Listings Parity Harness] (CURRENT)
+  - Isolated normalizer: custom_components/ebay/parsers/seller_parity.py
+  - Standalone validation CLI: scripts/validate_seller_parity.py
   - Full offline tests & documentation
-  - Production coordinator unchanged (Trading XML BidList authoritative)
+  - Production coordinator unchanged (Trading XML ActiveList authoritative)
              │
              ▼
 [Future Milestone 7: Sold Orders via Sell Fulfillment REST]
   - High feasibility: public REST API, already optional in ha-ebay
              │
              ▼
-[Future Milestone 5: Active Listings via GraphQL/Inventory]
-             │
-             ▼
 [Future Milestone 6: Best Offers via Sell Negotiation REST]
              │
              ▼
-[Future Milestones 2 & 4 Live Cutover]:
+[Future Milestones 2, 4, 5 Live Cutover]:
   - Only when eBay scope/entitlement gating is resolved.
 ```

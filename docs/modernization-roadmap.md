@@ -21,8 +21,8 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Completed / Merged** (`14ce43f`; Live Run Complete, GraphQL Blocker Documented) |
 | **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | **BLOCKED / DEFERRED** (GraphQL resolver `FORBIDDEN`; Trading XML authoritative) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
-| **Milestone 4** | Auction & Bidding Modernization Preparation & Parity Harness | `feat/ebay-auction-validation` | Draft PR | **In Progress** (Parity Harness & API Feasibility Research Complete) |
-| **Milestone 5** | Active Seller Listings Migration | `feat/ebay-graphql-selling-active` | TBD | Planned |
+| **Milestone 4** | Auction & Bidding Modernization Preparation & Parity Harness | `feat/ebay-auction-validation` | [#97](https://github.com/andrewtryder/ha-ebay/pull/97) | **Merged** (`4c2f394`) |
+| **Milestone 5** | Active Seller Listings Migration & Parity Harness | `feat/ebay-seller-listings-validation` | Draft PR | **In Progress** (Parity Harness & Active Seller Listings Research Complete) |
 | **Milestone 6** | Best Offers & Negotiation History | `feat/ebay-graphql-offers` | TBD | Planned |
 | **Milestone 7** | Sold / Unsold Listing Classification | `feat/ebay-modern-sold-unsold` | TBD | Planned |
 | **Milestone 8** | Remaining Legacy Fields & API Operations | Per-operation branches | TBD | Planned |
@@ -87,6 +87,19 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Strictly enforces fail-closed completeness: truncated XML, truncated GraphQL, unreconciled items, missing IDs, or duplicates mark fields `unverified` and status `inconclusive`.
   - Enforces privacy-safe error sanitization and completely scrubs tokens, secrets, private item titles, IDs, prices, bids, and URLs from reports.
   - Production Trading XML `GetMyeBayBuying` (`BidList`) remains 100% authoritative in Home Assistant; no live entities or polling modified.
+
+### 5. Active Seller Listings Normalization and Parity Validation (Milestone 5)
+- **Active Seller Listings Architecture & Identity Analysis**:
+  - Researched eBay modern listing representations across GraphQL (`sellerListingSearch`), Sell Inventory REST API (`/sell/inventory/v1/inventory_item`), and Sell Fulfillment REST API.
+  - Identified critical identity differences: Sell Inventory API operates on SKUs and unpublished/published offers rather than Trading XML `ItemID`s. A seller may have active legacy listings created without SKUs or inventory records, or multi-variation items with complex SKU mappings. Inventory API records **must never** be treated as a complete census of active listings unless completeness is proven.
+- **Read-Only Seller Listings Parity Validation Module**:
+  - Added [`custom_components/ebay/parsers/seller_parity.py`](../custom_components/ebay/parsers/seller_parity.py) and CLI harness [`scripts/validate_seller_parity.py`](../scripts/validate_seller_parity.py).
+  - Strictly read-only: performs **zero network calls** unless `--live` is explicitly passed; dispatches **zero mutations** (no listing creation/revision/ending, no offer actions, no order updates).
+  - Evaluates all 16 monitored seller fields (`selling_count`, `item_id`, `title`, `current_price`, `currency`, `quantity`, `quantity_available`, `quantity_sold`, `views`, `watchers`, `questions`, `offers`, `end_time`, `listing_type`, `url`, `image`) using the 6-state taxonomy.
+  - Implements 6 built-in probe definitions: `typename_handshake`, `seller_listings_total`, `seller_listings_count_alt`, `seller_listings_paginated`, `seller_listings_alt_fields`, and `seller_inventory_probe`.
+  - Strictly enforces fail-closed completeness: partial pages, GraphQL partial error envelopes, contradictory pagination metadata, or unreconciled items automatically fail closed to `inconclusive` and mark fields `unverified`.
+  - Enforces privacy-safe diagnostics: allowlists symbolic error codes, redacts private item IDs, titles, prices, quantities, counts, and URLs, while scrubbers sanitize Markdown and JSON outputs.
+  - Production Trading XML `GetMyeBaySelling` (`ActiveList`) remains 100% authoritative in Home Assistant; runtime coordinators and entities remain untouched.
 
 ---
 
