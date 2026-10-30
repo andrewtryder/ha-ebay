@@ -18,7 +18,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 |---|---|---|---|---|
 | **Pre-Phase** | Simplified OAuth Onboarding (BYO Credentials) | `feat/simplify-ebay-oauth-onboarding` | [#92](https://github.com/andrewtryder/ha-ebay/pull/92) | **Merged** |
 | **Milestone 0** | Complete GraphQL Phase 0 & Resolve OAuth Lifecycle Issues | `feat/ebay-graphql-transport` | [#94](https://github.com/andrewtryder/ha-ebay/pull/94) | **Merged** (`60f656f`) |
-| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Live Run Complete (Draft PR)** |
+| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Completed / Merged** (`14ce43f`; Live Run Complete, GraphQL Blocker Documented) |
 | **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | **BLOCKED / DEFERRED** (GraphQL resolver `FORBIDDEN`; Trading XML authoritative) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
 | **Milestone 4** | Bidding & Auction Activity Migration | `feat/ebay-graphql-bidding` | TBD | Planned |
@@ -55,6 +55,14 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 - **Read-Only Enforcement**: `validate_read_only_query()` strips string literals and comments, parses top-level definitions, enforces a single `query` operation (plus optional fragments), rejects `mutation` and `subscription` definitions anywhere in the document, and validates `operation_name` alignment before network dispatch.
 
 ### 3. Watchlist Contract & Parity Harness (Milestone 1)
+- **Milestone 1 Completion & Merged PR**:
+  - Implemented on `feat/ebay-live-api-validation` and merged into `main` ([#95](https://github.com/andrewtryder/ha-ebay/pull/95), commit `14ce43f`).
+  - Safe, local, opt-in contract and parity validation harness is complete and verified across both supported Home Assistant versions (2026.8.0 minimum and 2026.9.2 current).
+- **Explicit External Authorization Blocker Documented**:
+  - Live authenticated production testing confirmed that `query Handshake { __typename }` succeeded (HTTP 200) and `userWatchList { watchListCount watchListMaximum }` passed schema validation (HTTP 200), but the resolver returned `errorCode: "FORBIDDEN"`.
+  - Required OAuth scope or developer application entitlement is unknown; candidate scope `buy.watchlist.read` remains unverified.
+  - Existing Trading XML `GetMyeBayBuying` remains the sole authoritative production data source; Watchlist monitoring remains fully operational.
+  - Milestone 2 (GraphQL Watchlist migration) is deferred and blocked until eBay's authorization requirements are identified.
 - **Read-Only Opt-In Validation Tool**:
   - Added [`custom_components/ebay/parsers/watchlist_parity.py`](../custom_components/ebay/parsers/watchlist_parity.py) and [`scripts/validate_watchlist_parity.py`](../scripts/validate_watchlist_parity.py).
   - Makes **zero network calls** unless `--live` is explicitly passed.
