@@ -41,7 +41,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from custom_components.ebay.api import EbayApiClient  # noqa: E402
-from custom_components.ebay.clients.errors import EbayError  # noqa: E402
+from custom_components.ebay.clients.errors import EbayError, EbayGraphQLError  # noqa: E402
 from custom_components.ebay.marketplace import marketplace_id_for_site  # noqa: E402
 from custom_components.ebay.parsers.bidding_parity import (  # noqa: E402
     BIDDING_CONTRACT_PROBES,
@@ -54,6 +54,7 @@ from custom_components.ebay.parsers.bidding_parity import (  # noqa: E402
     render_bidding_parity_json,
     render_bidding_parity_markdown,
     sanitize_bidding_parity_report,
+    sanitize_graphql_field_name,
     summarize_bidding_probe_exception,
     validate_all_bidding_contract_probes,
 )
@@ -472,16 +473,25 @@ async def run_live_bidding_validation(
             )
             data = pages[0] if pages else {}
             top_keys = (
-                sorted(str(k) for k in data.keys()) if isinstance(data, Mapping) else []
+                [
+                    sanitize_graphql_field_name(k, kind="top_level")
+                    for k in sorted(str(k) for k in data.keys())
+                ]
+                if isinstance(data, Mapping)
+                else []
             )
 
             if probe.key == "typename_handshake":
                 probe_results.append(
                     {
                         "key": probe.key,
+                        "operation_name": probe.operation_name,
                         "outcome": "success",
                         "parity_eligible": False,
                         "top_level_keys": top_keys,
+                        "reported_total": None,
+                        "graphql_bidding_count": 0,
+                        "pagination_status": "handshake",
                         "summary": f"Succeeded; top-level keys={top_keys}",
                     }
                 )
@@ -505,10 +515,13 @@ async def run_live_bidding_validation(
             probe_results.append(
                 {
                     "key": probe.key,
+                    "operation_name": probe.operation_name,
                     "outcome": "success",
                     "parity_eligible": True,
                     "top_level_keys": top_keys,
                     "pagination_status": merged_preview["pagination_status"],
+                    "reported_total": merged_preview["reported_total"],
+                    "graphql_bidding_count": len(merged_preview["items_by_id"]),
                     "pages_fetched": len(pages),
                     "summary": (
                         f"Succeeded; top-level keys={top_keys}, "
@@ -535,8 +548,12 @@ async def run_live_bidding_validation(
             probe_results.append(
                 {
                     "key": probe.key,
+                    "operation_name": probe.operation_name,
                     "outcome": "error",
                     "parity_eligible": False,
+                    "reported_total": None,
+                    "graphql_bidding_count": 0,
+                    "pagination_status": "error",
                     "error": err_summary,
                     "summary": (
                         f"{err_summary['error_type']} "
@@ -548,6 +565,22 @@ async def run_live_bidding_validation(
                     ),
                 }
             )
+
+    selected_probe_dict: dict[str, Any] | None = None
+    if best_graphql_pages and selected_probe_key:
+        matched = [p for p in probes_to_run if p.key == selected_probe_key]
+        op_name = matched[0].operation_name if matched else None
+        merged_best = merge_graphql_bidding_pages(best_graphql_pages)
+        selected_probe_dict = {
+            "key": selected_probe_key,
+            "operation_name": op_name,
+            "outcome": "success",
+            "items_field": merged_best["items_field_name"],
+            "total_field": merged_best["total_field_name"],
+            "reported_total": merged_best["reported_total"],
+            "graphql_bidding_count": len(merged_best["items_by_id"]),
+            "pagination_status": merged_best["pagination_status"],
+        }
 
     comparison = compare_bidding_snapshots(
         xml_bidding,
@@ -582,6 +615,7 @@ async def run_live_bidding_validation(
         "site_id": client.site_id,
         "marketplace_id": marketplace_id_for_site(client.site_id) or "EBAY_US",
         "selected_probe_key": selected_probe_key,
+        "selected_probe": selected_probe_dict,
         "operational_warnings": operational_warnings,
         "probes": probe_results,
         **comparison,
@@ -604,25 +638,127 @@ def run_offline_fixture_comparison(
     xml_truncated = bid_pages > 1
 
     raw_gql = json.loads(graphql_json_text)
+    collected_errors: list[dict[str, Any]] = []
     gql_data: Any
+
+    def _extract_errors_from_node(node: Mapping[str, Any]) -> None:
+        raw_errs = node.get("errors") or node.get("error")
+        if not raw_errs:
+            return
+        if isinstance(raw_errs, list):
+            for e in raw_errs:
+                if isinstance(e, dict):
+                    collected_errors.append(e)
+                else:
+                    collected_errors.append(
+                        {"code": "MALFORMED_ERROR", "message": str(e)}
+                    )
+        elif isinstance(raw_errs, dict):
+            collected_errors.append(raw_errs)
+        else:
+            collected_errors.append(
+                {"code": "MALFORMED_ERROR", "message": str(raw_errs)}
+            )
+
     if isinstance(raw_gql, list):
-        gql_data = [
-            page.get("data")
-            if isinstance(page, dict) and isinstance(page.get("data"), dict)
-            else page
-            for page in raw_gql
-        ]
-    elif isinstance(raw_gql, dict) and isinstance(raw_gql.get("data"), dict):
-        gql_data = raw_gql["data"]
+        pages_data: list[Any] = []
+        for page in raw_gql:
+            if isinstance(page, dict):
+                _extract_errors_from_node(page)
+                if "data" in page:
+                    if page["data"] is not None:
+                        pages_data.append(page["data"])
+                else:
+                    pages_data.append(page)
+            else:
+                pages_data.append(page)
+        gql_data = pages_data if pages_data else None
+    elif isinstance(raw_gql, dict):
+        _extract_errors_from_node(raw_gql)
+        if "data" in raw_gql:
+            gql_data = raw_gql["data"]
+        elif not collected_errors:
+            gql_data = raw_gql
+        else:
+            gql_data = None
     else:
         gql_data = raw_gql
+
+    graphql_error_summary: dict[str, Any] | None = None
+    if collected_errors:
+        exc = EbayGraphQLError(
+            "Fixture GraphQL response contained errors",
+            errors=collected_errors,
+        )
+        graphql_error_summary = summarize_bidding_probe_exception(exc)
 
     comparison = compare_bidding_snapshots(
         xml_bidding,
         gql_data,
         xml_available=True,
         xml_truncated=xml_truncated,
+        graphql_error_summary=graphql_error_summary,
     )
+
+    probe_results: list[dict[str, Any]] = []
+    selected_probe: dict[str, Any] | None = None
+    if gql_data is not None:
+        try:
+            pages = gql_data if isinstance(gql_data, list) else [gql_data]
+            merged = merge_graphql_bidding_pages(pages)
+            first_page = pages[0] if pages else {}
+            top_keys = (
+                [
+                    sanitize_graphql_field_name(k, kind="top_level")
+                    for k in sorted(str(k) for k in first_page.keys())
+                ]
+                if isinstance(first_page, Mapping)
+                else []
+            )
+            outcome = "error" if collected_errors else "success"
+            probe_dict: dict[str, Any] = {
+                "key": "offline_fixture",
+                "operation_name": "OfflineFixture",
+                "outcome": outcome,
+                "parity_eligible": not collected_errors,
+                "top_level_keys": top_keys,
+                "pagination_status": merged["pagination_status"],
+                "reported_total": merged["reported_total"],
+                "graphql_bidding_count": len(merged["items_by_id"]),
+                "pages_fetched": len(pages),
+                "summary": f"Offline fixture; items={len(merged['items_by_id'])}",
+            }
+            if collected_errors:
+                probe_dict["error"] = graphql_error_summary
+            probe_results.append(probe_dict)
+            selected_probe = {
+                "key": "offline_fixture",
+                "operation_name": "OfflineFixture",
+                "outcome": outcome,
+                "items_field": merged["items_field_name"],
+                "total_field": merged["total_field_name"],
+                "reported_total": merged["reported_total"],
+                "graphql_bidding_count": len(merged["items_by_id"]),
+                "pagination_status": merged["pagination_status"],
+            }
+        except Exception:
+            pass
+    elif collected_errors:
+        probe_dict = {
+            "key": "offline_fixture",
+            "operation_name": "OfflineFixture",
+            "outcome": "error",
+            "parity_eligible": False,
+            "top_level_keys": [],
+            "pagination_status": "error",
+            "reported_total": None,
+            "graphql_bidding_count": 0,
+            "pages_fetched": 0,
+            "error": graphql_error_summary,
+            "summary": "Offline fixture returned only GraphQL errors",
+        }
+        probe_results.append(probe_dict)
+
     forbidden: list[str] = []
     for item in xml_bidding.values():
         for sensitive_key in ("item_id", "title", "url", "image"):
@@ -635,7 +771,9 @@ def run_offline_fixture_comparison(
         "environment": environment,
         "site_id": site_id,
         "marketplace_id": marketplace_id_for_site(site_id) or "EBAY_US",
-        "probes": [],
+        "selected_probe_key": "offline_fixture" if selected_probe else None,
+        "selected_probe": selected_probe,
+        "probes": probe_results,
         **comparison,
     }
     return sanitize_bidding_parity_report(raw_report, forbidden_values=forbidden)

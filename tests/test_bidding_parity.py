@@ -42,6 +42,7 @@ from custom_components.ebay.parsers.bidding_parity import (
     render_bidding_parity_markdown,
     sanitize_bidding_parity_report,
     sanitize_diagnostic_token,
+    sanitize_graphql_field_name,
     summarize_bidding_probe_exception,
     validate_all_bidding_contract_probes,
 )
@@ -1063,3 +1064,392 @@ def test_field_mismatches_and_edge_coverage() -> None:
     comp_tot = compare_bidding_snapshots(xml_mismatch, gql_total_diff)
     assert comp_tot["fields"]["bidding_count"]["classification"] == PARITY_UNVERIFIED
     assert comp_tot["status"] == "inconclusive"
+
+
+def test_offline_fixture_partial_error_fails_closed() -> None:
+    """Verify partial-error GraphQL fixtures produce sanitized diagnostics and fail closed."""
+    xml_fixture, _ = cli_harness._synthetic_demo_fixtures()
+
+    # 1. Single response with valid data matching XML items + GraphQL errors
+    partial_err_gql = json.dumps(
+        {
+            "data": {
+                "userBiddingActivity": {
+                    "total": 2,
+                    "items": [
+                        {
+                            "itemId": "v1|111222333444|0",
+                            "title": "Synthetic Vintage Camera Lens",
+                            "formatType": "AUCTION",
+                            "itemEndDate": "2026-11-15T18:30:00Z",
+                            "itemWebUrl": "https://www.ebay.com/itm/111222333444",
+                            "currentPrice": {"value": "149.50", "currency": "USD"},
+                            "maxBid": {"value": "175.00", "currency": "USD"},
+                            "winning": True,
+                            "bidCount": 4,
+                            "image": {
+                                "imageUrl": "https://i.ebayimg.com/images/g/abc123XYZ/s-l500.jpg"
+                            },
+                        },
+                        {
+                            "itemId": "555666777888",
+                            "title": "Synthetic Mechanical Keyboard",
+                            "formatType": "AUCTION",
+                            "itemEndDate": "2026-11-20T12:00:00.000Z",
+                            "itemWebUrl": "https://www.ebay.com/itm/555666777888",
+                            "currentPrice": {"value": "89.00", "currency": "USD"},
+                            "maxBid": {"value": "95.00", "currency": "USD"},
+                            "winning": False,
+                            "bidCount": 12,
+                            "image": {
+                                "imageUrl": "https://i.ebayimg.com/images/g/def456UVW/s-l225.jpg"
+                            },
+                        },
+                    ],
+                }
+            },
+            "errors": [
+                {
+                    "message": "Not authorized to access bidding history for user",
+                    "extensions": {"code": "FORBIDDEN", "category": "APPLICATION"},
+                }
+            ],
+        }
+    )
+
+    report = cli_harness.run_offline_fixture_comparison(xml_fixture, partial_err_gql)
+    # Must fail closed: never parity_verified, must be inconclusive
+    assert report["status"] == "inconclusive"
+    assert report["graphql_complete"] is False
+    assert report["graphql_available"] == "unauthorized"
+    assert report["graphql_error_summary"] is not None
+    assert report["graphql_error_summary"]["code"] == "FORBIDDEN"
+    assert report["graphql_error_summary"]["is_scope_or_permission_error"] is True
+    # Monitored fields must fail closed to unverified when errors are present
+    assert report["fields"]["bidding_count"]["classification"] == PARITY_UNVERIFIED
+    assert report["fields"]["title"]["classification"] == PARITY_UNVERIFIED
+    assert report["fields"]["current_price"]["classification"] == PARITY_UNVERIFIED
+
+    # 2. Multi-page fixture with an error on page 2
+    multi_page_with_err = json.dumps(
+        [
+            {
+                "data": {
+                    "userBiddingActivity": {
+                        "total": 2,
+                        "items": [
+                            {
+                                "itemId": "111222333444",
+                                "title": "Synthetic Vintage Camera Lens",
+                                "currentPrice": {"value": 149.50, "currency": "USD"},
+                            }
+                        ],
+                    }
+                }
+            },
+            {
+                "errors": [
+                    {
+                        "message": "Validation failed on offset parameter",
+                        "extensions": {"code": "VALIDATION_ERROR"},
+                    }
+                ]
+            },
+        ]
+    )
+    report_multi = cli_harness.run_offline_fixture_comparison(
+        xml_fixture, multi_page_with_err
+    )
+    assert report_multi["status"] == "inconclusive"
+    assert report_multi["graphql_complete"] is False
+    assert report_multi["graphql_available"] is False
+    assert report_multi["graphql_error_summary"]["is_validation_error"] is True
+
+    # 3. Pure error fixture (no data)
+    err_only_gql = json.dumps(
+        {
+            "errors": [
+                {
+                    "message": "Field 'userBiddingActivity' is not defined",
+                    "extensions": {"code": "FIELD_UNDEFINED"},
+                }
+            ]
+        }
+    )
+    report_err_only = cli_harness.run_offline_fixture_comparison(
+        xml_fixture, err_only_gql
+    )
+    assert report_err_only["status"] == "unverified"
+    assert report_err_only["graphql_complete"] is False
+    assert report_err_only["graphql_available"] is False
+    assert report_err_only["graphql_bidding_count"] is None
+    assert report_err_only["graphql_error_summary"]["is_validation_error"] is True
+
+    # 4. Malformed error array (e.g. string items in errors array) and unrecognized code
+    malformed_err_gql = json.dumps(
+        {
+            "data": {"userBiddingActivity": {"total": 0, "items": []}},
+            "errors": [
+                "Raw string error without dictionary structure",
+                {"code": "TOTALLY_UNKNOWN_ERROR_CODE_XYZ"},
+            ],
+        }
+    )
+    report_malformed = cli_harness.run_offline_fixture_comparison(
+        xml_fixture, malformed_err_gql
+    )
+    assert report_malformed["status"] == "inconclusive"
+    assert report_malformed["graphql_complete"] is False
+    assert report_malformed["graphql_error_summary"]["unrecognized_code_count"] >= 1
+    assert "MALFORMED_ERROR" in report_malformed["graphql_error_summary"]["error_codes"]
+
+
+def test_graphql_aliases_and_private_keys_redacted() -> None:
+    """Verify caller aliases and non-canonical property names are replaced and never leaked."""
+    # Test helper
+    assert (
+        sanitize_graphql_field_name("userBiddingActivity", kind="top_level")
+        == "userBiddingActivity"
+    )
+    assert sanitize_graphql_field_name("__typename", kind="top_level") == "__typename"
+    assert (
+        sanitize_graphql_field_name("my_secret_account_alias", kind="top_level")
+        == "[ALIASED_TOP_LEVEL_FIELD]"
+    )
+    assert (
+        sanitize_graphql_field_name("private_bidding_container", kind="container")
+        == "[ALIASED_CONTAINER]"
+    )
+    assert (
+        sanitize_graphql_field_name("secret_bid_field", kind="field")
+        == "[ALIASED_FIELD]"
+    )
+    assert sanitize_graphql_field_name("currentPrice", kind="field") == "currentPrice"
+
+    # Merge pages with non-canonical alias container
+    aliased_page = {
+        "private_account_alias_12345": {
+            "total": 1,
+            "items": [
+                {
+                    "itemId": "123456789",
+                    "title": "Aliased Item",
+                }
+            ],
+        }
+    }
+    merged = merge_graphql_bidding_pages([aliased_page])
+    assert "private_account_alias_12345" not in merged["container_keys"]
+    assert "[ALIASED_CONTAINER]" in merged["container_keys"]
+
+    # Sanitize parity report containing aliased top_level_keys, container_keys, and forbidden values
+    dirty_report = {
+        "status": "inconclusive",
+        "top_level_keys": ["__typename", "private_account_handle_xyz"],
+        "graphql_schema_metadata": {
+            "container_keys": ["userBiddingActivity", "private_alias_987"],
+            "total_field_name": "private_total_calc",
+            "items_field_name": "private_items_array",
+        },
+        "probes": [
+            {
+                "key": "custom_probe",
+                "top_level_keys": ["private_top_key"],
+                "summary": "Probe ran for account user_john_doe",
+            }
+        ],
+    }
+    clean = sanitize_bidding_parity_report(
+        dirty_report,
+        forbidden_values=["user_john_doe", "private_alias_987"],
+    )
+    assert clean["top_level_keys"] == ["__typename", "[ALIASED_TOP_LEVEL_FIELD]"]
+    assert clean["graphql_schema_metadata"]["container_keys"] == [
+        "userBiddingActivity",
+        "[ALIASED_CONTAINER]",
+    ]
+    assert clean["graphql_schema_metadata"]["total_field_name"] == "[ALIASED_FIELD]"
+    assert clean["graphql_schema_metadata"]["items_field_name"] == "[ALIASED_FIELD]"
+    assert "user_john_doe" not in clean["probes"][0]["summary"]
+    assert "[REDACTED]" in clean["probes"][0]["summary"]
+
+    # Ensure rendered markdown and json contain zero raw alias tokens
+    rendered_json = render_bidding_parity_json(clean)
+    assert "private_account_handle_xyz" not in rendered_json
+    assert "private_alias_987" not in rendered_json
+    assert "user_john_doe" not in rendered_json
+
+    rendered_md = render_bidding_parity_markdown(clean)
+    assert "private_account_handle_xyz" not in rendered_md
+    assert "private_alias_987" not in rendered_md
+    assert "user_john_doe" not in rendered_md
+
+
+def test_evidence_based_probe_ranking_prioritizes_items_over_counts() -> None:
+    """Verify candidate probe ranking strictly prioritizes item-bearing responses over count-only."""
+    # 1. Count-only probe (reported total present, no items)
+    count_only_candidate = {
+        "outcome": "success",
+        "pagination_status": "metadata_only",
+        "graphql_bidding_count": 0,
+        "items_list_present": False,
+        "raw_items_count": 0,
+        "reported_total": 10,
+        "duplicate_ids_count": 0,
+        "missing_ids_count": 0,
+        "is_custom": False,
+    }
+
+    # 2. Item-bearing probe with unverified pagination (5 usable items retrieved)
+    item_bearing_unverified = {
+        "outcome": "success",
+        "pagination_status": "unverified",
+        "graphql_bidding_count": 5,
+        "items_list_present": True,
+        "raw_items_count": 5,
+        "reported_total": None,
+        "duplicate_ids_count": 0,
+        "missing_ids_count": 0,
+        "is_custom": False,
+    }
+
+    # 3. Item-bearing probe with truncated pagination (5 usable items of 10)
+    item_bearing_truncated = {
+        "outcome": "success",
+        "pagination_status": "truncated",
+        "graphql_bidding_count": 5,
+        "items_list_present": True,
+        "raw_items_count": 5,
+        "reported_total": 10,
+        "duplicate_ids_count": 0,
+        "missing_ids_count": 0,
+        "is_custom": False,
+    }
+
+    # 4. Complete item-bearing probe (5 items of 5)
+    item_bearing_complete = {
+        "outcome": "success",
+        "pagination_status": "complete",
+        "graphql_bidding_count": 5,
+        "items_list_present": True,
+        "raw_items_count": 5,
+        "reported_total": 5,
+        "duplicate_ids_count": 0,
+        "missing_ids_count": 0,
+        "is_custom": False,
+    }
+
+    rank_count_only = rank_bidding_probe_candidate(count_only_candidate)
+    rank_items_unverified = rank_bidding_probe_candidate(item_bearing_unverified)
+    rank_items_truncated = rank_bidding_probe_candidate(item_bearing_truncated)
+    rank_items_complete = rank_bidding_probe_candidate(item_bearing_complete)
+
+    # Core requirement: item-bearing responses (even unverified) must outrank count-only
+    assert rank_items_unverified > rank_count_only
+    assert rank_items_truncated > rank_count_only
+    assert rank_items_complete > rank_items_unverified
+    assert rank_items_complete > rank_items_truncated
+
+    # Duplicate ID penalty
+    with_dups = dict(item_bearing_unverified)
+    with_dups["duplicate_ids_count"] = 2
+    rank_with_dups = rank_bidding_probe_candidate(with_dups)
+    assert rank_items_unverified > rank_with_dups
+
+    # Custom query tie breaker
+    custom_cand = dict(item_bearing_complete)
+    custom_cand["is_custom"] = True
+    rank_custom = rank_bidding_probe_candidate(custom_cand)
+    assert rank_custom > rank_items_complete
+
+
+def test_report_metadata_and_markdown_formatting_no_misleading_none() -> None:
+    """Verify selected_probe, graphql_available, and table formatting eliminate misleading None."""
+    xml_fixture, gql_fixture = cli_harness._synthetic_demo_fixtures()
+    report = cli_harness.run_offline_fixture_comparison(xml_fixture, gql_fixture)
+
+    assert "selected_probe" in report
+    assert report["selected_probe"] is not None
+    assert report["selected_probe"]["key"] == "offline_fixture"
+    assert report["selected_probe"]["operation_name"] == "OfflineFixture"
+    assert report["selected_probe"]["outcome"] == "success"
+    assert report["selected_probe"]["graphql_bidding_count"] == 2
+    assert report["graphql_available"] is True
+
+    # Check Markdown output
+    md = render_bidding_parity_markdown(report)
+    assert "## Selected Contract Probe" in md
+    assert "- **Probe Key:** `offline_fixture`" in md
+    assert "- **Operation Name:** `OfflineFixture`" in md
+    assert "- **GraphQL Bidding Available:** `True`" in md
+
+    # Ensure no misleading `None` appears anywhere in the markdown report
+    assert "`None`" not in md
+
+    # Check graphql_available classifications across scenarios
+    comp_unauth = compare_bidding_snapshots(
+        {},
+        None,
+        graphql_error_summary={
+            "is_scope_or_permission_error": True,
+            "http_status": 403,
+        },
+    )
+    assert comp_unauth["graphql_available"] == "unauthorized"
+
+    comp_count_only = compare_bidding_snapshots(
+        {},
+        {"userBiddingActivity": {"total": 5}},
+    )
+    assert comp_count_only["graphql_available"] == "count_only"
+
+    comp_unavailable = compare_bidding_snapshots(
+        {},
+        None,
+        graphql_error_summary={
+            "is_scope_or_permission_error": False,
+            "http_status": 500,
+        },
+    )
+    assert comp_unavailable["graphql_available"] is False
+
+
+def test_contradictory_pagination_fails_closed() -> None:
+    """Verify empty/zero-count pages claiming hasNextPage fail closed to truncated/inconsistent."""
+    # 1. Page with reported_total == 0, empty items, but hasNextPage == True
+    contradictory_page = {
+        "userBiddingActivity": {
+            "total": 0,
+            "items": [],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    merged_1 = merge_graphql_bidding_pages([contradictory_page])
+    assert merged_1["graphql_complete"] is False
+    assert merged_1["graphql_truncated"] is True
+    assert merged_1["pagination_status"] == "inconsistent_total"
+
+    # 2. Page with no reported_total, empty items, but hasNextPage == True
+    contradictory_page_no_total = {
+        "userBiddingActivity": {
+            "items": [],
+            "pageInfo": {"hasNextPage": True},
+        }
+    }
+    merged_2 = merge_graphql_bidding_pages([contradictory_page_no_total])
+    assert merged_2["graphql_complete"] is False
+    assert merged_2["graphql_truncated"] is True
+    assert merged_2["pagination_status"] == "truncated"
+
+    # 3. Normal genuine empty watchlist (total == 0, hasNextPage == False)
+    valid_empty_page = {
+        "userBiddingActivity": {
+            "total": 0,
+            "items": [],
+            "pageInfo": {"hasNextPage": False},
+        }
+    }
+    merged_3 = merge_graphql_bidding_pages([valid_empty_page])
+    assert merged_3["graphql_complete"] is True
+    assert merged_3["graphql_truncated"] is False
+    assert merged_3["pagination_status"] == "complete"

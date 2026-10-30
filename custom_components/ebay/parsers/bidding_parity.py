@@ -190,9 +190,115 @@ ALLOWED_ERROR_DOMAINS: frozenset[str] = frozenset(
     }
 )
 
+CANONICAL_GRAPHQL_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {
+        "__typename",
+        "userBiddingActivity",
+        "biddingActivity",
+        "userBidding",
+        "bidding",
+        "auctionBidding",
+        "itemBiddingActivity",
+        "userWatchList",
+        "viewer",
+        "user",
+        "me",
+    }
+)
+
+CANONICAL_BIDDING_CONTAINER_KEYS: frozenset[str] = frozenset(
+    {
+        "userBiddingActivity",
+        "biddingActivity",
+        "userBidding",
+        "bidding",
+        "auctionBidding",
+        "itemBiddingActivity",
+    }
+)
+
+CANONICAL_BIDDING_FIELD_NAMES: frozenset[str] = frozenset(
+    {
+        "total",
+        "biddingCount",
+        "activeBiddingCount",
+        "totalCount",
+        "count",
+        "offset",
+        "limit",
+        "items",
+        "bids",
+        "biddingActivity",
+        "nodes",
+        "edges",
+        "pageInfo",
+        "itemId",
+        "legacyItemId",
+        "listingId",
+        "id",
+        "title",
+        "currentPrice",
+        "price",
+        "maxBid",
+        "buyerMaxBid",
+        "maxAmount",
+        "userMaxBid",
+        "winning",
+        "isWinning",
+        "highBidder",
+        "bidCount",
+        "itemEndDate",
+        "endTime",
+        "endDate",
+        "itemWebUrl",
+        "itemUrl",
+        "url",
+        "image",
+        "imageUrl",
+        "galleryUrl",
+        "formatType",
+        "listingType",
+        "buyingOptions",
+        "biddingStatus",
+        "auctionStatus",
+        "status",
+    }
+)
+
 REDACTED_ERROR_CODE = "UNKNOWN_CODE"
 REDACTED_CATEGORY = "UNKNOWN_CATEGORY"
 REDACTED_DOMAIN = "UNKNOWN_DOMAIN"
+
+
+def sanitize_graphql_field_name(
+    name: Any,
+    *,
+    kind: str = "field",
+) -> str:
+    """Sanitize a GraphQL field or container name against canonical allowlists.
+
+    Replaces unknown caller aliases or arbitrary property names with generic
+    placeholders like '[ALIASED_FIELD]' or '[ALIASED_CONTAINER]' to prevent
+    private account handles or identifiers from leaking through aliases.
+    """
+    if name is None or isinstance(name, bool):
+        return "[UNKNOWN]"
+    raw = str(name).strip()
+    if not raw:
+        return "[UNKNOWN]"
+    if kind == "top_level":
+        if raw in CANONICAL_GRAPHQL_TOP_LEVEL_KEYS:
+            return raw
+        return "[ALIASED_TOP_LEVEL_FIELD]"
+    if kind == "container":
+        if raw in CANONICAL_BIDDING_CONTAINER_KEYS:
+            return raw
+        return "[ALIASED_CONTAINER]"
+    if kind == "field":
+        if raw in CANONICAL_BIDDING_FIELD_NAMES:
+            return raw
+        return "[ALIASED_FIELD]"
+    return "[ALIASED_FIELD]"
 
 
 def sanitize_diagnostic_token(value: Any, *, kind: str = "code") -> str | None:
@@ -456,8 +562,27 @@ def summarize_bidding_probe_exception(exc: BaseException) -> dict[str, Any]:
         unrecognized_domain_count = 0
         raw_upper_codes: set[str] = set()
 
-        for err in raw_exc_errors or []:
+        if isinstance(raw_exc_errors, (str, Mapping)):
+            raw_error_iterable: list[Any] = [raw_exc_errors]
+        elif isinstance(raw_exc_errors, Iterable):
+            raw_error_iterable = list(raw_exc_errors)
+        else:
+            raw_error_iterable = []
+
+        for err in raw_error_iterable:
             if not isinstance(err, dict):
+                unrecognized_code_count += 1
+                if "MALFORMED_ERROR" not in error_codes:
+                    error_codes.append("MALFORMED_ERROR")
+                sanitized_errors.append(
+                    {
+                        "code": "MALFORMED_ERROR",
+                        "error_code": "MALFORMED_ERROR",
+                        "error_id": None,
+                        "category": None,
+                        "domain": None,
+                    }
+                )
                 continue
             raw_err_dicts.append(err)
             ext = (
@@ -573,7 +698,7 @@ def summarize_bidding_probe_exception(exc: BaseException) -> dict[str, Any]:
             "error_type": type(exc).__name__,
             "failure_class": failure_class,
             "http_status": inferred_status,
-            "error_count": len(raw_err_dicts),
+            "error_count": len(sanitized_errors),
             "unrecognized_code_count": unrecognized_code_count,
             "unrecognized_category_count": unrecognized_category_count,
             "unrecognized_domain_count": unrecognized_domain_count,
@@ -882,12 +1007,14 @@ def _find_bidding_container(data: Mapping[str, Any]) -> tuple[str | None, Any]:
         "userBidding",
         "bidding",
         "auctionBidding",
+        "itemBiddingActivity",
     ):
         if top_key in data:
             return top_key, data[top_key]
     if len(data) == 1:
         only_key = next(iter(data.keys()))
-        return only_key, data[only_key]
+        sanitized_key = sanitize_graphql_field_name(only_key, kind="container")
+        return sanitized_key, data[only_key]
     return None, None
 
 
@@ -934,7 +1061,9 @@ def merge_graphql_bidding_pages(
             continue
         container_key, container = _find_bidding_container(page)
         if container_key:
-            container_keys_set.add(container_key)
+            container_keys_set.add(
+                sanitize_graphql_field_name(container_key, kind="container")
+            )
         if not isinstance(container, Mapping):
             continue
 
@@ -947,7 +1076,7 @@ def merge_graphql_bidding_pages(
         ):
             if total_cand_key in container and reported_total is None:
                 reported_total = _to_int(container.get(total_cand_key))
-                total_field = total_cand_key
+                total_field = sanitize_graphql_field_name(total_cand_key, kind="field")
                 break
 
         page_info = container.get("pageInfo")
@@ -956,7 +1085,7 @@ def merge_graphql_bidding_pages(
 
         field_name, raw_items = _extract_raw_bidding_items_from_container(container)
         if field_name:
-            items_field = field_name
+            items_field = sanitize_graphql_field_name(field_name, kind="field")
         if raw_items is not None:
             items_list_present = True
             for raw_item in raw_items:
@@ -986,10 +1115,21 @@ def merge_graphql_bidding_pages(
         graphql_truncated = False
         graphql_complete = False
         pagination_status = "no_items_list"
+    elif last_has_next_page and (reported_total == 0 or raw_item_count == 0):
+        graphql_truncated = True
+        graphql_complete = False
+        pagination_status = (
+            "truncated" if reported_total is None else "inconsistent_total"
+        )
     elif reported_total == 0:
-        graphql_truncated = False
-        graphql_complete = raw_item_count == 0
-        pagination_status = "complete" if graphql_complete else "inconsistent_total"
+        if raw_item_count == 0 and not last_has_next_page and not max_pages_reached:
+            graphql_truncated = False
+            graphql_complete = True
+            pagination_status = "complete"
+        else:
+            graphql_truncated = False
+            graphql_complete = False
+            pagination_status = "inconsistent_total"
     elif reported_total is not None and reported_total < 0:
         graphql_truncated = False
         graphql_complete = False
@@ -1348,6 +1488,17 @@ def compare_bidding_snapshots(
                 graphql_payload, max_pages=max_pages
             )
 
+    has_gql_errors = bool(
+        graphql_error_summary and (graphql_error_summary.get("error_count") or 0) > 0
+    )
+    is_scope_or_perm = bool(
+        graphql_error_summary
+        and (
+            graphql_error_summary.get("is_scope_or_permission_error")
+            or graphql_error_summary.get("http_status") in (401, 403)
+        )
+    )
+
     if not xml_available or xml_bidding is None:
         gql_items = normalized_gql["items_by_id"] if normalized_gql else {}
         gql_count = len(gql_items) if normalized_gql else None
@@ -1358,9 +1509,20 @@ def compare_bidding_snapshots(
             and (normalized_gql["items_list_present"] or reported_total is not None)
             else 0
         )
+        if is_scope_or_perm:
+            gql_available: Any = "unauthorized"
+        elif normalized_gql and not has_gql_errors:
+            if normalized_gql.get("pagination_status") == "metadata_only":
+                gql_available = "count_only"
+            else:
+                gql_available = True
+        else:
+            gql_available = False
+
         return {
             "status": "unverified",
             "xml_available": False,
+            "graphql_available": gql_available,
             "xml_truncated": xml_truncated,
             "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
             "xml_bidding_count": None,
@@ -1371,7 +1533,8 @@ def compare_bidding_snapshots(
             "graphql_reported_total": reported_total,
             "graphql_complete": (
                 normalized_gql["graphql_complete"] if normalized_gql else False
-            ),
+            )
+            and not has_gql_errors,
             "graphql_truncated": (
                 normalized_gql["graphql_truncated"] if normalized_gql else False
             ),
@@ -1418,6 +1581,7 @@ def compare_bidding_snapshots(
         return {
             "status": "unverified",
             "xml_available": True,
+            "graphql_available": "unauthorized" if is_scope_or_perm else False,
             "xml_truncated": xml_truncated,
             "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
             "xml_bidding_count": xml_count,
@@ -1450,7 +1614,7 @@ def compare_bidding_snapshots(
     gql_items = normalized_gql["items_by_id"]
     reported_total = normalized_gql["reported_total"]
     gql_count = len(gql_items)
-    gql_complete = bool(normalized_gql["graphql_complete"])
+    gql_complete = bool(normalized_gql["graphql_complete"]) and not has_gql_errors
     gql_truncated = bool(normalized_gql["graphql_truncated"])
     pagination_status = str(normalized_gql["pagination_status"])
 
@@ -1467,6 +1631,7 @@ def compare_bidding_snapshots(
         and not gql_truncated
         and not xml_only
         and not gql_only
+        and not has_gql_errors
     )
 
     for field in MONITORED_BIDDING_FIELDS:
@@ -1479,8 +1644,8 @@ def compare_bidding_snapshots(
                 classification = PARITY_UNVERIFIED
                 notes = (
                     f"XML has {xml_count} items, GraphQL has {gql_count} items "
-                    f"(reported total={reported_total}), but collection is truncated "
-                    "or unreconciled."
+                    f"(reported total={reported_total}), but collection is truncated, "
+                    "contains errors, or is unreconciled."
                 )
             elif count_exact and (reported_total is None or count_reported_exact):
                 classification = PARITY_EXACT_MATCH
@@ -1534,6 +1699,7 @@ def compare_bidding_snapshots(
         or not gql_complete
         or bool(xml_only)
         or bool(gql_only)
+        or has_gql_errors
     ):
         status = "inconclusive"
     elif PARITY_DIFFERENT_SEMANTICS in classifications:
@@ -1547,9 +1713,21 @@ def compare_bidding_snapshots(
     else:
         status = "inconclusive"
 
+    if is_scope_or_perm:
+        graphql_available_val: Any = "unauthorized"
+    elif has_gql_errors:
+        graphql_available_val = False
+    elif pagination_status == "metadata_only" or (
+        not normalized_gql["items_list_present"] and reported_total is not None
+    ):
+        graphql_available_val = "count_only"
+    else:
+        graphql_available_val = True
+
     return {
         "status": status,
         "xml_available": True,
+        "graphql_available": graphql_available_val,
         "xml_truncated": xml_truncated,
         "xml_error_summary": dict(xml_error_summary) if xml_error_summary else None,
         "xml_bidding_count": xml_count,
@@ -1579,7 +1757,12 @@ def compare_bidding_snapshots(
 
 
 def rank_bidding_probe_candidate(candidate: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Score a candidate GraphQL probe outcome for ranking comparison preference."""
+    """Score a candidate GraphQL probe outcome for ranking comparison preference.
+
+    Prioritizes complete collections > usable item records > valid identities
+    > pagination quality > custom tie-breaker. Item-bearing responses (even
+    unverified or truncated) must always outrank count-only / metadata-only probes.
+    """
     outcome = candidate.get("outcome")
     if outcome == "success":
         outcome_rank = 3
@@ -1590,33 +1773,51 @@ def rank_bidding_probe_candidate(candidate: Mapping[str, Any]) -> tuple[Any, ...
     else:
         outcome_rank = 0
 
-    pagination_status = candidate.get("pagination_status") or ""
-    pagination_rank = {
-        "complete": 4,
-        "metadata_only": 3,
-        "unverified": 2,
-        "truncated": 1,
-        "incomplete_identity": 0,
-        "inconsistent_total": 0,
-    }.get(pagination_status, 0)
-
     usable_items = int(candidate.get("graphql_bidding_count") or 0)
-    has_items_list = 1 if candidate.get("items_list_present") else 0
+    has_items_list = bool(candidate.get("items_list_present"))
     raw_items = int(candidate.get("raw_items_count") or 0)
     reported_total = candidate.get("reported_total")
     has_total = 1 if reported_total is not None else 0
+    pagination_status = candidate.get("pagination_status") or ""
+
     duplicate_penalty = -int(candidate.get("duplicate_ids_count") or 0)
     missing_penalty = -int(candidate.get("missing_ids_count") or 0)
     is_custom = 1 if candidate.get("is_custom") else 0
 
+    # Evidence tier:
+    # 4: Complete item collection (usable items match or verified empty items)
+    # 3: Usable item records present (even if unverified, truncated, etc.)
+    # 2: Items list present but empty
+    # 1: Count-only / metadata-only response (reported_total present, no items)
+    # 0: No items and no count
+    if pagination_status == "complete" and (usable_items > 0 or has_items_list):
+        evidence_tier = 4
+    elif usable_items > 0:
+        evidence_tier = 3
+    elif has_items_list:
+        evidence_tier = 2
+    elif pagination_status == "metadata_only" or has_total:
+        evidence_tier = 1
+    else:
+        evidence_tier = 0
+
+    pagination_rank = {
+        "complete": 4,
+        "unverified": 3,
+        "truncated": 2,
+        "metadata_only": 1,
+        "incomplete_identity": 0,
+        "inconsistent_total": 0,
+    }.get(pagination_status, 0)
+
     return (
         outcome_rank,
-        pagination_rank,
-        has_items_list,
+        evidence_tier,
         usable_items,
-        raw_items,
         duplicate_penalty,
         missing_penalty,
+        pagination_rank,
+        raw_items,
         has_total,
         is_custom,
     )
@@ -1653,6 +1854,26 @@ def sanitize_bidding_parity_report(
                     for part in ("token", "secret", "password", "api_key", "apikey")
                 ):
                     continue
+                if key_str == "top_level_keys" and isinstance(value, (list, tuple)):
+                    scrubbed[key_str] = [
+                        sanitize_graphql_field_name(k, kind="top_level") for k in value
+                    ]
+                    continue
+                if key_str == "container_keys" and isinstance(value, (list, tuple)):
+                    scrubbed[key_str] = [
+                        sanitize_graphql_field_name(k, kind="container") for k in value
+                    ]
+                    continue
+                if key_str in ("total_field_name", "total_field") and isinstance(
+                    value, str
+                ):
+                    scrubbed[key_str] = sanitize_graphql_field_name(value, kind="field")
+                    continue
+                if key_str in ("items_field_name", "items_field") and isinstance(
+                    value, str
+                ):
+                    scrubbed[key_str] = sanitize_graphql_field_name(value, kind="field")
+                    continue
                 scrubbed[key_str] = _walk(value)
             return scrubbed
         if isinstance(item, (list, tuple)):
@@ -1670,6 +1891,31 @@ def render_bidding_parity_markdown(report: Mapping[str, Any]) -> str:
     timestamp = clean.get("timestamp") or datetime.now(timezone.utc).isoformat()
     status = clean.get("status", "unverified")
 
+    def _format_cell(val: Any) -> str:
+        if val is None:
+            return "-"
+        return f"`{val}`"
+
+    gql_count_display = (
+        clean.get("graphql_bidding_count")
+        if clean.get("graphql_bidding_count") is not None
+        else "-"
+    )
+    xml_count_display = (
+        clean.get("xml_bidding_count")
+        if clean.get("xml_bidding_count") is not None
+        else "-"
+    )
+    xml_truncated_display = (
+        clean.get("xml_truncated") if clean.get("xml_truncated") is not None else "-"
+    )
+    gql_complete_display = (
+        clean.get("graphql_complete")
+        if clean.get("graphql_complete") is not None
+        else "-"
+    )
+    pag_status_display = clean.get("pagination_status") or "-"
+
     lines: list[str] = [
         "# eBay Auction and Bidding API Contract and Parity Validation Report",
         "",
@@ -1682,20 +1928,20 @@ def render_bidding_parity_markdown(report: Mapping[str, Any]) -> str:
         "",
         (
             f"- **Trading XML BidList Available:** `{clean.get('xml_available')}` "
-            f"(Count: `{clean.get('xml_bidding_count')}`, Truncated: `{clean.get('xml_truncated')}`)"
+            f"(Count: `{xml_count_display}`, Truncated: `{xml_truncated_display}`)"
         ),
         (
             f"- **GraphQL Bidding Available:** `{clean.get('graphql_available')}` "
-            f"(Count: `{clean.get('graphql_bidding_count')}`, Complete: `{clean.get('graphql_complete')}`, "
-            f"Pagination Status: `{clean.get('pagination_status')}`)"
+            f"(Count: `{gql_count_display}`, Complete: `{gql_complete_display}`, "
+            f"Pagination Status: `{pag_status_display}`)"
         ),
         (
-            f"- **Common Reconciled Items:** `{clean.get('common_items_count')}` "
-            f"(XML-Only: `{clean.get('xml_only_count')}`, GraphQL-Only: `{clean.get('graphql_only_count')}`)"
+            f"- **Common Reconciled Items:** `{clean.get('common_items_count', 0)}` "
+            f"(XML-Only: `{clean.get('xml_only_count', 0)}`, GraphQL-Only: `{clean.get('graphql_only_count', 0)}`)"
         ),
         (
-            f"- **Composite IDs Normalized:** `{clean.get('composite_ids_normalized_count')}` "
-            f"(Duplicate IDs: `{clean.get('duplicate_ids_count')}`, Missing IDs: `{clean.get('missing_ids_count')}`)"
+            f"- **Composite IDs Normalized:** `{clean.get('composite_ids_normalized_count', 0)}` "
+            f"(Duplicate IDs: `{clean.get('duplicate_ids_count', 0)}`, Missing IDs: `{clean.get('missing_ids_count', 0)}`)"
         ),
         "",
     ]
@@ -1709,17 +1955,22 @@ def render_bidding_parity_markdown(report: Mapping[str, Any]) -> str:
 
     selected_probe = clean.get("selected_probe")
     if selected_probe:
+        rep_tot_str = (
+            str(selected_probe.get("reported_total"))
+            if selected_probe.get("reported_total") is not None
+            else "-"
+        )
         lines.extend(
             [
                 "## Selected Contract Probe",
                 "",
-                f"- **Probe Key:** `{selected_probe.get('key')}`",
-                f"- **Operation Name:** `{selected_probe.get('operation_name')}`",
-                f"- **Outcome:** `{selected_probe.get('outcome')}`",
-                f"- **Items Field:** `{selected_probe.get('items_field')}`",
-                f"- **Total Field:** `{selected_probe.get('total_field')}`",
-                f"- **Reported Total:** `{selected_probe.get('reported_total')}`",
-                f"- **Pagination Status:** `{selected_probe.get('pagination_status')}`",
+                f"- **Probe Key:** `{selected_probe.get('key') or '-'}`",
+                f"- **Operation Name:** `{selected_probe.get('operation_name') or '-'}`",
+                f"- **Outcome:** `{selected_probe.get('outcome') or '-'}`",
+                f"- **Items Field:** `{selected_probe.get('items_field') or '-'}`",
+                f"- **Total Field:** `{selected_probe.get('total_field') or '-'}`",
+                f"- **Reported Total:** `{rep_tot_str}`",
+                f"- **Pagination Status:** `{selected_probe.get('pagination_status') or '-'}`",
                 "",
             ]
         )
@@ -1741,10 +1992,35 @@ def render_bidding_parity_markdown(report: Mapping[str, Any]) -> str:
                 if isinstance(err, dict)
                 else "-"
             )
+            op_label = _format_cell(p.get("operation_name"))
+            tot_label = _format_cell(p.get("reported_total"))
+            cnt_label = _format_cell(p.get("graphql_bidding_count"))
+            pag_label = _format_cell(p.get("pagination_status"))
             lines.append(
-                f"| `{p.get('key')}` | `{p.get('operation_name')}` | `{p.get('outcome')}` | "
-                f"`{p.get('reported_total')}` | `{p.get('graphql_bidding_count')}` | "
-                f"`{p.get('pagination_status')}` | `{err_label}` |"
+                f"| `{p.get('key')}` | {op_label} | `{p.get('outcome')}` | "
+                f"{tot_label} | {cnt_label} | "
+                f"{pag_label} | `{err_label}` |"
+            )
+        lines.append("")
+
+    fields = clean.get("fields")
+    if isinstance(fields, dict) and fields:
+        lines.extend(
+            [
+                "## Field-by-Field Parity Matrix",
+                "",
+                "| Field | Parity Classification | Coverage | Compared | Exact | Normalized | Mismatches | Both Null | Notes |",
+                "|---|---|---|---|---|---|---|---|---|",
+            ]
+        )
+        for field_name in MONITORED_BIDDING_FIELDS:
+            f = fields.get(field_name) or {}
+            lines.append(
+                f"| `{field_name}` | **{f.get('classification_label', f.get('classification'))}** | "
+                f"`{f.get('coverage')}` | {f.get('compared_count', 0)} | "
+                f"{f.get('exact_match_count', 0)} | {f.get('normalized_match_count', 0)} | "
+                f"{f.get('mismatch_count', 0)} | {f.get('both_absent_count', 0)} | "
+                f"{f.get('notes', '')} |"
             )
         lines.append("")
 
