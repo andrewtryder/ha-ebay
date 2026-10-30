@@ -220,18 +220,24 @@ To protect Home Assistant against unbounded loops, partial responses, and false-
 
 ## 9. Privacy & Diagnostic Protection
 
-`sanitize_offers_parity_report()` ensures zero diagnostic leaks or credential exposure in validation reports:
+`sanitize_offers_parity_report()` ensures zero diagnostic leaks, credential exposure, or private financial data leakage in validation reports:
 
+- **Strict Default-Deny Schema**: Only eight permitted top-level keys (`role`, `overall_status`, `is_inconclusive`, `field_counts`, `field_comparisons`, `baseline_summary`, `candidate_summary`, `errors`, `active_offers_by_item_id`). All unexpected free-form keys, nested dictionaries, and debug objects are automatically stripped.
 - **Strict Token & Secret Redaction**: Redacts `access_token`, `refresh_token`, `client_secret`, `client_id`, `runame`, `authorization`, `auth_code`, `api_key`, `raw_xml`, `raw_graphql`, `email`, `password`, `secret`.
 - **Bearer Token Sanitization**: Recursively scrubs token patterns (`Bearer ...`, `v^1.1#...`, `refresh_token=...`) and email patterns from all report strings, diagnostics, and error messages.
+- **Private Financial Data & Identifier Scrubbing**: Regex filters automatically redact private currency amounts (`USD 85.37`, `$85.37`, `85.37` → `[REDACTED_AMOUNT]`), 9-to-19-digit numerical identifiers (e.g. `123456789012` → `[REDACTED_ID]`), and markdown/HTML table injection payloads.
 - **Message & PII Scrubbing**: Redacts free-text message bodies (`message`, `buyer_message`, `seller_message`), usernames/IDs (`buyer_username`, `seller_username`, `buyer_id`, `seller_id`), titles (`title`, `listing_title`), and feedback scores.
-- **Deterministic SHA-256 Identifier Pseudonymization**: Rather than removing raw listing IDs from summary maps, `active_offers_by_item_id` converts listing item IDs to deterministic 12-character SHA-256 pseudonyms (`item_<sha256_12>`). This preserves per-item count grouping structure in diagnostic reports without exposing sensitive production eBay listing identifiers.
+- **Deterministic SHA-256 Identifier Pseudonymization**: Rather than exposing raw listing IDs in summary maps, `active_offers_by_item_id` converts listing item IDs to deterministic 12-character SHA-256 pseudonyms (`item_<sha256_12>`). This preserves per-item count grouping structure in diagnostic reports without exposing sensitive production eBay listing identifiers.
+- **Residual Privacy Limitations (Unsalted Pseudonyms)**: Because the 12-character SHA-256 pseudonyms are unsalted to allow deterministic cross-run correlation, an attacker with a known set of 12-digit numeric eBay item IDs could compute precomputed hash tables (rainbow tables) to reverse the pseudonyms. Therefore, reports also provide aggregate summaries (`items_with_offers`, `total_active_offers`), and diagnostic reports should not be shared across untrusted boundaries where listing identity must remain strictly private.
 
 ---
 
 ## 10. Offline-First CLI Validation Harness
 
 `scripts/validate_offers_parity.py` provides an isolated testing harness:
+
+- **Bounded Pagination Contract**: The CLI `--max-pages` parameter and all underlying functions (`validate_max_pages`, `merge_graphql_offers_pages`, `merge_trading_xml_seller_offers_pages`, `merge_trading_xml_buyer_offers_pages`, and `async_run_live_validation`) enforce an absolute limit between `1` and `25` pages. Values of `0`, negative numbers, or `> 25` fail closed before any network access.
+- **Exact XML Page Reconciliation**: Multi-page Trading XML seller and buyer responses reconcile declared `TotalNumberOfPages`, `TotalNumberOfEntries`, and sequential `PageNumber` on every single page. Any contradictory page totals, missing pagination metadata, sequence gaps, or extra pages arriving after the declared terminal page trigger `CONTRADICTORY_PAGINATION_TOTALS`, `MISSING_PAGINATION_METADATA`, or `PAGES_AFTER_END_DECLARED` and fail closed (`is_complete=False`). Exact completion requires `len(pages) == declared_total_pages`.
 
 ```bash
 # Offline synthetic verification (default, 0 network, 0 credentials):
@@ -248,7 +254,7 @@ uv run python scripts/validate_offers_parity.py \
   --xml-fixture tests/fixtures/offers.xml \
   --graphql-fixture tests/fixtures/negotiations.json
 
-# Opt-in read-only live validation (explicit credentials required):
+# Opt-in read-only live validation (explicit credentials required, bounded 1..25 pages):
 uv run python scripts/validate_offers_parity.py --live --env-file .env.local --role seller --max-pages 5
 ```
 

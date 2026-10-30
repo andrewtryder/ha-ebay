@@ -69,8 +69,10 @@ from custom_components.ebay.parsers.offers_parity import (
     sanitize_offers_probe_key,
     summarize_offers_probe_exception,
     validate_all_offers_contract_probes,
+    validate_max_pages,
 )
 from custom_components.ebay.parsers.trading_items import active_offers_by_item_id
+from scripts.validate_offers_parity import async_run_live_validation
 
 
 # ---------------------------------------------------------------------------
@@ -666,7 +668,12 @@ def test_sanitize_offers_parity_report_removes_sensitive_keys_and_tokens() -> No
             "authorization": "Bearer v^1.1#secret_bearer_token",
             "safe_field": "valid",
         },
-        "description": "Token leak: Bearer v^1.1#another_token_here",
+        "errors": [
+            {
+                "code": "UNKNOWN_ERROR",
+                "diagnostic": "Token leak: Bearer v^1.1#another_token_here",
+            }
+        ],
     }
     sanitized = sanitize_offers_parity_report(raw_report)
 
@@ -676,7 +683,7 @@ def test_sanitize_offers_parity_report_removes_sensitive_keys_and_tokens() -> No
 
     assert "secret_bearer_token" not in str(sanitized)
     assert "another_token_here" not in str(sanitized)
-    assert "[REDACTED_TOKEN]" in sanitized["description"]
+    assert "[REDACTED_TOKEN]" in sanitized["errors"][0]["diagnostic"]
 
 
 def test_render_offers_parity_markdown_and_json() -> None:
@@ -1681,3 +1688,459 @@ def test_pseudonymize_identifier_and_sanitize_diagnostic_string() -> None:
     assert "secret_val" not in cleaned
     assert "[REDACTED_TOKEN]" in cleaned
     assert "[REDACTED_EMAIL]" in cleaned
+
+
+# ---------------------------------------------------------------------------
+# Test PR #100 Hardening Review 5718614538: Max Pages, XML Sequence & Privacy
+# ---------------------------------------------------------------------------
+def test_validate_max_pages_bounds() -> None:
+    """validate_max_pages strictly enforces integer 1..25."""
+    assert validate_max_pages(1) == 1
+    assert validate_max_pages(25) == 25
+    assert validate_max_pages(10) == 10
+
+    for invalid_val in (0, -1, 26, 500):
+        with pytest.raises(ValueError, match="must be between 1 and 25"):
+            validate_max_pages(invalid_val)
+
+    for bad_type in ("10", 5.5, True, False, None):
+        with pytest.raises(ValueError, match="must be an integer"):
+            validate_max_pages(bad_type)  # type: ignore[arg-type]
+
+
+def test_merge_graphql_offers_pages_enforces_max_pages_bound() -> None:
+    """merge_graphql_offers_pages rejects max_pages < 1 or > 25."""
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_graphql_offers_pages([], max_pages=0)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_graphql_offers_pages([], max_pages=26)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_graphql_offers_pages([], max_pages=-1)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_graphql_offers_pages([], max_pages=500)
+
+
+def test_merge_trading_xml_seller_offers_pages_enforces_max_pages_bound() -> None:
+    """merge_trading_xml_seller_offers_pages rejects invalid max_pages."""
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_trading_xml_seller_offers_pages([], max_pages=0)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_trading_xml_seller_offers_pages([], max_pages=30)
+
+
+def test_merge_trading_xml_buyer_offers_pages_enforces_max_pages_bound() -> None:
+    """merge_trading_xml_buyer_offers_pages rejects invalid max_pages."""
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_trading_xml_buyer_offers_pages([], max_pages=0)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        merge_trading_xml_buyer_offers_pages([], max_pages=100)
+
+
+@pytest.mark.asyncio
+async def test_async_run_live_validation_enforces_max_pages_bound() -> None:
+    """async_run_live_validation rejects max_pages outside 1..25 before network calls."""
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        await async_run_live_validation(None, role="seller", max_pages=0)
+    with pytest.raises(ValueError, match="must be between 1 and 25"):
+        await async_run_live_validation(None, role="seller", max_pages=26)
+
+
+def test_graphql_pagination_loop_bounded_at_25_requests() -> None:
+    """Simulate a loop with hasNextPage=True continuously; ensure bounded at 25 pages and marked truncated/inconclusive."""
+    # Build 25 synthetic pages, each declaring hasNextPage=True
+    pages = []
+    for i in range(1, 26):
+        pages.append(
+            {
+                "data": {
+                    "sellerNegotiationHistory": {
+                        "total": 100,
+                        "negotiations": [
+                            {
+                                "negotiationId": f"neg-{i}",
+                                "status": "ACTIVE",
+                                "role": "SELLER",
+                            }
+                        ],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": f"cursor-{i}",
+                        },
+                    }
+                }
+            }
+        )
+    # Merge pages using max_pages=25 (the maximum bound allowed)
+    merged = merge_graphql_offers_pages(pages, max_pages=25)
+    assert len(merged.negotiations) == 25
+    assert merged.is_complete is False
+    assert merged.is_truncated is True
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in merged.errors)
+
+
+def test_trading_xml_seller_contradictory_page_totals() -> None:
+    """Page 1 declares 2 pages, but Page 2 declares 3 pages."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>2</TotalNumberOfPages>
+            <TotalNumberOfEntries>2</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>1</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    p2 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>3</TotalNumberOfPages>
+            <TotalNumberOfEntries>2</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>2</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000002</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>102</BestOfferID>
+                        <Price currencyID="USD">60.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = merge_trading_xml_seller_offers_pages([p1, p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "CONTRADICTORY_PAGINATION_TOTALS" for e in res.errors)
+
+
+def test_trading_xml_seller_contradictory_entry_totals() -> None:
+    """Page 1 declares 10 entries, Page 2 declares 12 entries."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>2</TotalNumberOfPages>
+            <TotalNumberOfEntries>10</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>1</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    p2 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>2</TotalNumberOfPages>
+            <TotalNumberOfEntries>12</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>2</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000002</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>102</BestOfferID>
+                        <Price currencyID="USD">60.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = merge_trading_xml_seller_offers_pages([p1, p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "CONTRADICTORY_PAGINATION_TOTALS" for e in res.errors)
+
+
+def test_trading_xml_seller_extra_page_after_end_declared() -> None:
+    """Total declared pages is 1, but a 2nd page is supplied."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>1</TotalNumberOfPages>
+            <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>1</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    p2 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>1</TotalNumberOfPages>
+            <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>2</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000002</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>102</BestOfferID>
+                        <Price currencyID="USD">60.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = merge_trading_xml_seller_offers_pages([p1, p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "PAGES_AFTER_END_DECLARED" for e in res.errors)
+
+
+def test_trading_xml_seller_pagination_sequence_error() -> None:
+    """Page sequence jumps from 1 to 3."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>3</TotalNumberOfPages>
+            <TotalNumberOfEntries>3</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>1</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    p3 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>3</TotalNumberOfPages>
+            <TotalNumberOfEntries>3</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>3</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000003</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>103</BestOfferID>
+                        <Price currencyID="USD">70.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = merge_trading_xml_seller_offers_pages([p1, p3])
+    assert res.is_complete is False
+    assert any(e["code"] == "PAGINATION_SEQUENCE_ERROR" for e in res.errors)
+
+
+def test_trading_xml_seller_missing_final_page() -> None:
+    """Declared 2 pages, but only Page 1 is fetched."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <PaginationResult>
+            <TotalNumberOfPages>2</TotalNumberOfPages>
+            <TotalNumberOfEntries>2</TotalNumberOfEntries>
+        </PaginationResult>
+        <PageNumber>1</PageNumber>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = merge_trading_xml_seller_offers_pages([p1])
+    assert res.is_complete is False
+    assert res.is_truncated is True
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res.errors)
+
+
+def test_trading_xml_seller_missing_pagination_metadata_on_populated() -> None:
+    """Populated seller XML missing PaginationResult metadata cannot be assumed complete."""
+    xml_no_pag = """<?xml version="1.0" encoding="utf-8"?>
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <ItemBestOffersArray>
+            <ItemBestOffers>
+                <Item><ItemID>110000000001</ItemID></Item>
+                <BestOfferArray>
+                    <BestOffer>
+                        <BestOfferID>101</BestOfferID>
+                        <Price currencyID="USD">50.00</Price>
+                        <Status>Pending</Status>
+                    </BestOffer>
+                </BestOfferArray>
+            </ItemBestOffers>
+        </ItemBestOffersArray>
+    </GetBestOffersResponse>"""
+
+    res = normalize_trading_xml_seller_offers(xml_no_pag)
+    assert res.is_complete is False
+    assert any(e["code"] == "MISSING_PAGINATION_METADATA" for e in res.errors)
+
+
+def test_trading_xml_buyer_contradictory_page_totals() -> None:
+    """Buyer XML pages reporting conflicting TotalNumberOfPages."""
+    p1 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <BestOfferList>
+            <PaginationResult>
+                <TotalNumberOfPages>2</TotalNumberOfPages>
+                <TotalNumberOfEntries>2</TotalNumberOfEntries>
+            </PaginationResult>
+            <ItemArray>
+                <Item>
+                    <ItemID>220000000001</ItemID>
+                    <BestOfferDetails>
+                        <BestOffer>
+                            <BestOfferID>201</BestOfferID>
+                            <Price currencyID="USD">15.00</Price>
+                            <Status>Pending</Status>
+                        </BestOffer>
+                    </BestOfferDetails>
+                </Item>
+            </ItemArray>
+        </BestOfferList>
+    </GetMyeBayBuyingResponse>"""
+
+    p2 = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+        <Ack>Success</Ack>
+        <BestOfferList>
+            <PaginationResult>
+                <TotalNumberOfPages>5</TotalNumberOfPages>
+                <TotalNumberOfEntries>2</TotalNumberOfEntries>
+            </PaginationResult>
+            <ItemArray>
+                <Item>
+                    <ItemID>220000000002</ItemID>
+                    <BestOfferDetails>
+                        <BestOffer>
+                            <BestOfferID>202</BestOfferID>
+                            <Price currencyID="USD">25.00</Price>
+                            <Status>Pending</Status>
+                        </BestOffer>
+                    </BestOfferDetails>
+                </Item>
+            </ItemArray>
+        </BestOfferList>
+    </GetMyeBayBuyingResponse>"""
+
+    res = merge_trading_xml_buyer_offers_pages([p1, p2])
+    assert res.is_complete is False
+    assert any(e["code"] == "CONTRADICTORY_PAGINATION_TOTALS" for e in res.errors)
+
+
+def test_privacy_redacts_private_offer_prices_and_listing_ids() -> None:
+    """Diagnostic containing 'seller 123456789012 offered USD 85.37' redacts listing ID and amount."""
+    dirty_diag = "seller 123456789012 offered USD 85.37 on item"
+    cleaned = sanitize_diagnostic_string(dirty_diag)
+    assert "123456789012" not in cleaned
+    assert "85.37" not in cleaned
+    assert "[REDACTED_ID]" in cleaned
+    assert "[REDACTED_AMOUNT]" in cleaned
+
+
+def test_privacy_default_deny_schema_drops_arbitrary_nested_and_markdown_injection() -> (
+    None
+):
+    """Strict default-deny report schema drops unapproved keys, handles markdown injection, and normalizes errors."""
+    report = {
+        "role": "seller",
+        "overall_status": "fail",
+        "is_inconclusive": False,
+        "unexpected_key": "some_value",
+        "nested_unapproved": {"foo": "bar", "secret": "123"},
+        "field_comparisons": {
+            "status": {
+                "status": "exact_match",
+                "note": "A note with a pipe | character and [link](https://malicious.site)",
+            }
+        },
+        "errors": [
+            "raw string error instead of dict",
+            {
+                "code": "ILLEGAL_CODE_ATTEMPT",
+                "diagnostic": "<script>alert(1)</script> price was $49.99 for item 987654321012",
+            },
+        ],
+    }
+    sanitized = sanitize_offers_parity_report(report)
+    assert "unexpected_key" not in sanitized
+    assert "nested_unapproved" not in sanitized
+    assert "errors" in sanitized
+    assert len(sanitized["errors"]) == 2
+    # First error normalized to MALFORMED_ERROR
+    assert sanitized["errors"][0]["code"] == "MALFORMED_ERROR"
+    # Second error code mapped to UNKNOWN_ERROR because code was not in whitelist
+    assert sanitized["errors"][1]["code"] == "UNKNOWN_ERROR"
+    # Diagnostic has HTML tag, amount, and ID redacted
+    diag2 = sanitized["errors"][1]["diagnostic"]
+    assert "<script>" not in diag2
+    assert "49.99" not in diag2
+    assert "987654321012" not in diag2
+    assert "[REDACTED_TAG]" in diag2
+    assert "[REDACTED_AMOUNT]" in diag2
+    assert "[REDACTED_ID]" in diag2
+
+    # Render markdown and verify pipes are escaped and links are stripped
+    md = render_offers_parity_markdown(sanitized)
+    assert "https://malicious.site" not in md

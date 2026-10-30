@@ -62,6 +62,7 @@ from custom_components.ebay.parsers.offers_parity import (  # noqa: E402
     sanitize_offers_parity_report,
     sanitize_offers_probe_key,
     summarize_offers_probe_exception,
+    validate_max_pages,
 )
 from custom_components.ebay.parsers.trading_builders import (  # noqa: E402
     BEST_OFFERS_CALL_NAME,
@@ -471,6 +472,7 @@ async def async_run_live_validation(
     max_pages: int = 25,
 ) -> dict[str, Any]:
     """Execute strictly read-only live validation against eBay APIs with user-provided credentials."""
+    max_pages = validate_max_pages(max_pages)
     neg_role = NegotiationRole.SELLER if role == "seller" else NegotiationRole.BUYER
 
     async with aiohttp.ClientSession() as session:
@@ -653,6 +655,18 @@ async def async_run_live_validation(
         }
 
 
+def _validate_cli_max_pages(val: str) -> int:
+    """Validate that --max-pages is an integer between 1 and 25 inclusive."""
+    try:
+        ival = int(val)
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError(f"--max-pages must be an integer, got '{val}'")
+    try:
+        return validate_max_pages(ival)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def main() -> int:
     """CLI entry point for validate_offers_parity."""
     parser = argparse.ArgumentParser(
@@ -714,9 +728,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--max-pages",
-        type=int,
+        type=_validate_cli_max_pages,
         default=25,
-        help="Maximum pages to fetch in live pagination (default: 25).",
+        help="Maximum pages to fetch in live pagination (1..25, default: 25).",
     )
     parser.add_argument(
         "--verbose",
@@ -725,6 +739,12 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+
+    try:
+        validate_max_pages(args.max_pages)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
     # Determine execution mode
     report_data: dict[str, Any]

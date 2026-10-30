@@ -136,6 +136,25 @@ _EBAY_TOKEN_PATTERN = re.compile(
 _EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
 
 
+MAX_OFFERS_PAGES = 25
+
+
+def validate_max_pages(max_pages: int) -> int:
+    """Validate that max_pages is an integer between 1 and 25 inclusive.
+
+    Raises ValueError if max_pages is not an integer or is out of range [1, 25].
+    """
+    if not isinstance(max_pages, int) or isinstance(max_pages, bool):
+        raise ValueError(
+            f"max_pages must be an integer, got {type(max_pages).__name__}"
+        )
+    if max_pages < 1 or max_pages > MAX_OFFERS_PAGES:
+        raise ValueError(
+            f"max_pages must be between 1 and {MAX_OFFERS_PAGES}, got {max_pages}"
+        )
+    return max_pages
+
+
 def pseudonymize_identifier(val: str, prefix: str = "id") -> str:
     """Return a deterministic, privacy-preserving 12-char SHA-256 pseudonym."""
     if not val:
@@ -144,21 +163,37 @@ def pseudonymize_identifier(val: str, prefix: str = "id") -> str:
     return f"{prefix}_{h}"
 
 
+_CURRENCY_AMOUNT_PATTERN = re.compile(
+    r"(?:\b[A-Z]{3}\s*|\$|£|€|¥)\s*\d+(?:\.\d{1,4})?\b|\b\d+(?:\.\d{1,4})?\s*[A-Z]{3}\b|\b\d+\.\d{2}\b",
+    re.IGNORECASE,
+)
+_NUMERIC_ID_PATTERN = re.compile(r"\b\d{9,19}\b")
+_CREDENTIAL_KV_PATTERN = re.compile(
+    r"(client_secret|client_id|refresh_token|password|secret|runame|token|auth_code|authorization|access_token)=([^&\s\"']+)",
+    re.IGNORECASE,
+)
+
+
 def sanitize_diagnostic_string(val: str) -> str:
-    """Sanitize arbitrary strings, redacting auth tokens, emails, and sensitive patterns."""
+    """Sanitize arbitrary strings, redacting auth tokens, emails, prices, IDs, and sensitive patterns."""
     if not isinstance(val, str):
         return str(val)
+    # Redact credentials and query params
+    text = _CREDENTIAL_KV_PATTERN.sub(r"\1=[REDACTED]", val)
     # Redact eBay access/refresh tokens
-    text = _EBAY_TOKEN_PATTERN.sub("[REDACTED_TOKEN]", val)
+    text = _EBAY_TOKEN_PATTERN.sub("[REDACTED_TOKEN]", text)
     # Redact email addresses
     text = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", text)
-    # Redact sensitive key=value patterns in query strings or diagnostic messages
-    text = re.sub(
-        r"(client_secret|client_id|refresh_token|password|secret|runame|token)=([^&\s\"']+)",
-        r"\1=[REDACTED]",
-        text,
-        flags=re.IGNORECASE,
-    )
+    # Redact currency amounts and prices (e.g. USD 85.37, $85.37, 85.37)
+    text = _CURRENCY_AMOUNT_PATTERN.sub("[REDACTED_AMOUNT]", text)
+    # Redact long numeric identifiers (e.g. 123456789012)
+    text = _NUMERIC_ID_PATTERN.sub("[REDACTED_ID]", text)
+    # Neutralize HTML tags and script injection
+    text = re.sub(r"<[^>]*>", "[REDACTED_TAG]", text)
+    # Neutralize markdown links [text](url) -> [text]
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"[\1]", text)
+    # Replace markdown table pipes so table syntax cannot be broken
+    text = text.replace("|", "-")
     return text
 
 
@@ -230,8 +265,49 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "EMPTY_XML_PAYLOAD",
         "XML_PARSE_ERROR",
         "MISSING_REQUIRED_CONTAINER",
+        "PAGINATION_SEQUENCE_ERROR",
+        "INVENTORY_OFFER_MISMATCH",
+        "ELIGIBLE_ITEMS_MISMATCH",
+        "UNKNOWN_ERROR",
+        "GRAPHQL_ERROR",
+        "MISSING_DATA",
+        "NO_OFFERS_CONTAINER",
     }
 )
+
+GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
+    "HANDSHAKE_ONLY": "Transport connectivity handshake only; no negotiation records retrieved",
+    "COUNT_ONLY_QUERY": "Count-only operation does not retrieve negotiation records",
+    "MISSING_PAGINATION_METADATA": "Response lacks required pagination metadata",
+    "MALFORMED_PAGE_INFO": "Pagination pageInfo is malformed or non-boolean",
+    "TOTAL_RECORDS_MISMATCH": "Total collected records does not match declared total count",
+    "MISSING_NEGOTIATION_ID": "Negotiation record missing required identifier",
+    "DUPLICATE_OFFER_ID": "Duplicate offer identifier encountered within page",
+    "DUPLICATE_OFFER_ID_ACROSS_PAGES": "Duplicate offer identifier encountered across pages",
+    "ROLE_MISMATCH": "Negotiation record role does not match expected role",
+    "NO_PAGES_PROVIDED": "No response pages provided for collection",
+    "MALFORMED_PAGE": "Response page is not a valid structured payload",
+    "PAGINATION_CYCLE_DETECTED": "Duplicate page payload detected during pagination",
+    "PAGES_AFTER_END_DECLARED": "Extra page received after final page was declared",
+    "CONTRADICTORY_PAGINATION_TOTALS": "Declared pagination totals changed across pages",
+    "MAX_PAGES_EXCEEDED": "Total pages exceeded maximum allowed limit of 25",
+    "PENDING_CONTINUATION": "Final page has pending continuation; collection incomplete",
+    "UNVERIFIED_COLLECTION_CENSUS": "No declared total count available to verify census completeness",
+    "XML_ACK_FAILURE": "Trading XML returned failure response",
+    "XML_ACK_PARTIAL_FAILURE": "Trading XML returned partial failure response",
+    "XML_ACK_MISSING": "Trading XML returned missing or unrecognized Ack value",
+    "INVALID_XML_ROOT": "Trading XML root element does not match expected operation",
+    "EMPTY_XML_PAYLOAD": "Trading XML payload is empty or whitespace",
+    "XML_PARSE_ERROR": "Failed to parse XML response payload",
+    "MISSING_REQUIRED_CONTAINER": "Missing required data container in response",
+    "INVENTORY_OFFER_MISMATCH": "Detected REST Sell Inventory payload; inventory offers are not negotiation records",
+    "NO_OFFERS_CONTAINER": "No negotiation container found in GraphQL data",
+    "FORBIDDEN": "Access forbidden; insufficient permissions or scope",
+    "UNAUTHORIZED": "Request unauthorized; invalid or expired credentials",
+    "VALIDATION_ERROR": "GraphQL query validation failed against schema",
+    "PAGINATION_SEQUENCE_ERROR": "Pagination page numbers out of sequence",
+    "UNKNOWN_ERROR": "An unclassified or unverified error occurred",
+}
 
 ALLOWED_NUMERIC_ERROR_CODES: frozenset[str] = frozenset(
     {
@@ -1162,8 +1238,21 @@ def normalize_trading_xml_seller_offers(
                 }
             )
 
-    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages")) or 1
+    pag_result = root.find("e:PaginationResult", namespaces=NS)
+    has_pagination = pag_result is not None
+    total_pages = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfPages"))
     total_entries = _to_int(_text(root, "e:PaginationResult/e:TotalNumberOfEntries"))
+    page_number = _to_int(_text(root, "e:PaginationResult/e:PageNumber")) or _to_int(
+        _text(root, "e:PageNumber")
+    )
+
+    if not has_pagination or total_pages is None or total_entries is None:
+        errors.append(
+            {
+                "code": "MISSING_PAGINATION_METADATA",
+                "diagnostic": "Missing or incomplete PaginationResult in Trading XML response",
+            }
+        )
 
     item_array = root.find("e:ItemBestOffersArray", namespaces=NS)
     if item_array is None and total_entries is not None and total_entries > 0:
@@ -1248,7 +1337,16 @@ def normalize_trading_xml_seller_offers(
         )
 
     total_active = sum(active_offers_by_item.values())
-    is_truncated = total_pages > 1
+    is_truncated = total_pages is not None and total_pages > 1
+    if total_entries is not None and (total_pages is None or total_pages == 1):
+        if total_entries != len(negotiations):
+            errors.append(
+                {
+                    "code": "TOTAL_RECORDS_MISMATCH",
+                    "diagnostic": f"Declared total entries ({total_entries}) does not match retrieved count ({len(negotiations)})",
+                }
+            )
+
     has_blocking_errors = any(
         e.get("code")
         in (
@@ -1258,10 +1356,18 @@ def normalize_trading_xml_seller_offers(
             "INVALID_XML_ROOT",
             "XML_PARSE_ERROR",
             "MISSING_REQUIRED_CONTAINER",
+            "MISSING_PAGINATION_METADATA",
         )
         for e in errors
     )
-    is_complete = not has_blocking_errors and len(errors) == 0 and not is_truncated
+    is_complete = (
+        not has_blocking_errors
+        and len(errors) == 0
+        and not is_truncated
+        and has_pagination
+        and total_pages == 1
+        and (total_entries is not None and total_entries == len(negotiations))
+    )
 
     return OfferCollectionResult(
         negotiations=tuple(negotiations),
@@ -1271,7 +1377,12 @@ def normalize_trading_xml_seller_offers(
         is_complete=is_complete,
         is_truncated=is_truncated,
         errors=tuple(errors),
-        diagnostics={"total_pages": total_pages, "total_entries": total_entries},
+        diagnostics={
+            "total_pages": total_pages,
+            "total_entries": total_entries,
+            "page_number": page_number,
+            "has_pagination": has_pagination,
+        },
     )
 
 
@@ -1280,6 +1391,7 @@ def merge_trading_xml_seller_offers_pages(
     max_pages: int = 25,
 ) -> OfferCollectionResult:
     """Merge multiple pages of Trading XML GetBestOffers responses fail-closed."""
+    max_pages = validate_max_pages(max_pages)
     if not pages:
         return OfferCollectionResult(
             negotiations=(),
@@ -1305,6 +1417,7 @@ def merge_trading_xml_seller_offers_pages(
     declared_total_pages: int | None = None
     declared_total_entries: int | None = None
     is_truncated = False
+    pages_after_end = False
 
     for page_idx, page in enumerate(pages[:max_pages]):
         # Fingerprint for cycle detection
@@ -1325,15 +1438,48 @@ def merge_trading_xml_seller_offers_pages(
             break
         seen_fingerprints.add(h)
 
+        if declared_total_pages is not None and page_idx >= declared_total_pages:
+            pages_after_end = True
+            errors.append(
+                {
+                    "code": "PAGES_AFTER_END_DECLARED",
+                    "diagnostic": f"Received extra XML page {page_idx + 1} after declared terminal page {declared_total_pages}",
+                }
+            )
+
         page_res = normalize_trading_xml_seller_offers(page)
-        errors.extend(page_res.errors)
+        # Propagate page errors except single-page TOTAL_RECORDS_MISMATCH (evaluated on merged total)
+        for err in page_res.errors:
+            if err.get("code") != "TOTAL_RECORDS_MISMATCH":
+                errors.append(err)
 
         diag = page_res.diagnostics or {}
         p_total_pages = diag.get("total_pages")
         p_total_entries = diag.get("total_entries")
+        p_page_num = diag.get("page_number")
+
+        if p_total_pages is None or p_total_entries is None:
+            errors.append(
+                {
+                    "code": "MISSING_PAGINATION_METADATA",
+                    "diagnostic": f"XML page {page_idx + 1} missing required PaginationResult metadata",
+                }
+            )
 
         if declared_total_pages is None and p_total_pages is not None:
             declared_total_pages = p_total_pages
+        elif (
+            declared_total_pages is not None
+            and p_total_pages is not None
+            and declared_total_pages != p_total_pages
+        ):
+            errors.append(
+                {
+                    "code": "CONTRADICTORY_PAGINATION_TOTALS",
+                    "diagnostic": f"Declared total pages changed from {declared_total_pages} to {p_total_pages}",
+                }
+            )
+
         if declared_total_entries is None and p_total_entries is not None:
             declared_total_entries = p_total_entries
         elif (
@@ -1345,6 +1491,14 @@ def merge_trading_xml_seller_offers_pages(
                 {
                     "code": "CONTRADICTORY_PAGINATION_TOTALS",
                     "diagnostic": f"Declared total entries changed from {declared_total_entries} to {p_total_entries}",
+                }
+            )
+
+        if p_page_num is not None and p_page_num != page_idx + 1:
+            errors.append(
+                {
+                    "code": "PAGINATION_SEQUENCE_ERROR",
+                    "diagnostic": f"Expected page {page_idx + 1} but received page {p_page_num}",
                 }
             )
 
@@ -1390,6 +1544,13 @@ def merge_trading_xml_seller_offers_pages(
                 "diagnostic": f"Retrieved {len(pages)} of {declared_total_pages} declared XML pages",
             }
         )
+    elif declared_total_pages is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No declared total pages available to verify XML pagination completeness",
+            }
+        )
 
     if (
         declared_total_entries is not None
@@ -1398,18 +1559,25 @@ def merge_trading_xml_seller_offers_pages(
         errors.append(
             {
                 "code": "TOTAL_RECORDS_MISMATCH",
-                "diagnostic": f"Collected {len(all_negotiations)} offers but PaginationResult declared {declared_total_entries}",
+                "diagnostic": f"Collected {len(all_negotiations)} offers but declared total is {declared_total_entries}",
+            }
+        )
+    elif declared_total_entries is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No declared total entries available to verify XML census completeness",
             }
         )
 
     is_complete = (
         len(errors) == 0
         and not is_truncated
-        and (declared_total_pages is not None and len(pages) >= declared_total_pages)
-        and (
-            declared_total_entries is not None
-            and len(all_negotiations) == declared_total_entries
-        )
+        and not pages_after_end
+        and declared_total_pages is not None
+        and len(pages) == declared_total_pages
+        and declared_total_entries is not None
+        and len(all_negotiations) == declared_total_entries
     )
 
     return OfferCollectionResult(
@@ -1423,9 +1591,9 @@ def merge_trading_xml_seller_offers_pages(
         is_truncated=is_truncated,
         errors=tuple(errors),
         diagnostics={
-            "page_count": len(pages),
-            "declared_total_pages": declared_total_pages,
-            "declared_total_entries": declared_total_entries,
+            "page_count": min(len(pages), max_pages),
+            "total_pages": declared_total_pages,
+            "total_entries": declared_total_entries,
         },
     )
 
@@ -1611,17 +1779,42 @@ def normalize_trading_xml_buyer_offers(
             )
 
     total_active = sum(active_offers_by_item.values())
-    total_pages = 1
-    total_entries = None
+    has_pagination = False
+    total_pages: int | None = None
+    total_entries: int | None = None
+    page_number: int | None = None
+
     if container is not None:
-        total_pages = (
-            _to_int(_text(container, "e:PaginationResult/e:TotalNumberOfPages")) or 1
+        pag_result = container.find("e:PaginationResult", namespaces=NS)
+        has_pagination = pag_result is not None
+        total_pages = _to_int(
+            _text(container, "e:PaginationResult/e:TotalNumberOfPages")
         )
         total_entries = _to_int(
             _text(container, "e:PaginationResult/e:TotalNumberOfEntries")
         )
+        page_number = _to_int(
+            _text(container, "e:PaginationResult/e:PageNumber")
+        ) or _to_int(_text(container, "e:PageNumber"))
 
-    is_truncated = total_pages > 1
+    if not has_pagination or total_pages is None or total_entries is None:
+        errors.append(
+            {
+                "code": "MISSING_PAGINATION_METADATA",
+                "diagnostic": "Missing or incomplete PaginationResult in BestOfferList",
+            }
+        )
+
+    is_truncated = total_pages is not None and total_pages > 1
+    if total_entries is not None and (total_pages is None or total_pages == 1):
+        if total_entries != len(negotiations):
+            errors.append(
+                {
+                    "code": "TOTAL_RECORDS_MISMATCH",
+                    "diagnostic": f"Declared total entries ({total_entries}) does not match retrieved count ({len(negotiations)})",
+                }
+            )
+
     has_blocking_errors = any(
         e.get("code")
         in (
@@ -1631,10 +1824,18 @@ def normalize_trading_xml_buyer_offers(
             "INVALID_XML_ROOT",
             "XML_PARSE_ERROR",
             "MISSING_REQUIRED_CONTAINER",
+            "MISSING_PAGINATION_METADATA",
         )
         for e in errors
     )
-    is_complete = not has_blocking_errors and len(errors) == 0 and not is_truncated
+    is_complete = (
+        not has_blocking_errors
+        and len(errors) == 0
+        and not is_truncated
+        and has_pagination
+        and total_pages == 1
+        and (total_entries is not None and total_entries == len(negotiations))
+    )
 
     return OfferCollectionResult(
         negotiations=tuple(negotiations),
@@ -1644,7 +1845,12 @@ def normalize_trading_xml_buyer_offers(
         is_complete=is_complete,
         is_truncated=is_truncated,
         errors=tuple(errors),
-        diagnostics={"total_pages": total_pages, "total_entries": total_entries},
+        diagnostics={
+            "total_pages": total_pages,
+            "total_entries": total_entries,
+            "page_number": page_number,
+            "has_pagination": has_pagination,
+        },
     )
 
 
@@ -1653,6 +1859,7 @@ def merge_trading_xml_buyer_offers_pages(
     max_pages: int = 25,
 ) -> OfferCollectionResult:
     """Merge multiple pages of Trading XML GetMyeBayBuying responses fail-closed."""
+    max_pages = validate_max_pages(max_pages)
     if not pages:
         return OfferCollectionResult(
             negotiations=(),
@@ -1678,6 +1885,7 @@ def merge_trading_xml_buyer_offers_pages(
     declared_total_pages: int | None = None
     declared_total_entries: int | None = None
     is_truncated = False
+    pages_after_end = False
 
     for page_idx, page in enumerate(pages[:max_pages]):
         page_str = (
@@ -1697,17 +1905,69 @@ def merge_trading_xml_buyer_offers_pages(
             break
         seen_fingerprints.add(h)
 
+        if declared_total_pages is not None and page_idx >= declared_total_pages:
+            pages_after_end = True
+            errors.append(
+                {
+                    "code": "PAGES_AFTER_END_DECLARED",
+                    "diagnostic": f"Received extra XML page {page_idx + 1} after declared terminal page {declared_total_pages}",
+                }
+            )
+
         page_res = normalize_trading_xml_buyer_offers(page)
-        errors.extend(page_res.errors)
+        # Propagate page errors except single-page TOTAL_RECORDS_MISMATCH (evaluated on merged total)
+        for err in page_res.errors:
+            if err.get("code") != "TOTAL_RECORDS_MISMATCH":
+                errors.append(err)
 
         diag = page_res.diagnostics or {}
         p_total_pages = diag.get("total_pages")
         p_total_entries = diag.get("total_entries")
+        p_page_num = diag.get("page_number")
+
+        if p_total_pages is None or p_total_entries is None:
+            errors.append(
+                {
+                    "code": "MISSING_PAGINATION_METADATA",
+                    "diagnostic": f"XML page {page_idx + 1} missing required PaginationResult metadata",
+                }
+            )
 
         if declared_total_pages is None and p_total_pages is not None:
             declared_total_pages = p_total_pages
+        elif (
+            declared_total_pages is not None
+            and p_total_pages is not None
+            and declared_total_pages != p_total_pages
+        ):
+            errors.append(
+                {
+                    "code": "CONTRADICTORY_PAGINATION_TOTALS",
+                    "diagnostic": f"Declared total pages changed from {declared_total_pages} to {p_total_pages}",
+                }
+            )
+
         if declared_total_entries is None and p_total_entries is not None:
             declared_total_entries = p_total_entries
+        elif (
+            declared_total_entries is not None
+            and p_total_entries is not None
+            and declared_total_entries != p_total_entries
+        ):
+            errors.append(
+                {
+                    "code": "CONTRADICTORY_PAGINATION_TOTALS",
+                    "diagnostic": f"Declared total entries changed from {declared_total_entries} to {p_total_entries}",
+                }
+            )
+
+        if p_page_num is not None and p_page_num != page_idx + 1:
+            errors.append(
+                {
+                    "code": "PAGINATION_SEQUENCE_ERROR",
+                    "diagnostic": f"Expected page {page_idx + 1} but received page {p_page_num}",
+                }
+            )
 
         for neg in page_res.negotiations:
             if not neg.negotiation_id:
@@ -1751,6 +2011,13 @@ def merge_trading_xml_buyer_offers_pages(
                 "diagnostic": f"Retrieved {len(pages)} of {declared_total_pages} declared XML pages",
             }
         )
+    elif declared_total_pages is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No declared total pages available to verify XML pagination completeness",
+            }
+        )
 
     if (
         declared_total_entries is not None
@@ -1762,15 +2029,22 @@ def merge_trading_xml_buyer_offers_pages(
                 "diagnostic": f"Collected {len(all_negotiations)} buyer offers but PaginationResult declared {declared_total_entries}",
             }
         )
+    elif declared_total_entries is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No declared total entries available to verify XML census completeness",
+            }
+        )
 
     is_complete = (
         len(errors) == 0
         and not is_truncated
-        and (declared_total_pages is not None and len(pages) >= declared_total_pages)
-        and (
-            declared_total_entries is not None
-            and len(all_negotiations) == declared_total_entries
-        )
+        and not pages_after_end
+        and declared_total_pages is not None
+        and len(pages) == declared_total_pages
+        and declared_total_entries is not None
+        and len(all_negotiations) == declared_total_entries
     )
 
     return OfferCollectionResult(
@@ -1784,9 +2058,9 @@ def merge_trading_xml_buyer_offers_pages(
         is_truncated=is_truncated,
         errors=tuple(errors),
         diagnostics={
-            "page_count": len(pages),
-            "declared_total_pages": declared_total_pages,
-            "declared_total_entries": declared_total_entries,
+            "page_count": min(len(pages), max_pages),
+            "total_pages": declared_total_pages,
+            "total_entries": declared_total_entries,
         },
     )
 
@@ -2214,6 +2488,7 @@ def merge_graphql_offers_pages(
     max_pages: int = 25,
 ) -> OfferCollectionResult:
     """Merge multiple pages of GraphQL offers responses fail-closed."""
+    max_pages = validate_max_pages(max_pages)
     if not pages:
         return OfferCollectionResult(
             negotiations=(),
@@ -2752,33 +3027,157 @@ def rank_offers_probe_candidate(result: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 # Privacy protection and report sanitization
 # ---------------------------------------------------------------------------
+ALLOWED_REPORT_TOP_KEYS: frozenset[str] = frozenset(
+    {
+        "role",
+        "overall_status",
+        "is_inconclusive",
+        "field_counts",
+        "field_comparisons",
+        "baseline_summary",
+        "candidate_summary",
+        "errors",
+        "active_offers_by_item_id",
+    }
+)
+
+
 def sanitize_offers_parity_report(report: Mapping[str, Any]) -> dict[str, Any]:
-    """Sanitize report dictionary ensuring zero sensitive tokens or private IDs leak."""
+    """Sanitize report dictionary using a strict default-deny schema ensuring zero leaks."""
+    if not isinstance(report, Mapping):
+        return {}
+
     sanitized: dict[str, Any] = {}
-    for key, value in report.items():
-        if key in FORBIDDEN_REPORT_KEYS:
-            continue
-        if key == "active_offers_by_item_id" and isinstance(value, Mapping):
-            sanitized[key] = {
-                pseudonymize_identifier(str(item_id), prefix="item"): count
-                for item_id, count in value.items()
+
+    # 1. Role (strict enum whitelist)
+    raw_role = str(report.get("role", "seller")).lower()
+    sanitized["role"] = raw_role if raw_role in ("seller", "buyer") else "unknown"
+
+    # 2. Overall status (strict enum whitelist)
+    raw_status = str(report.get("overall_status", "inconclusive")).lower()
+    sanitized["overall_status"] = (
+        raw_status if raw_status in ("pass", "fail", "inconclusive") else "inconclusive"
+    )
+
+    # 3. is_inconclusive boolean flag
+    sanitized["is_inconclusive"] = bool(
+        report.get("is_inconclusive", sanitized["overall_status"] == "inconclusive")
+    )
+
+    # 4. Field counts (strict taxonomy keys, non-negative integer counts only)
+    raw_counts = report.get("field_counts")
+    sanitized_counts: dict[str, int] = {}
+    if isinstance(raw_counts, Mapping):
+        for tax_key in (
+            PARITY_EXACT_MATCH,
+            PARITY_EQUIVALENT_NORMALIZED,
+            PARITY_DIFFERENT_SEMANTICS,
+            PARITY_MISSING_FIELD,
+            PARITY_UNVERIFIED,
+            PARITY_UNSUPPORTED,
+        ):
+            if tax_key in raw_counts:
+                val = raw_counts[tax_key]
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    sanitized_counts[tax_key] = max(0, int(val))
+    sanitized["field_counts"] = sanitized_counts
+
+    # 5. Field comparisons (strictly monitored fields only, safe keys, sanitized notes)
+    raw_comps = report.get("field_comparisons")
+    sanitized_comps: dict[str, dict[str, str]] = {}
+    allowed_fields = set(SELLER_MONITORED_OFFERS_FIELDS) | set(
+        BUYER_MONITORED_OFFERS_FIELDS
+    )
+    if isinstance(raw_comps, Mapping):
+        for fld, fld_data in raw_comps.items():
+            if fld in allowed_fields and isinstance(fld_data, Mapping):
+                st = fld_data.get("status")
+                if st not in PARITY_LABELS:
+                    st = PARITY_UNVERIFIED
+                lbl = PARITY_LABELS.get(st, "Unverified")
+                raw_note = fld_data.get("note")
+                clean_note = (
+                    sanitize_diagnostic_string(str(raw_note))
+                    if raw_note is not None
+                    else ""
+                )
+                sanitized_comps[fld] = {
+                    "status": str(st),
+                    "label": str(lbl),
+                    "note": clean_note,
+                }
+    sanitized["field_comparisons"] = sanitized_comps
+
+    # 6. Baseline and Candidate summaries (safe numeric counts only)
+    for sum_key in ("baseline_summary", "candidate_summary"):
+        raw_sum = report.get(sum_key)
+        if isinstance(raw_sum, Mapping):
+            sanitized[sum_key] = {
+                "total_active_offers": max(
+                    0, int(raw_sum.get("total_active_offers") or 0)
+                ),
+                "items_with_offers": max(0, int(raw_sum.get("items_with_offers") or 0)),
+                "negotiations_count": max(
+                    0, int(raw_sum.get("negotiations_count") or 0)
+                ),
             }
-            continue
-        if isinstance(value, Mapping):
-            sanitized[key] = sanitize_offers_parity_report(value)
-        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            sanitized[key] = [
-                sanitize_diagnostic_string(v)
-                if isinstance(v, str)
-                else sanitize_offers_parity_report(v)
-                if isinstance(v, Mapping)
-                else v
-                for v in value
-            ]
-        elif isinstance(value, str):
-            sanitized[key] = sanitize_diagnostic_string(value)
-        else:
-            sanitized[key] = value
+
+    # 7. active_offers_by_item_id (strictly pseudonymized item IDs, integer counts)
+    raw_items = report.get("active_offers_by_item_id")
+    if isinstance(raw_items, Mapping):
+        sanitized_items: dict[str, int] = {}
+        for item_id, count in raw_items.items():
+            key_str = str(item_id)
+            clean_key = (
+                key_str
+                if key_str.startswith("item_")
+                else pseudonymize_identifier(key_str, prefix="item")
+            )
+            try:
+                clean_count = max(0, int(count))
+            except (ValueError, TypeError):
+                clean_count = 0
+            sanitized_items[clean_key] = clean_count
+        sanitized["active_offers_by_item_id"] = sanitized_items
+
+    # 8. Errors (default-deny: symbolic codes only, sanitized generic diagnostics, no raw payloads)
+    raw_errors = report.get("errors")
+    sanitized_errors: list[dict[str, str]] = []
+    if isinstance(raw_errors, Sequence) and not isinstance(raw_errors, (str, bytes)):
+        for err in raw_errors:
+            if not isinstance(err, Mapping):
+                sanitized_errors.append(
+                    {
+                        "code": "MALFORMED_ERROR",
+                        "diagnostic": "Malformed error object encountered in response",
+                    }
+                )
+                continue
+            raw_code = str(err.get("code") or "UNKNOWN_ERROR")
+            token_code = sanitize_diagnostic_token(raw_code, kind="error_code")
+            if (
+                token_code not in ALLOWED_SYMBOLIC_ERROR_CODES
+                and token_code not in ALLOWED_NUMERIC_ERROR_CODES
+            ):
+                token_code = "UNKNOWN_ERROR"
+
+            clean_err: dict[str, str] = {"code": token_code}
+            if "severity" in err:
+                sev = str(err["severity"])
+                if sev in ("Error", "Warning", "Info"):
+                    clean_err["severity"] = sev
+
+            raw_diag = err.get("diagnostic")
+            if raw_diag is not None:
+                clean_err["diagnostic"] = sanitize_diagnostic_string(str(raw_diag))
+            elif token_code in GENERIC_DIAGNOSTIC_MESSAGES:
+                clean_err["diagnostic"] = GENERIC_DIAGNOSTIC_MESSAGES[token_code]
+            else:
+                clean_err["diagnostic"] = "An error occurred during verification"
+
+            sanitized_errors.append(clean_err)
+    sanitized["errors"] = sanitized_errors
+
     return sanitized
 
 
@@ -2813,7 +3212,7 @@ def render_offers_parity_markdown(report: Mapping[str, Any]) -> str:
 
     for fld, info in sorted(comparisons.items()):
         lbl = info.get("label", info.get("status", "Unknown"))
-        note = info.get("note") or ""
+        note = (info.get("note") or "").replace("|", "-")
         lines.append(f"| `{fld}` | {lbl} | {note} |")
 
     errors = sanitized.get("errors", [])
