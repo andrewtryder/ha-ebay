@@ -200,3 +200,127 @@ Before migrating `WatchedItemData` or replacing `GetMyeBayBuying` in production 
 - [ ] **Watchlist Schema & Pagination Verification**: Run live `userWatchList(limit: 5)` query via GraphQL Explorer. Validate exact field names (`total`, `items`, `itemId`, `price`, `itemEndDate`, `image`).
 - [ ] **Bid Count Availability on Watchlist**: Check whether `bidCount` exists on auction items returned by `userWatchList` to avoid telemetry regression compared to `GetMyeBayBuying`.
 - [ ] **Sandbox Endpoint Accessibility**: Verify whether `https://graphqlapi.sandbox.ebay.com/graphql` responds to requests or if GraphQL is production-only.
+
+---
+
+## 7. Watchlist Capability Matrix & Reproducible Parity Harness (Milestone 1)
+
+### 7.1 Evidence-Based Watchlist Field Matrix
+
+| Monitored Field | Trading XML Source (`GetMyeBayBuying` `WatchList`) | Candidate GraphQL Source (`userWatchList`) | Offline Normalization Parity | Live API Status | Notes |
+|---|---|---|---|---|---|
+| `watched_count` | `len(WatchList/ItemArray/Item)` | `userWatchList.total` or `watchListCount` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | Official docs reference both `total` and `watchListCount` / `watchListMaximum`. |
+| `item_id` | `Item/ItemID` (`"123456789012"`) | `itemId` / `legacyItemId` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | `normalize_watchlist_item_id()` normalizes composite `v1\|123456789012\|0` to `"123456789012"`. |
+| `title` | `Item/Title` | `title` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | String title comparison. |
+| `current_price` | `Item/SellingStatus/CurrentPrice` (fallback `StartPrice`) | `price.value` / `currentPrice.amount` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | String decimal values normalize to `float`. |
+| `currency` | `CurrentPrice/@currencyID` | `price.currency` / `currencyCode` | **Exact match** (`exact_match`) | **[UNVERIFIED]** | ISO 4217 currency code. |
+| `listing_type` | `Item/ListingType` (`Chinese`, `FixedPriceItem`) | `formatType` / `buyingOptions` (`AUCTION`, `FIXED_PRICE`) | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | `normalize_listing_type_category()` maps both XML and GraphQL formats to `"auction"` or `"fixed_price"`. |
+| `end_time` | `Item/ListingDetails/EndTime` | `itemEndDate` / `endTime` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Parsed to UTC `datetime` via `parse_ebay_time()`. |
+| `url` | `Item/ListingDetails/ViewItemURL` | `itemWebUrl` / `itemUrl` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Canonical item URL matching strips tracking query parameters and title slugs. |
+| `image` | `Item/PictureDetails/GalleryURL` | `image.imageUrl` / `galleryUrl` | **Equivalent after normalization** (`equivalent_after_normalization`) | **[UNVERIFIED]** | Matches canonical eBay CDN asset hash across thumbnail resolutions (`s-l140` vs. `s-l500`). |
+| `bid_count` | `Item/SellingStatus/BidCount` | `bidCount` / `bids` | **Missing field / Unverified** (`missing_field` / `unverified`) | **[UNVERIFIED]** | Must verify live whether `userWatchList` exposes `bidCount` on watched auction items. |
+
+### 7.2 Completeness, Pagination, and Null-Coverage Safeguards
+
+**[LOCAL MOCK]** The Watchlist parity comparator (`custom_components/ebay/parsers/watchlist_parity.py`) enforces fail-closed evidence rules:
+
+1. **Allowlist-Based Diagnostic Error Reporting**:
+   - Reads the flattened diagnostic fields (`code`, `error_code`, `error_id`, `category`, `domain`) produced by `sanitize_graphql_errors()` (plus nested `extensions` fallback).
+   - Validates every diagnostic token against explicit allowlists (`ALLOWED_SYMBOLIC_ERROR_CODES`, `ALLOWED_NUMERIC_ERROR_CODES`, `ALLOWED_DIAGNOSTIC_CATEGORIES`, `ALLOWED_DIAGNOSTIC_DOMAINS`). Any unrecognized value—including strings shaped like account handles, 12-digit numeric item IDs, or secret tokens—is replaced with a generic label (`UNKNOWN_CODE`, `UNKNOWN_CATEGORY`, or `UNKNOWN_DOMAIN`), while recording `error_count` and `unrecognized_*_count`. Free-form `message` / `long_message` text is never included in shareable reports.
+   - Explicitly classifies `validation_error` (`VALIDATION_ERROR`), `permission_or_scope_error` (`INSUFFICIENT_SCOPE` / HTTP `403`), `auth_error` (`UNAUTHENTICATED` / HTTP `401`), `rate_limit` (`RATE_LIMITED` / HTTP `429`), `parse_error`, and `transport_error`.
+2. **Evidence-Ranked Probe Selection**:
+   - All executed probes are preserved in `report["probes"]`, and `rank_graphql_probe_candidate()` selects the best probe for parity comparison (`selected_probe_key`) ordered by: (1) completeness and pagination validity, (2) presence of usable item records, (3) monitored field coverage across retrieved items, and (4) custom vs. built-in preference only when evidence quality is comparable. A count-only custom query never overrides an item-bearing probe.
+3. **Completeness & Pagination Fail-Closed Rules**:
+   - Tracks `graphql_reported_total`, `graphql_raw_items_count`, `graphql_watched_count` (unique valid IDs), `duplicate_ids_count`, `missing_ids_count`, `graphql_truncated`, `graphql_complete`, and `pagination_status` (`complete`, `truncated`, `unverified`, `count_only`, `incomplete_identity`, `inconsistent_total`).
+   - A partial 1-page GraphQL response (e.g. `100` items fetched when `reported_total == 150`) is **never** classified as `equivalent_after_normalization` or `compared`. Instead, `status` is marked `inconclusive` and both `watched_count` and sample-matched item fields are downgraded to `unverified`.
+   - `xml_truncated=True` similarly blocks definitive parity conclusions.
+   - Built-in discovery probes execute a single page (`limit: 100, offset: 0`) to avoid uncontrolled pagination on unverified schemas. Once a paginated query contract is confirmed via `--query-file`, `--paginate-custom-query` enables bounded multi-page fetching (up to `MAX_PAGES`) that halts immediately if a page returns zero new unique IDs or encounters duplicate/missing IDs.
+4. **Missing-Field & Null-Coverage Evidence**:
+   - Items where a field is `null` in both Trading XML and GraphQL increment `both_absent_count` rather than `exact_match_count`.
+   - Each field reports `coverage` (`complete`, `partial`, or `none`). A field with partial non-null coverage (`both_absent_count > 0`) is downgraded to `unverified` so missing values never inflate parity confidence.
+5. **Resilient Partial-Source Failure Handling**:
+   - If the Trading XML `GetMyeBayBuying` call fails, the harness records `xml_available=False` and `xml_error_summary` without inventing parity results, while still running and reporting the GraphQL contract probes.
+
+### 7.3 Running the Read-Only Validation Harness & Explorer Custom Queries
+
+The validation harness (`scripts/validate_watchlist_parity.py`) makes **zero network calls** unless `--live` is explicitly supplied, and redacts all credentials, tokens, item IDs, titles, prices, and URLs from its output:
+
+```bash
+# 1. Offline synthetic demo (zero network calls, no credentials required):
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --synthetic-demo
+
+# 2. Recommended first live probe using a git-ignored .env.local file:
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --live \
+  --env-file .env.local \
+  --output watchlist_parity.local.md
+```
+
+#### Testing a Query from eBay's GraphQL Explorer (`--query-file` & `--variables-file`)
+
+If the built-in candidate probes return `VALIDATION_ERROR`, you can copy the working read-only query and variables directly from eBay's authenticated [GraphQL Explorer (`developer.ebay.com/my/api_test_tool`)](https://developer.ebay.com/my/api_test_tool):
+
+1. Save the query to a git-ignored file (e.g. `watchlist_query.local.graphql`). The query must select `userWatchList` at the top level (unaliased) to be eligible for field-by-field parity comparison, and must contain a single `query` operation (mutations and subscriptions are rejected before network dispatch).
+2. If the query uses GraphQL variables (e.g. `query GetWatchList($limit: Int!, $offset: Int)`), save the variables JSON object to `watchlist_vars.local.json` (e.g. `{"limit": 100, "offset": 0}`).
+3. Run the harness with `--query-file` and `--variables-file` (the single operation name is inferred automatically when `--operation-name` is omitted):
+
+```bash
+uv run --python 3.14 --with-requirements requirements-ha-current.txt \
+  python scripts/validate_watchlist_parity.py --live \
+  --env-file .env.local \
+  --query-file watchlist_query.local.graphql \
+  --variables-file watchlist_vars.local.json \
+  --output watchlist_parity.local.md
+```
+
+### 7.4 Credential Safety & Concurrent OAuth Refresh Considerations
+
+- **Never Commit Secrets or Fixtures**: `.env`, `.env.*`, `.storage/`, `*config_entries*`, `*.local.*`, and `watchlist_parity*.{md,json}` are git-ignored. Never commit or upload raw XML/GraphQL fixtures, `.env` files, or Home Assistant storage files.
+- **Preferred Local Credential Setup (`.env.local`)**:
+  - Prefer a dedicated git-ignored `.env.local` file containing either a short-lived `EBAY_ACCESS_TOKEN` (e.g. minted in the eBay Developer Portal / GraphQL Explorer, which avoids invoking any OAuth refresh call) or `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`, `EBAY_REFRESH_TOKEN`, and `EBAY_SITE_ID`.
+- **Risks of Independent OAuth Token Refresh While Home Assistant Is Running**:
+  - Avoid pointing `--ha-config-entries` directly at a live, running Home Assistant `.storage/core.config_entries` directory as your primary workflow.
+  - Although the harness opens `core.config_entries` strictly read-only and never modifies the file, invoking an independent OAuth `refresh_token` grant outside Home Assistant cannot persist any rotated refresh token or new access token back into Home Assistant's `OAuth2Session`. While eBay's standard refresh-token flow normally returns a new `access_token` without invalidating the existing `refresh_token`, if eBay ever rotates the refresh token during a standalone run, the running Home Assistant instance would hold a stale refresh token and require reauthorization.
+  - If `--ha-config-entries` is used against an offline copy, the harness reuses any non-expired cached `access_token` (>6 minutes remaining) before falling back to a token refresh, and requires `--ha-entry-id <entry_id>` whenever multiple `ebay` entries exist.
+
+---
+
+## 8. Live Production Validation Findings (October 29, 2026)
+
+On October 29, 2026, the maintainer completed the first authenticated read-only live validation run against eBay's production environment using `scripts/validate_watchlist_parity.py --live`.
+
+### 8.1 Observed Live Results vs. Assumptions
+
+To maintain strict scientific and engineering rigor, all observations are separated from working assumptions:
+
+| Test / Probe | Observed Fact | Working Assumption / Hypothesis | Verification Level |
+|---|---|---|---|
+| **GraphQL Handshake (`query Handshake { __typename }`)** | **HTTP 200 OK**, payload `{"data": {"__typename": "Query"}}`. | Handshake confirms endpoint URL (`https://graphqlapi.ebay.com/graphql`), OAuth Bearer token acceptance, and `X-EBAY-C-MARKETPLACE-ID: EBAY_US` header routing in production. | **[LIVE TESTED]** |
+| **Trading XML (`GetMyeBayBuying` `WatchList`)** | **Success**, `19` items returned, `xml_truncated: False`. | Trading XML remains fully operational and authoritative for the user's account under standard OAuth scopes. | **[LIVE TESTED]** |
+| **Count Schema Probe (`userWatchList { watchListCount watchListMaximum }`)** | **Schema Accepted (HTTP 200)**, but resolver returned `extensions: {"errorCode": "FORBIDDEN"}`. | `userWatchList` exists on `Query`, and `watchListCount` + `watchListMaximum` are real schema fields (matching eBay Watch List API documentation). However, resolver execution is forbidden for the current application/token. | **[LIVE TESTED]** |
+| **Candidate Item Probes (`total`, `items`, `watchlistItems`, pagination args)** | **HTTP 400 Bad Request**, payload `{"errors": [...]}`. | `total`, `items`, and `watchlistItems` are rejected by GraphQL schema validation on `WatchListOutput`. | **[LIVE TESTED]** |
+| **Item Collection & Field Parity** | **Unavailable**. All 10 parity fields (`watched_count`, `item_id`, `title`, `current_price`, `currency`, `listing_type`, `end_time`, `url`, `image`, `bid_count`) evaluated to **Unverified (`unverified`)** with `coverage: none`. | Parity between XML and GraphQL cannot be established while GraphQL resolver execution is forbidden. | **[LIVE TESTED]** |
+
+### 8.2 Watch List API Architecture & OAuth Scope Investigation
+
+1. **Official Watch List API Architecture**:
+   - Official eBay Developer documentation identifies the modernized Watch List API as the designated successor to Trading API `GetMyeBayBuying` (`WatchList`).
+   - The query `userWatchList` provides read access to a user's default watchlist.
+   - The fields `watchListCount` (integer count of items currently on the watchlist) and `watchListMaximum` (upper ceiling, typically 400 items) are documented companion fields on `userWatchList`, directly aligning with our live HTTP 200 schema acceptance.
+2. **OAuth Scope Investigation**:
+   - The candidate scope `https://api.ebay.com/oauth/api_scope/buy.watchlist.read` is documented in eBay developer documentation for **Watchlist Revision notifications** (specifically subscribing to the `WATCHLIST_REVISION` topic via the Commerce Notification API).
+   - **Candidate Only**: `buy.watchlist.read` is treated **strictly as a candidate for further investigation**, NOT as a verified scope for the GraphQL `userWatchList` query.
+   - **No Speculative Scope Additions**: Adding new OAuth scopes to the integration without verified necessity carries severe compatibility implications (requiring reauthorization of all existing users or risking token invalidation). No scopes will be added until eBay Developer documentation or Explorer tests confirm exact requirements.
+3. **Why Did `userWatchList` Return `FORBIDDEN`?**:
+   - Hypotheses under evaluation:
+     1. The `userWatchList` resolver requires an additional read scope beyond the base `https://api.ebay.com/oauth/api_scope` (e.g., `buy.watchlist.read` or another buyer-specific scope).
+     2. The `userWatchList` query is gated behind eBay Developer Program application tier permissions or partner entitlements.
+     3. The query requires specific input arguments or headers not yet identified.
+
+### 8.3 Architectural Conclusion & Roadmap Impact
+
+1. **No GraphQL Cutover Justified**: Because GraphQL item collection is unavailable and resolver execution is forbidden, **no data-source cutover is justified**.
+2. **Trading XML Remains Authoritative**: Existing Trading XML `GetMyeBayBuying` remains the sole authoritative data source for the Watchlist sensor and event entities.
+3. **Milestone 2 Blocked / Deferred**: Milestone 2 (GraphQL Watchlist Migration) is **BLOCKED** until the maintainer verifies authorization requirements in eBay's GraphQL Explorer or through official support.
+4. **Fail-Closed Verification**: The Milestone 1 parity harness successfully protected the integration from migrating to a broken or unauthorized GraphQL endpoint, proving the fail-closed design of the modernization roadmap.

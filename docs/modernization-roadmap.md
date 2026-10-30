@@ -17,9 +17,9 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | Milestone | Title | Branch | PR | Status |
 |---|---|---|---|---|
 | **Pre-Phase** | Simplified OAuth Onboarding (BYO Credentials) | `feat/simplify-ebay-oauth-onboarding` | [#92](https://github.com/andrewtryder/ha-ebay/pull/92) | **Merged** |
-| **Milestone 0** | Complete GraphQL Phase 0 & Resolve OAuth Lifecycle Issues | `feat/ebay-graphql-transport` | [#94](https://github.com/andrewtryder/ha-ebay/pull/94) | **In Review (Draft PR)** |
-| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | TBD | Planned (Blocked on Milestone 0 merge) |
-| **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | Planned |
+| **Milestone 0** | Complete GraphQL Phase 0 & Resolve OAuth Lifecycle Issues | `feat/ebay-graphql-transport` | [#94](https://github.com/andrewtryder/ha-ebay/pull/94) | **Merged** (`60f656f`) |
+| **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Live Run Complete (Draft PR)** |
+| **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | **BLOCKED / DEFERRED** (GraphQL resolver `FORBIDDEN`; Trading XML authoritative) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
 | **Milestone 4** | Bidding & Auction Activity Migration | `feat/ebay-graphql-bidding` | TBD | Planned |
 | **Milestone 5** | Active Seller Listings Migration | `feat/ebay-graphql-selling-active` | TBD | Planned |
@@ -54,14 +54,31 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 - **Schema Introspection**: Disabled on eBay's GraphQL endpoint (`__schema` / `__type` queries are unsupported).
 - **Read-Only Enforcement**: `validate_read_only_query()` strips string literals and comments, parses top-level definitions, enforces a single `query` operation (plus optional fragments), rejects `mutation` and `subscription` definitions anywhere in the document, and validates `operation_name` alignment before network dispatch.
 
+### 3. Watchlist Contract & Parity Harness (Milestone 1)
+- **Read-Only Opt-In Validation Tool**:
+  - Added [`custom_components/ebay/parsers/watchlist_parity.py`](../custom_components/ebay/parsers/watchlist_parity.py) and [`scripts/validate_watchlist_parity.py`](../scripts/validate_watchlist_parity.py).
+  - Makes **zero network calls** unless `--live` is explicitly passed.
+  - Independently runs read-only Trading XML (`GetMyeBayBuying` `WatchList`) and read-only GraphQL contract probes (`Handshake`, `GetWatchListTotal`, `GetWatchListCountAlt`, `GetUserWatchList`, `GetUserWatchListAlt`, or a custom `--query-file` + `--variables-file` with automatic single-operation inference).
+  - Preserves allowlisted symbolic and documented numeric GraphQL diagnostic codes (`code`, `error_code`, `category`, `domain`), replacing any unrecognized values with generic labels (`UNKNOWN_CODE`, `UNKNOWN_CATEGORY`, `UNKNOWN_DOMAIN`) and stripping all raw error messages, OAuth tokens, client secrets, item IDs, titles, prices, and URLs via `sanitize_parity_report()`.
+  - Selects the best probe for parity comparison (`rank_graphql_probe_candidate()`) by completeness/pagination validity, usable item records, and field coverage before applying custom-over-built-in preference.
+- **Evidence-Based Watchlist Field Classification & Fail-Closed Completeness**:
+  - Compares all 10 monitored Watchlist fields (`watched_count`, `item_id`, `title`, `current_price`, `currency`, `listing_type`, `end_time`, `url`, `image`, `bid_count`) using the 6 roadmap classifications (`exact_match`, `equivalent_after_normalization`, `different_semantics`, `missing_field`, `unverified`, `unsupported`).
+  - Fails closed (`status: "inconclusive"`, downgrading count and sample-matched fields to `unverified`) when either XML or GraphQL is truncated, only a partial page is retrieved, duplicate/missing item IDs occur, or non-null field coverage is partial (`both_absent_count > 0`).
+  - Handles XML or GraphQL failures resiliently without inventing parity results (`xml_available: False`).
+
 ---
 
-## Open Blockers & Unverified Contracts for Milestone 1
+## Open Blockers & Live Findings for Milestone 2
 
-1. **Live Schema & Scope Verification**:
-   - Candidate queries (`userWatchList`, `userBiddingActivity`, `sellerListingSearch` / `sellerListings`, `sellerNegotiationHistory`) and their exact argument/field names must be verified against an authenticated eBay account in Milestone 1.
-   - Verify whether base `api_scope` is sufficient or whether specific scopes (`buy.watchlist`, `buy.bidding`, `sell.inventory.readonly`, `sell.negotiation.readonly`) are required and grantable for standard developer keysets.
-2. **Sandbox GraphQL Availability**:
-   - `https://graphqlapi.sandbox.ebay.com/graphql` is configured by convention and remains unverified until live testing in Milestone 1.
-3. **Milestone 0 PR Review**:
-   - Milestone 1 awaits maintainer review and merge of Draft PR [#94](https://github.com/andrewtryder/ha-ebay/pull/94).
+1. **Live Production Validation Results (October 29, 2026)**:
+   - **Production Endpoint Handshake**: `query Handshake { __typename }` returned **HTTP 200 OK** (`{"data": {"__typename": "Query"}}`), live-verifying that `https://graphqlapi.ebay.com/graphql` accepts the user access token and marketplace headers in production.
+   - **Trading XML Authoritative**: `GetMyeBayBuying` (`WatchList`) returned **19 watched items** (complete, not truncated).
+   - **GraphQL Schema Validation**: `userWatchList { watchListCount watchListMaximum }` passed schema validation (HTTP 200), confirming field names match official Watch List API documentation. Candidate `total`, `items`, and pagination field layouts were rejected during schema validation (HTTP 400).
+   - **Resolver Authorization**: The `userWatchList` resolver returned `errorCode: "FORBIDDEN"`, indicating that `userWatchList` is not authorized for the user's current token/application credentials.
+   - **Parity Status**: All 10 monitored Watchlist fields remain **Unverified** (`unverified`).
+   - **Architectural Gate Result**: No GraphQL data-source cutover is justified. Trading XML `GetMyeBayBuying` remains authoritative. Milestone 2 (GraphQL Watchlist Migration) is **BLOCKED / DEFERRED** until scope/entitlement requirements are identified.
+2. **OAuth Scope & Entitlement Investigation**:
+   - The candidate scope `https://api.ebay.com/oauth/api_scope/buy.watchlist.read` is documented for Watchlist Revision notifications via Commerce Notification API. It is treated **strictly as a candidate for investigation**, NOT as a verified GraphQL query scope.
+   - Adding speculative OAuth scopes without verified necessity is prohibited because it carries breaking compatibility implications for existing users.
+3. **Sandbox GraphQL Availability**:
+   - `https://graphqlapi.sandbox.ebay.com/graphql` remains **[UNVERIFIED]** until probed with sandbox credentials.

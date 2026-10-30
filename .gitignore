@@ -1,4 +1,5 @@
 .env
+.env.*
 .venv/
 __pycache__/
 *.py[cod]
@@ -9,3 +10,9 @@ __pycache__/
 .DS_Store
 .devcontainer/ha-config/*
 !.devcontainer/ha-config/configuration.yaml
+.storage/
+*config_entries*
+*.local.*
+watchlist_parity*.json
+watchlist_parity*.md
+.parity_reports/
