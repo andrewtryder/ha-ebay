@@ -21,7 +21,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 1** | Safe Live eBay API Contract & Parity Test Harness | `feat/ebay-live-api-validation` | [#95](https://github.com/andrewtryder/ha-ebay/pull/95) | **Completed / Merged** (`14ce43f`; Live Run Complete, GraphQL Blocker Documented) |
 | **Milestone 2** | Implement GraphQL Watchlist Normalization | `feat/ebay-graphql-watchlist` | TBD | **BLOCKED / DEFERRED** (GraphQL resolver `FORBIDDEN`; Trading XML authoritative) |
 | **Milestone 3** | Migrate Watchlist Carefully | `feat/ebay-watchlist-cutover` | TBD | Planned |
-| **Milestone 4** | Bidding & Auction Activity Migration | `feat/ebay-graphql-bidding` | TBD | Planned |
+| **Milestone 4** | Auction & Bidding Modernization Preparation & Parity Harness | `feat/ebay-auction-validation` | Draft PR | **In Progress** (Parity Harness & API Feasibility Research Complete) |
 | **Milestone 5** | Active Seller Listings Migration | `feat/ebay-graphql-selling-active` | TBD | Planned |
 | **Milestone 6** | Best Offers & Negotiation History | `feat/ebay-graphql-offers` | TBD | Planned |
 | **Milestone 7** | Sold / Unsold Listing Classification | `feat/ebay-modern-sold-unsold` | TBD | Planned |
@@ -73,6 +73,20 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Compares all 10 monitored Watchlist fields (`watched_count`, `item_id`, `title`, `current_price`, `currency`, `listing_type`, `end_time`, `url`, `image`, `bid_count`) using the 6 roadmap classifications (`exact_match`, `equivalent_after_normalization`, `different_semantics`, `missing_field`, `unverified`, `unsupported`).
   - Fails closed (`status: "inconclusive"`, downgrading count and sample-matched fields to `unverified`) when either XML or GraphQL is truncated, only a partial page is retrieved, duplicate/missing item IDs occur, or non-null field coverage is partial (`both_absent_count > 0`).
   - Handles XML or GraphQL failures resiliently without inventing parity results (`xml_available: False`).
+
+### 4. Auction & Bidding Modernization Preparation (Milestone 4)
+- **Modern API Feasibility Research (Milestones 2–8)**:
+  - Conducted extensive official API research and documented modern replacements across all remaining roadmap milestones in [`docs/api-migration-feasibility.md`](api-migration-feasibility.md).
+  - Identified that Trading XML `GetMyeBayBuying` (`BidList`) is designated for replacement by eBay GraphQL `userBiddingActivity` / `itemBiddingActivity` (Buy Auction API) or Buy Offer REST API (`/buy/offer/v1_beta/bidding/{item_id}`).
+  - Documented that `GetMyeBayBuying` (`LostList`) is deprecated with no modern replacement, while `GetFeedback` and `GetMemberMessages` have no direct modern equivalents.
+- **Read-Only Auction & Bidding Parity Validation Module**:
+  - Added [`custom_components/ebay/parsers/bidding_parity.py`](../custom_components/ebay/parsers/bidding_parity.py) and CLI harness [`scripts/validate_bidding_parity.py`](../scripts/validate_bidding_parity.py).
+  - Makes **zero network calls** unless `--live` is explicitly passed.
+  - Compares all 12 monitored bidding fields (`bidding_count`, `item_id`, `title`, `current_price`, `currency`, `max_bid`, `winning`, `bid_count`, `end_time`, `listing_type`, `url`, `image`) using the 6-state taxonomy.
+  - Normalizes composite eBay item IDs (`v1|...|...`), string monetary amounts, case-insensitive currencies, and UTC timestamps.
+  - Strictly enforces fail-closed completeness: truncated XML, truncated GraphQL, unreconciled items, missing IDs, or duplicates mark fields `unverified` and status `inconclusive`.
+  - Enforces privacy-safe error sanitization and completely scrubs tokens, secrets, private item titles, IDs, prices, bids, and URLs from reports.
+  - Production Trading XML `GetMyeBayBuying` (`BidList`) remains 100% authoritative in Home Assistant; no live entities or polling modified.
 
 ---
 

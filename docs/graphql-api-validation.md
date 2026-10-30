@@ -324,3 +324,61 @@ To maintain strict scientific and engineering rigor, all observations are separa
 2. **Trading XML Remains Authoritative**: Existing Trading XML `GetMyeBayBuying` remains the sole authoritative data source for the Watchlist sensor and event entities.
 3. **Milestone 2 Blocked / Deferred**: Milestone 2 (GraphQL Watchlist Migration) is **BLOCKED** until the maintainer verifies authorization requirements in eBay's GraphQL Explorer or through official support.
 4. **Fail-Closed Verification**: The Milestone 1 parity harness successfully protected the integration from migrating to a broken or unauthorized GraphQL endpoint, proving the fail-closed design of the modernization roadmap.
+
+---
+
+## 9. Auction and Bidding Modernization Architecture (Milestone 4)
+
+Milestone 4 establishes the validation architecture and offline contract testing for modernizing active bidding and auction tracking (`custom_components/ebay/parsers/bidding_parity.py` and `scripts/validate_bidding_parity.py`).
+
+### 9.1 Bidding Candidate Queries & Endpoints
+
+| Candidate Operation | Type / Protocol | Documented Role | Status & Verification Level |
+|---|---|---|---|
+| `query GetUserBiddingActivity { userBiddingActivity { total items { ... } } }` | eBay GraphQL | Modern replacement for Trading XML `GetMyeBayBuying` (`BidList`). | **[UNVERIFIED]** (Awaiting maintainer Explorer probe) |
+| `query GetItemBiddingActivity($itemId: String!) { itemBiddingActivity(itemId: $itemId) { ... } }` | eBay GraphQL | Item-level auction bidding activity inquiry. | **[UNVERIFIED]** |
+| `GET /buy/offer/v1_beta/bidding/{item_id}` | Buy Offer REST API | Item-level bidding activity REST endpoint (Limited Release). | **[OFFICIAL SPEC]** (Limited Release; requires partner approval) |
+| `GetMyeBayBuying` (`BidList`) | Trading XML | Active production source for bidding sensors and outbid events. | **[LIVE TESTED]** (Authoritative production source) |
+
+### 9.2 Maintainer Explorer Testing Instructions & Decision Tree
+
+Maintainers with authenticated access can test candidate bidding probes safely via the eBay Developer Portal GraphQL Explorer or local CLI harness:
+
+1. **Step 1: Handshake & Schema Probe**:
+   ```graphql
+   query GetBiddingTotal {
+     userBiddingActivity {
+       total
+     }
+   }
+   ```
+   - **If HTTP 200 with integer `total`**: Schema and resolver authorization are confirmed. Proceed to Step 2.
+   - **If resolver returns `errorCode: "FORBIDDEN"`**: Bidding GraphQL access requires additional developer tier entitlements or buyer OAuth scopes. Retain Trading XML as authoritative.
+   - **If HTTP 400 Validation Error**: Field name mismatch; test alternative fields (`biddingCount`, `activeBiddingCount`, `bids`).
+
+2. **Step 2: Full Collection Probe**:
+   ```graphql
+   query GetUserBiddingActivity($limit: Int, $offset: Int) {
+     userBiddingActivity(limit: $limit, offset: $offset) {
+       total
+       items {
+         itemId
+         title
+         currentPrice { value currency }
+         maxBid { value currency }
+         winning
+         bidCount
+         itemEndDate
+         itemWebUrl
+         image { imageUrl }
+         formatType
+       }
+     }
+   }
+   ```
+
+3. **Decision Tree for Production Cutover**:
+   - **Gate 1 (Authorization)**: Must return HTTP 200 with non-null `userBiddingActivity` data under standard user token.
+   - **Gate 2 (Completeness)**: Retrieved items must match XML count exactly (`common_items_count == xml_bidding_count`), with zero missing or duplicate IDs.
+   - **Gate 3 (Field Parity)**: All 12 monitored fields (`bidding_count`, `item_id`, `title`, `current_price`, `currency`, `max_bid`, `winning`, `bid_count`, `end_time`, `listing_type`, `url`, `image`) must classify as `exact_match` or `equivalent_after_normalization`.
+   - **Fail-Closed Rule**: If any gate fails, Trading XML `GetMyeBayBuying` (`BidList`) remains 100% authoritative in Home Assistant.
