@@ -130,6 +130,13 @@ uv run python scripts/validate_legacy_fields_parity.py \
   --rest-fixture tests/fixtures/identity_user.json
 ```
 
+### 5.3 Trust Boundaries & Fail-Closed Parity Guarantees
+
+1. **Exact XML Qualified Structure Enforcement:** `normalize_trading_xml_get_user()` requires the exact qualified root `{urn:ebay:apis:eBLBaseComponents}GetUserResponse`. It strictly rejects suffix-smuggled tags (`<EvilGetUserResponse>`), unqualified bare roots (`<GetUserResponse>`), foreign namespaces, and nested or multiple impostor `User` elements.
+2. **Malformed Error Envelope Rejection:** REST and GraphQL normalizers reject non-list error containers (e.g. dicts, strings, integers in `errors` or `error`) fail-closed even when payloads contain otherwise valid identity fields.
+3. **Separation of Username Parity from Authenticated Continuity:** Offline comparisons distinguish public handle matching (`username_matches=True`) from authenticated principal continuity (`account_continuity_verified=False`). Synthetic fixtures, copied booleans, or arbitrary provenance strings cannot certify cross-provider identity binding. Conflicting account IDs fail closed (`ACCOUNT_ID_CONFLICT`).
+4. **Intrinsically Fail-Closed Report Sanitization:** `sanitize_identity_parity_report()` clamps `migration_readiness` to `blocked` and `account_continuity_verified` to `False` regardless of external dictionary input, enforcing the M8 validation-only milestone boundary.
+
 ---
 
 ## 6. Roadmap Transition to Milestone 9

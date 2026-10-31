@@ -194,6 +194,84 @@ def test_normalize_trading_xml_root_and_namespace_enforcement() -> None:
     assert "XML_NAMESPACE_MISMATCH" in res2.errors
 
 
+def test_normalize_trading_xml_input_type_and_empty_failures() -> None:
+    """Trading XML normalizer fails closed on empty, malformed, or invalid input types."""
+    assert "EMPTY_XML_PAYLOAD" in normalize_trading_xml_get_user("").errors
+    assert "EMPTY_XML_PAYLOAD" in normalize_trading_xml_get_user(b"   ").errors
+    assert "MALFORMED_XML" in normalize_trading_xml_get_user("<unclosed").errors
+    assert (
+        "INVALID_XML_INPUT_TYPE" in normalize_trading_xml_get_user(12345).errors  # type: ignore[arg-type]
+    )
+
+
+def test_normalize_graphql_user_branches() -> None:
+    """Test GraphQL viewer vs user object and missing data container branches."""
+    # User object instead of viewer
+    user_payload = {
+        "data": {
+            "user": {
+                "id": "urn:ebay:user:user_branch",
+                "username": "user_branch",
+                "accountType": "INDIVIDUAL",
+            }
+        }
+    }
+    res_user = normalize_graphql_user(user_payload)
+    assert res_user.is_complete is True
+    assert res_user.identity is not None
+    assert res_user.identity.username == "user_branch"
+    assert res_user.identity.account_type == AccountType.INDIVIDUAL
+
+    # Missing data object
+    res_no_data = normalize_graphql_user({})
+    assert "MISSING_DATA_OBJECT" in res_no_data.errors
+
+    # Missing viewer or user object
+    res_no_viewer = normalize_graphql_user({"data": {"other": {}}})
+    assert "MISSING_VIEWER_OR_USER_OBJECT" in res_no_viewer.errors
+
+
+def test_compare_identity_snapshots_missing_username_branches() -> None:
+    """Test branches where XML or modern identity lacks username."""
+    xml_no_user = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(username=None),
+        is_complete=False,
+    )
+    mod_with_user = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(username="mod_user"),
+        is_complete=True,
+    )
+    rep1 = compare_identity_snapshots(xml_no_user, mod_with_user)
+    assert rep1["fields"]["username"]["status"] == PARITY_MISSING_FIELD
+
+    xml_with_user = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(username="xml_user"),
+        is_complete=True,
+    )
+    mod_no_user = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(username=None),
+        is_complete=False,
+    )
+    rep2 = compare_identity_snapshots(xml_with_user, mod_no_user)
+    assert rep2["fields"]["username"]["status"] == PARITY_MISSING_FIELD
+    assert "MISSING_OR_INVALID_USERNAME" in rep2["blocking_reasons"]
+
+
+def test_sanitize_identity_parity_report_warning_and_unknown_blocking() -> None:
+    """Test sanitizing warnings and unknown blocking reason codes."""
+    raw = {
+        "xml_source": "trading_xml_get_user",
+        "modern_source": "rest_identity_get_user",
+        "blocking_reasons": ["UNKNOWN_CUSTOM_ERROR", "TOKEN_EXPIRED"],
+        "warnings": ["RATE_LIMITED", "UNKNOWN_WARN_CODE"],
+    }
+    sanitized = sanitize_identity_parity_report(raw)
+    assert "BLOCKED_UNKNOWN" in sanitized["blocking_reasons"]
+    assert "TOKEN_EXPIRED" in sanitized["blocking_reasons"]
+    assert "RATE_LIMITED" in sanitized["warnings"]
+    assert "UNKNOWN_WARN_CODE" not in sanitized["warnings"]
+
+
 def test_normalize_trading_xml_ack_enforcement() -> None:
     """Reject Failure, PartialFailure, missing, or unknown Ack."""
     # Ack=Failure
@@ -907,3 +985,277 @@ def test_parse_dotenv_file(tmp_path: Path) -> None:
     assert parsed["KEY2"] == "value2"
     assert parsed["KEY3"] == "value3"
     assert "INVALID" not in parsed
+
+
+# ---------------------------------------------------------------------------
+# Adversarial Security & Trust-Boundary Tests (Review 5722226679)
+# ---------------------------------------------------------------------------
+def test_normalize_trading_xml_suffix_smuggling_and_unqualified() -> None:
+    """Trading XML root must reject suffix-smuggling, unqualified roots, and foreign namespaces."""
+    # 1. Suffix smuggling with eBay namespace
+    smuggle_qualified = f"""<EvilGetUserResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Success</Ack>
+      <User><UserID>impostor</UserID></User>
+    </EvilGetUserResponse>"""
+    res1 = normalize_trading_xml_get_user(smuggle_qualified)
+    assert res1.is_complete is False
+    assert "INVALID_XML_ROOT" in res1.errors
+
+    # 2. Suffix smuggling without namespace
+    smuggle_unqualified = """<EvilGetUserResponse>
+      <Ack>Success</Ack>
+      <User><UserID>impostor</UserID></User>
+    </EvilGetUserResponse>"""
+    res2 = normalize_trading_xml_get_user(smuggle_unqualified)
+    assert res2.is_complete is False
+    assert "INVALID_XML_ROOT" in res2.errors
+
+    # 3. Bare unqualified GetUserResponse
+    bare_unqualified = """<GetUserResponse>
+      <Ack>Success</Ack>
+      <User><UserID>impostor</UserID></User>
+    </GetUserResponse>"""
+    res3 = normalize_trading_xml_get_user(bare_unqualified)
+    assert res3.is_complete is False
+    assert "XML_NAMESPACE_MISMATCH" in res3.errors
+
+    # 4. Foreign namespace with GetUserResponse
+    foreign_ns = """<foreign:GetUserResponse xmlns:foreign="http://attacker.example.com/ns">
+      <foreign:Ack>Success</foreign:Ack>
+      <foreign:User><foreign:UserID>impostor</foreign:UserID></foreign:User>
+    </foreign:GetUserResponse>"""
+    res4 = normalize_trading_xml_get_user(foreign_ns)
+    assert res4.is_complete is False
+    assert "XML_NAMESPACE_MISMATCH" in res4.errors
+
+
+def test_normalize_trading_xml_nested_and_multiple_impostor_users() -> None:
+    """Trading XML must reject multiple or nested User elements."""
+    # Multiple direct User elements
+    multi_users = f"""<GetUserResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Success</Ack>
+      <User><UserID>user1</UserID></User>
+      <User><UserID>user2</UserID></User>
+    </GetUserResponse>"""
+    res1 = normalize_trading_xml_get_user(multi_users)
+    assert res1.is_complete is False
+    assert "INVALID_XML_ROOT" in res1.errors
+
+    # Nested impostor User element inside container
+    nested_user = f"""<GetUserResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Success</Ack>
+      <User><UserID>real_user</UserID></User>
+      <AttackerContainer>
+        <User><UserID>impostor_user</UserID></User>
+      </AttackerContainer>
+    </GetUserResponse>"""
+    res2 = normalize_trading_xml_get_user(nested_user)
+    assert res2.is_complete is False
+    assert "INVALID_XML_ROOT" in res2.errors
+
+    # Missing direct User element with only nested impostor
+    only_nested = f"""<GetUserResponse xmlns="{EBAY_XML_NS}">
+      <Ack>Success</Ack>
+      <AttackerContainer>
+        <User><UserID>impostor_user</UserID></User>
+      </AttackerContainer>
+    </GetUserResponse>"""
+    res3 = normalize_trading_xml_get_user(only_nested)
+    assert res3.is_complete is False
+    assert "MISSING_USER_ELEMENT" in res3.errors
+
+
+def test_normalize_rest_identity_malformed_errors_containers() -> None:
+    """REST Identity normalizer must fail closed on dict, string, and unexpected errors values."""
+    # errors as a mapping
+    res_dict = normalize_rest_identity_get_user(
+        {
+            "userId": "123",
+            "username": "alpha",
+            "errors": {"code": 500, "message": "Backend failure"},
+        }
+    )
+    assert res_dict.is_complete is False
+    assert "REST_API_ERROR" in res_dict.errors
+
+    # errors as a string
+    res_str = normalize_rest_identity_get_user(
+        {"userId": "123", "username": "alpha", "errors": "An unexpected error occurred"}
+    )
+    assert res_str.is_complete is False
+    assert "REST_API_ERROR" in res_str.errors
+
+    # errors as an int/unexpected type
+    res_int = normalize_rest_identity_get_user(
+        {"userId": "123", "username": "alpha", "errors": 403}
+    )
+    assert res_int.is_complete is False
+    assert "REST_API_ERROR" in res_int.errors
+
+    # error (singular) as a string (OAuth format)
+    res_oauth_str = normalize_rest_identity_get_user(
+        {"userId": "123", "username": "alpha", "error": "invalid_grant"}
+    )
+    assert res_oauth_str.is_complete is False
+    assert "REST_API_ERROR" in res_oauth_str.errors
+
+    # error (singular) as a mapping
+    res_oauth_dict = normalize_rest_identity_get_user(
+        {
+            "userId": "123",
+            "username": "alpha",
+            "error": {"error_description": "Token expired"},
+        }
+    )
+    assert res_oauth_dict.is_complete is False
+    assert "REST_API_ERROR" in res_oauth_dict.errors
+
+
+def test_normalize_graphql_malformed_errors_containers() -> None:
+    """GraphQL normalizer must fail closed on dict, string, and unexpected errors values."""
+    # errors as a mapping
+    res_dict = normalize_graphql_user(
+        {
+            "data": {"viewer": {"id": "1", "username": "u"}},
+            "errors": {"message": "Access denied"},
+        }
+    )
+    assert res_dict.is_complete is False
+    assert "GRAPHQL_API_ERROR" in res_dict.errors
+
+    # errors as a string
+    res_str = normalize_graphql_user(
+        {
+            "data": {"viewer": {"id": "1", "username": "u"}},
+            "errors": "Query execution halted",
+        }
+    )
+    assert res_str.is_complete is False
+    assert "GRAPHQL_API_ERROR" in res_str.errors
+
+    # errors as an int
+    res_int = normalize_graphql_user(
+        {
+            "data": {"viewer": {"id": "1", "username": "u"}},
+            "errors": 500,
+        }
+    )
+    assert res_int.is_complete is False
+    assert "GRAPHQL_API_ERROR" in res_int.errors
+
+
+def test_compare_identity_snapshots_arbitrary_provenance_and_forged_flags() -> None:
+    """Arbitrary provenance strings and forged verification booleans cannot certify continuity."""
+    # Provenance source not in TRUSTED_LIVE_PROVENANCE_SOURCES
+    ev_pretend = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="urn:ebay:user:123",
+        token_binding_verified=True,
+        provenance_source="pretend_live",
+    )
+    res_xml = normalize_trading_xml_get_user(
+        f'<GetUserResponse xmlns="{EBAY_XML_NS}"><Ack>Success</Ack><User><UserID>alpha</UserID></User></GetUserResponse>',
+        evidence=ev_pretend,
+    )
+    assert res_xml.account_verified is False
+    assert res_xml.identity is not None
+    assert res_xml.identity.evidence_level == "unverified_offline"
+
+    # Handcrafted snapshots with account_verified=True
+    snap_xml = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(
+            username="same_user",
+            account_type=AccountType.BUSINESS,
+            source="trading_xml_get_user",
+        ),
+        is_complete=True,
+        username="same_user",
+        account_verified=True,
+    )
+    snap_mod = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(
+            user_id="urn:ebay:user:123",
+            username="same_user",
+            account_type=AccountType.BUSINESS,
+            source="rest_identity_get_user",
+        ),
+        is_complete=True,
+        account_id="urn:ebay:user:123",
+        username="same_user",
+        account_verified=True,
+        entitlement_verified=True,
+    )
+
+    report = compare_identity_snapshots(snap_xml, snap_mod)
+    # Authenticated continuity must remain False in M8 validation
+    assert report["account_continuity_verified"] is False
+    assert report["migration_readiness"] == "blocked"
+    assert "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" in report["blocking_reasons"]
+    # Username parity is verified independently
+    assert report["username_matches"] is True
+    assert report["fields"]["username"]["status"] == PARITY_EXACT_MATCH
+
+
+def test_compare_identity_snapshots_conflicting_account_ids() -> None:
+    """When both snapshots supply conflicting account IDs, fail closed with ACCOUNT_ID_CONFLICT."""
+    snap_xml = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(
+            username="same_user",
+            source="trading_xml_get_user",
+        ),
+        is_complete=True,
+        account_id="urn:ebay:user:TRUSTED_ACCOUNT_A",
+        username="same_user",
+    )
+    snap_mod = IdentityCollectionResult(
+        identity=NormalizedAccountIdentity(
+            user_id="urn:ebay:user:TRUSTED_ACCOUNT_B",
+            username="same_user",
+            source="rest_identity_get_user",
+        ),
+        is_complete=True,
+        account_id="urn:ebay:user:TRUSTED_ACCOUNT_B",
+        username="same_user",
+    )
+
+    report = compare_identity_snapshots(snap_xml, snap_mod)
+    assert "ACCOUNT_ID_CONFLICT" in report["blocking_reasons"]
+    assert report["account_continuity_verified"] is False
+    assert report["migration_readiness"] == "blocked"
+
+
+def test_sanitize_and_render_fabricated_ready_reports() -> None:
+    """Report sanitization and renderers must clamp fabricated READY reports to BLOCKED."""
+    fabricated = {
+        "migration_readiness": "ready",
+        "account_continuity_verified": True,
+        "username_matches": True,
+        "blocking_reasons": [],
+        "xml_source": "trading_xml_get_user",
+        "modern_source": "rest_identity_get_user",
+    }
+
+    sanitized = sanitize_identity_parity_report(fabricated)
+    assert sanitized["migration_readiness"] == "blocked"
+    assert sanitized["account_continuity_verified"] is False
+    assert "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" in sanitized["blocking_reasons"]
+    assert sanitized["username_matches"] is True
+
+    # Markdown renderer
+    md = render_identity_parity_markdown(fabricated)
+    assert "- **Account Continuity Verified:** `No`" in md
+    assert "- **Migration Readiness:** `BLOCKED`" in md
+    assert "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" in md
+
+    # JSON renderer
+    json_out = render_identity_parity_json(fabricated)
+    parsed = json.loads(json_out)
+    assert parsed["migration_readiness"] == "blocked"
+    assert parsed["account_continuity_verified"] is False
+    assert "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" in parsed["blocking_reasons"]
+
+    # Non-dict fallback
+    non_dict = sanitize_identity_parity_report("not a dict")  # type: ignore[arg-type]
+    assert non_dict["migration_readiness"] == "blocked"
+    assert non_dict["account_continuity_verified"] is False
+    assert "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" in non_dict["blocking_reasons"]

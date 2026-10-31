@@ -23,9 +23,8 @@ from ..clients.graphql import (
     _strip_graphql_strings_and_comments,
     validate_read_only_query,
 )
-from ..const import EBAY_XML_NS, NS
+from ..const import EBAY_XML_NS
 from .xml import (
-    _text,
     _to_int,
     parse_ebay_time,
 )
@@ -248,6 +247,8 @@ EBAY_SITE_TO_MARKETPLACE: dict[str, str] = {
     "India": "EBAY_IN",
 }
 
+TRUSTED_LIVE_PROVENANCE_SOURCES: frozenset[str] = frozenset({"live_oauth_token"})
+
 MAX_IDENTITY_PAGES = 25
 COMMERCE_IDENTITY_READONLY_SCOPE = (
     "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly"
@@ -465,22 +466,43 @@ def normalize_trading_xml_get_user(
             is_complete=False,
         )
 
-    # 1. Enforce GetUserResponse root element
-    if not (root.tag.endswith("GetUserResponse") or root.tag == "GetUserResponse"):
+    # 1. Enforce exact GetUserResponse root element with required qualified namespace
+    expected_root_tag = f"{{{EBAY_XML_NS}}}GetUserResponse"
+    if root.tag != expected_root_tag:
+        if root.tag.startswith("{"):
+            parts = root.tag[1:].split("}", 1)
+            ns = parts[0]
+            local = parts[1] if len(parts) > 1 else ""
+            if local != "GetUserResponse":
+                return IdentityCollectionResult(
+                    errors=("INVALID_XML_ROOT",),
+                    is_complete=False,
+                )
+            if ns != EBAY_XML_NS:
+                return IdentityCollectionResult(
+                    errors=("XML_NAMESPACE_MISMATCH",),
+                    is_complete=False,
+                )
+        else:
+            # Unqualified root (missing required namespace)
+            if root.tag != "GetUserResponse":
+                return IdentityCollectionResult(
+                    errors=("INVALID_XML_ROOT",),
+                    is_complete=False,
+                )
+            return IdentityCollectionResult(
+                errors=("XML_NAMESPACE_MISMATCH",),
+                is_complete=False,
+            )
+
+    # 2. Check Ack status in expected namespace
+    ack_elem = root.find(f"{{{EBAY_XML_NS}}}Ack")
+    if ack_elem is None or not ack_elem.text:
         return IdentityCollectionResult(
-            errors=("INVALID_XML_ROOT",),
+            errors=("XML_ACK_MISSING_OR_UNKNOWN",),
             is_complete=False,
         )
-
-    # 2. Enforce standard namespace if qualified
-    if root.tag.startswith("{") and not root.tag.startswith(f"{{{EBAY_XML_NS}}}"):
-        return IdentityCollectionResult(
-            errors=("XML_NAMESPACE_MISMATCH",),
-            is_complete=False,
-        )
-
-    # 3. Check Ack status
-    ack = (_text(root, "Ack") or _text(root, "e:Ack") or "").strip()
+    ack = ack_elem.text.strip()
     if ack == "Failure":
         return IdentityCollectionResult(
             errors=("XML_ACK_FAILURE",),
@@ -497,17 +519,16 @@ def normalize_trading_xml_get_user(
             is_complete=False,
         )
 
-    # 4. Check for fatal error containers even alongside Ack=Success/Warning
-    errors_elem = root.findall("e:Errors", NS) or root.findall("Errors")
-    for err_container in errors_elem:
+    # 3. Check for fatal error containers even alongside Ack=Success/Warning
+    errors_elems = [e for e in root.iter() if e.tag.endswith("Errors")]
+    for err_container in errors_elems:
+        sev_elem = err_container.find(f"{{{EBAY_XML_NS}}}SeverityCode")
+        if sev_elem is None:
+            sev_elem = err_container.find("SeverityCode")
         severity = (
-            (
-                _text(err_container, "e:SeverityCode")
-                or _text(err_container, "SeverityCode")
-                or ""
-            )
-            .strip()
-            .lower()
+            (sev_elem.text or "").strip().lower()
+            if sev_elem is not None and sev_elem.text
+            else ""
         )
         if severity == "error":
             return IdentityCollectionResult(
@@ -515,69 +536,84 @@ def normalize_trading_xml_get_user(
                 is_complete=False,
             )
 
-    # 5. Locate User element
-    user_elem = (
-        root.find("e:User", NS)
-        if root.find("e:User", NS) is not None
-        else root.find("User")
-    )
-    if user_elem is None:
+    # 4. Locate direct User element in expected namespace
+    direct_users = root.findall(f"{{{EBAY_XML_NS}}}User")
+    if len(direct_users) != 1:
+        if len(direct_users) == 0:
+            return IdentityCollectionResult(
+                errors=("MISSING_USER_ELEMENT",),
+                is_complete=False,
+            )
         return IdentityCollectionResult(
-            errors=("MISSING_USER_ELEMENT",),
+            errors=("INVALID_XML_ROOT",),
             is_complete=False,
         )
 
-    # 6. UserID is required and must be non-empty
-    raw_user_id = _text(user_elem, "e:UserID") or _text(user_elem, "UserID")
-    username = raw_user_id.strip() if raw_user_id else None
+    user_elem = direct_users[0]
+
+    # Reject structurally inconsistent XML with nested or impostor User elements
+    all_users = [
+        e
+        for e in root.iter()
+        if e.tag == f"{{{EBAY_XML_NS}}}User" or e.tag.endswith("User")
+    ]
+    if len(all_users) != 1:
+        return IdentityCollectionResult(
+            errors=("INVALID_XML_ROOT",),
+            is_complete=False,
+        )
+
+    # 5. UserID is required and must be non-empty direct child in expected namespace
+    userid_elem = user_elem.find(f"{{{EBAY_XML_NS}}}UserID")
+    if userid_elem is None or not userid_elem.text:
+        return IdentityCollectionResult(
+            errors=("MISSING_USER_ID",),
+            is_complete=False,
+        )
+    username = userid_elem.text.strip()
     if not username:
         return IdentityCollectionResult(
             errors=("MISSING_USER_ID",),
             is_complete=False,
         )
 
-    # 7. Safe parsing of optional numerical metrics
+    # 6. Safe parsing of optional numerical metrics
     feedback_score = None
-    raw_fb = _text(user_elem, "e:FeedbackScore") or _text(user_elem, "FeedbackScore")
-    if raw_fb:
+    fb_elem = user_elem.find(f"{{{EBAY_XML_NS}}}FeedbackScore")
+    if fb_elem is not None and fb_elem.text:
         try:
-            feedback_score = _to_int(raw_fb)
+            feedback_score = _to_int(fb_elem.text.strip())
         except (ValueError, TypeError):
             pass
 
     positive_feedback_percent = None
-    pos_feedback_raw = _text(user_elem, "e:PositiveFeedbackPercent") or _text(
-        user_elem, "PositiveFeedbackPercent"
-    )
-    if pos_feedback_raw:
+    pos_fb_elem = user_elem.find(f"{{{EBAY_XML_NS}}}PositiveFeedbackPercent")
+    if pos_fb_elem is not None and pos_fb_elem.text:
         try:
-            positive_feedback_percent = float(pos_feedback_raw)
+            positive_feedback_percent = float(pos_fb_elem.text.strip())
         except (ValueError, TypeError):
             pass
 
-    reg_date_raw = _text(user_elem, "e:RegistrationDate") or _text(
-        user_elem, "RegistrationDate"
-    )
-    reg_date = parse_ebay_time(reg_date_raw) if reg_date_raw else None
+    reg_date = None
+    reg_elem = user_elem.find(f"{{{EBAY_XML_NS}}}RegistrationDate")
+    if reg_elem is not None and reg_elem.text:
+        reg_date = parse_ebay_time(reg_elem.text.strip())
 
-    # 8. Site to registration marketplace resolution using documented mapping
-    site = _text(user_elem, "e:Site") or _text(user_elem, "Site")
+    # 7. Site to registration marketplace resolution using documented mapping
+    site_elem = user_elem.find(f"{{{EBAY_XML_NS}}}Site")
+    site = site_elem.text.strip() if site_elem is not None and site_elem.text else None
     marketplace_id: str | None = None
     if site:
-        site_clean = site.strip()
-        marketplace_id = EBAY_SITE_TO_MARKETPLACE.get(site_clean)
-        if marketplace_id is None and site_clean.startswith("EBAY_"):
-            marketplace_id = site_clean
+        marketplace_id = EBAY_SITE_TO_MARKETPLACE.get(site)
+        if marketplace_id is None and site.startswith("EBAY_"):
+            marketplace_id = site
 
-    seller_business_type = (
-        (
-            _text(user_elem, "e:SellerInfo/e:SellerBusinessType")
-            or _text(user_elem, "SellerInfo/SellerBusinessType")
-            or ""
-        )
-        .strip()
-        .lower()
-    )
+    seller_info = user_elem.find(f"{{{EBAY_XML_NS}}}SellerInfo")
+    seller_business_type = ""
+    if seller_info is not None:
+        sbt_elem = seller_info.find(f"{{{EBAY_XML_NS}}}SellerBusinessType")
+        if sbt_elem is not None and sbt_elem.text:
+            seller_business_type = sbt_elem.text.strip().lower()
 
     if seller_business_type == "commercial":
         account_type = AccountType.BUSINESS
@@ -587,9 +623,9 @@ def normalize_trading_xml_get_user(
         account_type = AccountType.UNKNOWN
 
     # Grounded verification: XML UserID alone never certifies stable modern ID.
-    # Offline fixtures and synthetic booleans never certify live verification.
+    # Offline fixtures, synthetic booleans, and arbitrary provenance strings never certify live verification.
     is_live_provenance = bool(
-        evidence and evidence.provenance_source != "unverified_offline"
+        evidence and evidence.provenance_source in TRUSTED_LIVE_PROVENANCE_SOURCES
     )
     is_verified = bool(
         evidence
@@ -666,12 +702,48 @@ def normalize_rest_identity_get_user(
             is_complete=False,
         )
 
-    # Fail closed on error objects
-    if "errors" in data and isinstance(data["errors"], list) and data["errors"]:
-        return IdentityCollectionResult(
-            errors=("REST_API_ERROR",),
-            is_complete=False,
-        )
+    # Fail closed on error objects and unexpected errors structures
+    if "errors" in data:
+        err_val = data["errors"]
+        if isinstance(err_val, (list, tuple)):
+            if len(err_val) > 0:
+                return IdentityCollectionResult(
+                    errors=("REST_API_ERROR",),
+                    is_complete=False,
+                )
+        elif isinstance(err_val, (dict, Mapping)):
+            if len(err_val) > 0:
+                return IdentityCollectionResult(
+                    errors=("REST_API_ERROR",),
+                    is_complete=False,
+                )
+        elif isinstance(err_val, str):
+            if err_val.strip():
+                return IdentityCollectionResult(
+                    errors=("REST_API_ERROR",),
+                    is_complete=False,
+                )
+        else:
+            return IdentityCollectionResult(
+                errors=("REST_API_ERROR",),
+                is_complete=False,
+            )
+
+    if "error" in data:
+        err_val = data["error"]
+        if (
+            (isinstance(err_val, str) and err_val.strip())
+            or (isinstance(err_val, (dict, Mapping, list, tuple)) and len(err_val) > 0)
+            or (
+                not isinstance(err_val, (str, dict, Mapping, list, tuple))
+                and err_val is not None
+                and err_val is not False
+            )
+        ):
+            return IdentityCollectionResult(
+                errors=("REST_API_ERROR",),
+                is_complete=False,
+            )
 
     user_id = data.get("userId")
     username = data.get("username")
@@ -698,7 +770,7 @@ def normalize_rest_identity_get_user(
             id_conflict = True
 
     is_live_provenance = bool(
-        evidence and evidence.provenance_source != "unverified_offline"
+        evidence and evidence.provenance_source in TRUSTED_LIVE_PROVENANCE_SOURCES
     )
     is_verified = bool(
         evidence
@@ -795,11 +867,32 @@ def normalize_graphql_user(
             is_complete=False,
         )
 
-    if "errors" in data and isinstance(data["errors"], list) and data["errors"]:
-        return IdentityCollectionResult(
-            errors=("GRAPHQL_API_ERROR",),
-            is_complete=False,
-        )
+    # Fail closed on GraphQL error containers and unexpected errors structures
+    if "errors" in data:
+        err_val = data["errors"]
+        if isinstance(err_val, (list, tuple)):
+            if len(err_val) > 0:
+                return IdentityCollectionResult(
+                    errors=("GRAPHQL_API_ERROR",),
+                    is_complete=False,
+                )
+        elif isinstance(err_val, (dict, Mapping)):
+            if len(err_val) > 0:
+                return IdentityCollectionResult(
+                    errors=("GRAPHQL_API_ERROR",),
+                    is_complete=False,
+                )
+        elif isinstance(err_val, str):
+            if err_val.strip():
+                return IdentityCollectionResult(
+                    errors=("GRAPHQL_API_ERROR",),
+                    is_complete=False,
+                )
+        else:
+            return IdentityCollectionResult(
+                errors=("GRAPHQL_API_ERROR",),
+                is_complete=False,
+            )
 
     container = data.get("data")
     if not isinstance(container, dict):
@@ -833,7 +926,7 @@ def normalize_graphql_user(
         account_type = AccountType.UNKNOWN
 
     is_live_provenance = bool(
-        evidence and evidence.provenance_source != "unverified_offline"
+        evidence and evidence.provenance_source in TRUSTED_LIVE_PROVENANCE_SOURCES
     )
     is_verified = bool(
         evidence
@@ -920,8 +1013,19 @@ def compare_identity_snapshots(
     # In Milestone 8, migration readiness is strictly blocked (validation-only milestone)
     blocking_reasons.append("M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER")
 
-    # Check for upstream snapshot errors
-    if "ACCOUNT_ID_CONFLICT" in modern_snapshot.errors:
+    # Check for upstream snapshot errors or explicit account ID conflicts
+    if (
+        "ACCOUNT_ID_CONFLICT" in xml_snapshot.errors
+        or "ACCOUNT_ID_CONFLICT" in modern_snapshot.errors
+    ):
+        blocking_reasons.append("ACCOUNT_ID_CONFLICT")
+
+    if (
+        xml_snapshot.account_id
+        and modern_snapshot.account_id
+        and str(xml_snapshot.account_id).strip()
+        != str(modern_snapshot.account_id).strip()
+    ):
         blocking_reasons.append("ACCOUNT_ID_CONFLICT")
 
     # Field comparisons
@@ -1043,19 +1147,10 @@ def compare_identity_snapshots(
         xml_username and mod_username and xml_username.lower() == mod_username.lower()
     )
 
-    # Strict account continuity check:
-    # Requires complete collections, no errors, both independently authenticated,
-    # matching usernames, matching account types, and no account ID conflict.
-    has_continuity = bool(
-        xml_snapshot.is_complete
-        and modern_snapshot.is_complete
-        and xml_snapshot.account_verified
-        and modern_snapshot.account_verified
-        and username_matches
-        and "ACCOUNT_ID_CONFLICT" not in blocking_reasons
-        and "ACCOUNT_TYPE_MISMATCH" not in blocking_reasons
-        and "MARKETPLACE_MISMATCH" not in blocking_reasons
-    )
+    # Cross-provider account continuity requires independent live token-to-account bindings
+    # which Milestone 8 (strictly offline validation-only) does not acquire.
+    # Handcrafted snapshots, copied booleans, or matching usernames cannot certify continuity.
+    has_continuity = False
 
     return {
         "xml_source": xml_ident.source if xml_ident else "unknown",
@@ -1079,7 +1174,7 @@ def compare_identity_snapshots(
             "xml_errors": xml_snapshot.errors,
             "modern_errors": modern_snapshot.errors,
             "required_scope": COMMERCE_IDENTITY_READONLY_SCOPE,
-            "account_verified": has_continuity,
+            "account_verified": False,
             "entitlement_verified": modern_snapshot.entitlement_verified,
         },
     }
@@ -1093,7 +1188,11 @@ def sanitize_identity_parity_report(report: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(report, dict):
         return {
             "migration_readiness": "blocked",
-            "blocking_reasons": ["UNKNOWN_ERROR"],
+            "account_continuity_verified": False,
+            "blocking_reasons": [
+                "UNKNOWN_ERROR",
+                "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER",
+            ],
         }
 
     sanitized: dict[str, Any] = {}
@@ -1113,13 +1212,12 @@ def sanitize_identity_parity_report(report: dict[str, Any]) -> dict[str, Any]:
 
     # 2. Strict booleans
     sanitized["username_matches"] = bool(report.get("username_matches", False))
-    sanitized["account_continuity_verified"] = bool(
-        report.get("account_continuity_verified", False)
-    )
+    # Authenticated cross-provider continuity cannot be certified without genuine live token bindings;
+    # reject caller-provided True booleans in validation-only milestone.
+    sanitized["account_continuity_verified"] = False
 
-    # 3. Migration readiness (strictly "blocked" or "ready")
-    mr = report.get("migration_readiness")
-    sanitized["migration_readiness"] = mr if mr in ("ready", "blocked") else "blocked"
+    # 3. Migration readiness (intrinsically fail-closed in M8 validation milestone)
+    sanitized["migration_readiness"] = "blocked"
 
     # 4. Blocking reasons (strictly allowlisted symbolic error codes)
     raw_blocking = report.get("blocking_reasons", ())
@@ -1131,6 +1229,8 @@ def sanitize_identity_parity_report(report: dict[str, Any]) -> dict[str, Any]:
                 clean_blocking.append(s_item)
             else:
                 clean_blocking.append("BLOCKED_UNKNOWN")
+    if "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER" not in clean_blocking:
+        clean_blocking.append("M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER")
     sanitized["blocking_reasons"] = clean_blocking
 
     # 5. Warnings (strictly allowlisted symbolic error codes)
