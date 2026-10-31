@@ -23,7 +23,7 @@ from ..clients.graphql import (
     _strip_graphql_strings_and_comments,
     validate_read_only_query,
 )
-from ..const import NS
+from ..const import EBAY_XML_NS, NS
 from .xml import (
     _text,
     _to_int,
@@ -58,45 +58,195 @@ MONITORED_IDENTITY_FIELDS: tuple[str, ...] = (
     "registration_date",
 )
 
-FORBIDDEN_REPORT_KEYS: frozenset[str] = frozenset(
+ALLOWED_REPORT_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "client_id",
-        "runame",
-        "authorization",
-        "authorization_code",
-        "auth_code",
-        "token",
-        "api_key",
-        "apikey",
-        "raw_xml",
-        "raw_graphql",
-        "message",
-        "buyer_message",
-        "seller_message",
-        "email",
-        "password",
-        "secret",
-        "user_email",
-        "phone",
+        "xml_source",
+        "modern_source",
+        "username_matches",
+        "account_continuity_verified",
+        "migration_readiness",
+        "blocking_reasons",
+        "warnings",
+        "fields",
+        "diagnostics",
     }
 )
 
-_EBAY_TOKEN_PATTERN = re.compile(
-    r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+|refresh_token=[^\s&\"']+)", re.IGNORECASE
+ALLOWED_DIAGNOSTIC_KEYS: frozenset[str] = frozenset(
+    {
+        "xml_complete",
+        "modern_complete",
+        "xml_errors",
+        "modern_errors",
+        "required_scope",
+        "account_verified",
+        "entitlement_verified",
+    }
 )
-_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
 
-_CURRENCY_AMOUNT_PATTERN = re.compile(
-    r"(?:\b[A-Z]{3}\s*|\$|£|€|¥)\s*\d+(?:\.\d{1,4})?\b|\b\d+(?:\.\d{1,4})?\s*[A-Z]{3}\b|\b\d+\.\d{2}\b",
-    re.IGNORECASE,
+ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "EMPTY_XML_PAYLOAD",
+        "EMPTY_JSON_PAYLOAD",
+        "MALFORMED_XML",
+        "MALFORMED_JSON",
+        "INVALID_XML_INPUT_TYPE",
+        "INVALID_JSON_INPUT_TYPE",
+        "INVALID_XML_ROOT",
+        "XML_NAMESPACE_MISMATCH",
+        "XML_ACK_FAILURE",
+        "XML_ACK_PARTIAL_FAILURE",
+        "XML_ACK_MISSING_OR_UNKNOWN",
+        "XML_FATAL_ERROR_CONTAINER",
+        "MISSING_USER_ELEMENT",
+        "MISSING_USER_ID",
+        "MALFORMED_USER_ID",
+        "MALFORMED_NUMERICAL_FIELD",
+        "MALFORMED_REGISTRATION_DATE",
+        "REST_API_ERROR",
+        "GRAPHQL_API_ERROR",
+        "MISSING_DATA_OBJECT",
+        "MISSING_VIEWER_OR_USER_OBJECT",
+        "MISSING_OR_INVALID_USERNAME",
+        "MISSING_OR_INVALID_USER_ID",
+        "ACCESS_DENIED",
+        "FORBIDDEN",
+        "INSUFFICIENT_SCOPE",
+        "UNAUTHORIZED",
+        "TOKEN_EXPIRED",
+        "NOT_FOUND",
+        "RATE_LIMITED",
+        "INTERNAL_SERVER_ERROR",
+        "ACCOUNT_ID_CONFLICT",
+        "ACCOUNT_IDENTITY_UNVERIFIED",
+        "MODERN_IDENTITY_ENTITLEMENT_UNVERIFIED",
+        "TRADING_XML_GET_USER_INCOMPLETE",
+        "MODERN_IDENTITY_INCOMPLETE",
+        "USERNAME_MISMATCH",
+        "ACCOUNT_TYPE_MISMATCH",
+        "MARKETPLACE_MISMATCH",
+        "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER",
+        "BLOCKED_UNKNOWN",
+        "UNKNOWN_ERROR",
+    }
 )
-_CREDENTIAL_KV_PATTERN = re.compile(
-    r"(client_secret|client_id|refresh_token|password|secret|runame|token|auth_code|authorization|access_token)=([^&\s\"']+)",
-    re.IGNORECASE,
+
+GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
+    "EMPTY_XML_PAYLOAD": "Trading XML payload is empty or whitespace",
+    "EMPTY_JSON_PAYLOAD": "JSON payload is empty or whitespace",
+    "MALFORMED_XML": "XML payload could not be parsed",
+    "MALFORMED_JSON": "JSON payload could not be parsed",
+    "INVALID_XML_INPUT_TYPE": "Input is not a valid XML string, bytes, or element",
+    "INVALID_JSON_INPUT_TYPE": "Input is not a valid JSON string, bytes, or mapping",
+    "INVALID_XML_ROOT": "Trading XML root element does not match GetUserResponse",
+    "XML_NAMESPACE_MISMATCH": "Trading XML namespace does not match standard eBay schema",
+    "XML_ACK_FAILURE": "Trading API response contains Ack=Failure",
+    "XML_ACK_PARTIAL_FAILURE": "Trading API response contains Ack=PartialFailure",
+    "XML_ACK_MISSING_OR_UNKNOWN": "Trading API response lacks an acceptable Success Ack",
+    "XML_FATAL_ERROR_CONTAINER": "Trading API response contains fatal error container",
+    "MISSING_USER_ELEMENT": "User container element missing from XML response",
+    "MISSING_USER_ID": "UserID element missing or empty in User container",
+    "MALFORMED_USER_ID": "UserID element contains invalid characters or whitespace",
+    "MALFORMED_NUMERICAL_FIELD": "Numerical feedback metric could not be parsed",
+    "MALFORMED_REGISTRATION_DATE": "Registration date timestamp could not be parsed",
+    "REST_API_ERROR": "REST Identity API returned an error condition",
+    "GRAPHQL_API_ERROR": "GraphQL service returned an error condition",
+    "MISSING_DATA_OBJECT": "GraphQL response lacks data envelope",
+    "MISSING_VIEWER_OR_USER_OBJECT": "GraphQL response lacks viewer or user object",
+    "MISSING_OR_INVALID_USERNAME": "Username field missing or invalid in modern response",
+    "MISSING_OR_INVALID_USER_ID": "userId field missing or invalid in modern response",
+    "ACCESS_DENIED": "Access denied; insufficient authorization",
+    "FORBIDDEN": "Access forbidden; insufficient scope or permissions",
+    "INSUFFICIENT_SCOPE": "OAuth scope contract not granted for modern API",
+    "UNAUTHORIZED": "Request unauthorized; invalid credentials",
+    "TOKEN_EXPIRED": "Authentication token expired",
+    "NOT_FOUND": "Requested user resource was not found",
+    "RATE_LIMITED": "API call rate limit exceeded",
+    "INTERNAL_SERVER_ERROR": "Internal server error encountered",
+    "ACCOUNT_ID_CONFLICT": "Observed modern userId conflicts with externally verified account ID",
+    "ACCOUNT_IDENTITY_UNVERIFIED": "Account identity has not been externally verified",
+    "MODERN_IDENTITY_ENTITLEMENT_UNVERIFIED": "Modern API entitlement and OAuth scopes unverified",
+    "TRADING_XML_GET_USER_INCOMPLETE": "Trading XML GetUser collection is incomplete or failed",
+    "MODERN_IDENTITY_INCOMPLETE": "Modern Identity collection is incomplete or failed",
+    "USERNAME_MISMATCH": "Public username mismatch between Trading XML and Modern Identity",
+    "ACCOUNT_TYPE_MISMATCH": "Verified account classification conflicts between providers",
+    "MARKETPLACE_MISMATCH": "Registration marketplace differs between providers",
+    "M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER": "Milestone 8 is validation-only; production cutover blocked",
+    "BLOCKED_UNKNOWN": "Migration readiness blocked by unverified condition",
+    "UNKNOWN_ERROR": "An error occurred during verification",
+}
+
+# Fixed safe templates for field-level notes (no dynamic user strings)
+NOTE_USERNAME_EXACT_MATCH = (
+    "Public username matches exactly between Trading XML and Modern Identity."
 )
+NOTE_USERNAME_CASE_NORMALIZED = "Public username matches case-insensitively after canonical lowercase normalization."
+NOTE_USERNAME_MISMATCH = (
+    "Public username mismatch between Trading XML and Modern Identity."
+)
+NOTE_USERNAME_MISSING_XML = (
+    "Username present in modern identity but missing from Trading XML."
+)
+NOTE_USERNAME_MISSING_MODERN = "Username missing in modern identity."
+NOTE_USER_ID_SEMANTICS = "Trading XML UserID is the public handle (username); modern REST userId is the immutable opaque identifier."
+NOTE_ACCOUNT_TYPE_EXACT_MATCH = "Account type matches exactly between providers."
+NOTE_ACCOUNT_TYPE_MISMATCH = "Account classification conflicts between providers."
+NOTE_ACCOUNT_TYPE_UNVERIFIED = (
+    "Account classification could not be verified from provider metadata."
+)
+NOTE_MARKETPLACE_EXACT_MATCH = "Registration marketplace matches between providers."
+NOTE_MARKETPLACE_CASE_NORMALIZED = "Registration marketplace matches after documented site-to-marketplace normalization."
+NOTE_MARKETPLACE_MISMATCH = "Registration marketplace conflicts between providers."
+NOTE_MARKETPLACE_MISSING = "Registration marketplace missing in modern response."
+NOTE_FEEDBACK_SCORE_UNSUPPORTED = "Feedback score is returned by Trading XML GetUser but is omitted from REST Commerce Identity; handled independently by REST Feedback API."
+NOTE_REGISTRATION_DATE_UNSUPPORTED = "Registration date is returned by Trading XML GetUser but is omitted from REST Commerce Identity."
+
+FIXED_NOTE_TEMPLATES: frozenset[str] = frozenset(
+    {
+        NOTE_USERNAME_EXACT_MATCH,
+        NOTE_USERNAME_CASE_NORMALIZED,
+        NOTE_USERNAME_MISMATCH,
+        NOTE_USERNAME_MISSING_XML,
+        NOTE_USERNAME_MISSING_MODERN,
+        NOTE_USER_ID_SEMANTICS,
+        NOTE_ACCOUNT_TYPE_EXACT_MATCH,
+        NOTE_ACCOUNT_TYPE_MISMATCH,
+        NOTE_ACCOUNT_TYPE_UNVERIFIED,
+        NOTE_MARKETPLACE_EXACT_MATCH,
+        NOTE_MARKETPLACE_CASE_NORMALIZED,
+        NOTE_MARKETPLACE_MISMATCH,
+        NOTE_MARKETPLACE_MISSING,
+        NOTE_FEEDBACK_SCORE_UNSUPPORTED,
+        NOTE_REGISTRATION_DATE_UNSUPPORTED,
+    }
+)
+
+# Grounded Trading XML Site to Marketplace mapping
+EBAY_SITE_TO_MARKETPLACE: dict[str, str] = {
+    "US": "EBAY_US",
+    "eBayMotors": "EBAY_MOTORS_US",
+    "Motors": "EBAY_MOTORS_US",
+    "Canada": "EBAY_CA",
+    "CanadaFrench": "EBAY_CA",
+    "UK": "EBAY_GB",
+    "Australia": "EBAY_AU",
+    "Austria": "EBAY_AT",
+    "Belgium_Dutch": "EBAY_BE",
+    "Belgium_French": "EBAY_BE",
+    "France": "EBAY_FR",
+    "Germany": "EBAY_DE",
+    "Italy": "EBAY_IT",
+    "Netherlands": "EBAY_NL",
+    "Spain": "EBAY_ES",
+    "Switzerland": "EBAY_CH",
+    "Ireland": "EBAY_IE",
+    "Poland": "EBAY_PL",
+    "HongKong": "EBAY_HK",
+    "Singapore": "EBAY_SG",
+    "Malaysia": "EBAY_MY",
+    "Philippines": "EBAY_PH",
+    "India": "EBAY_IN",
+}
 
 MAX_IDENTITY_PAGES = 25
 COMMERCE_IDENTITY_READONLY_SCOPE = (
@@ -118,7 +268,11 @@ def validate_max_pages(max_pages: int) -> int:
 
 
 def pseudonymize_identifier(val: str | None, prefix: str = "user") -> str:
-    """Return a deterministic, privacy-preserving 12-char SHA-256 pseudonym."""
+    """Return a deterministic, privacy-preserving 12-char SHA-256 pseudonym.
+
+    Residual Risk Note: SHA-256 pseudonyms provide one-way identifier masking,
+    but known low-entropy handles may be subject to dictionary brute-force.
+    """
     if not val:
         return ""
     h = hashlib.sha256(f"ebay_parity_salt:{val.strip()}".encode("utf-8")).hexdigest()[
@@ -141,8 +295,23 @@ def _is_safe_user_pseudonym(key: str) -> bool:
     return True
 
 
+_EBAY_TOKEN_PATTERN = re.compile(
+    r"(Bearer\s+[^\s\"']+|v\^1\.1#[^\s\"']+|refresh_token=[^\s&\"']+)", re.IGNORECASE
+)
+_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+_CURRENCY_AMOUNT_PATTERN = re.compile(
+    r"(?:\b[A-Z]{3}\s*|\$|£|€|¥)\s*\d+(?:\.\d{1,4})?\b|\b\d+(?:\.\d{1,4})?\s*[A-Z]{3}\b|\b\d+\.\d{2}\b"
+    r"|\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million)\s+(?:dollars|cents|pounds|pence|euros|yen)\b",
+    re.IGNORECASE,
+)
+_CREDENTIAL_KV_PATTERN = re.compile(
+    r"(client_secret|client_id|refresh_token|password|secret|runame|token|auth_code|authorization|access_token)=([^&\s\"']+)",
+    re.IGNORECASE,
+)
+
+
 def sanitize_diagnostic_string(val: str) -> str:
-    """Sanitize arbitrary strings, redacting auth tokens, emails, credentials, and sensitive patterns."""
+    """Sanitize arbitrary strings, redacting auth tokens, emails, credentials, amounts, and sensitive patterns."""
     if not isinstance(val, str):
         return str(val)
     text = _CREDENTIAL_KV_PATTERN.sub(r"\1=[REDACTED]", val)
@@ -165,14 +334,16 @@ class AccountType(StrEnum):
 
 @dataclass(frozen=True)
 class ProviderVerificationEvidence:
-    """Explicit external proof of identity and API entitlement.
+    """Explicit external proof of identity, token binding, and API entitlement.
 
-    Offline fixtures and self-reported response fields NEVER automatically confer verification.
+    Offline fixtures, synthetic defaults, and matching usernames NEVER confer
+    account verification or cross-provider continuity without positive external proof.
     """
 
     account_verified: bool = False
     verified_account_id: str | None = None
     api_entitlement_verified: bool = False
+    token_binding_verified: bool = False
     provenance_source: str = "unverified_offline"
     verified_scopes: tuple[str, ...] = ()
 
@@ -281,9 +452,9 @@ def normalize_trading_xml_get_user(
             )
         try:
             root = ET.fromstring(cleaned)
-        except ET.ParseError as exc:
+        except ET.ParseError:
             return IdentityCollectionResult(
-                errors=(f"MALFORMED_XML: {type(exc).__name__}",),
+                errors=("MALFORMED_XML",),
                 is_complete=False,
             )
     elif isinstance(root_or_xml, ET.Element):
@@ -294,49 +465,90 @@ def normalize_trading_xml_get_user(
             is_complete=False,
         )
 
-    # Check for root Ack failure
-    ack = (_text(root, "Ack") or _text(root, "e:Ack") or "").strip().lower()
-    if ack == "failure":
-        error_msg = (
-            _text(root, "Errors/ShortMessage")
-            or _text(root, "e:Errors/e:ShortMessage")
-            or "XML_ACK_FAILURE"
-        )
+    # 1. Enforce GetUserResponse root element
+    if not (root.tag.endswith("GetUserResponse") or root.tag == "GetUserResponse"):
         return IdentityCollectionResult(
-            errors=(f"TRADING_API_ERROR: {sanitize_diagnostic_string(error_msg)}",),
+            errors=("INVALID_XML_ROOT",),
             is_complete=False,
         )
 
-    # Locate User element
+    # 2. Enforce standard namespace if qualified
+    if root.tag.startswith("{") and not root.tag.startswith(f"{{{EBAY_XML_NS}}}"):
+        return IdentityCollectionResult(
+            errors=("XML_NAMESPACE_MISMATCH",),
+            is_complete=False,
+        )
+
+    # 3. Check Ack status
+    ack = (_text(root, "Ack") or _text(root, "e:Ack") or "").strip()
+    if ack == "Failure":
+        return IdentityCollectionResult(
+            errors=("XML_ACK_FAILURE",),
+            is_complete=False,
+        )
+    if ack == "PartialFailure":
+        return IdentityCollectionResult(
+            errors=("XML_ACK_PARTIAL_FAILURE",),
+            is_complete=False,
+        )
+    if ack not in ("Success", "Warning"):
+        return IdentityCollectionResult(
+            errors=("XML_ACK_MISSING_OR_UNKNOWN",),
+            is_complete=False,
+        )
+
+    # 4. Check for fatal error containers even alongside Ack=Success/Warning
+    errors_elem = root.findall("e:Errors", NS) or root.findall("Errors")
+    for err_container in errors_elem:
+        severity = (
+            (
+                _text(err_container, "e:SeverityCode")
+                or _text(err_container, "SeverityCode")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        if severity == "error":
+            return IdentityCollectionResult(
+                errors=("XML_FATAL_ERROR_CONTAINER",),
+                is_complete=False,
+            )
+
+    # 5. Locate User element
     user_elem = (
         root.find("e:User", NS)
         if root.find("e:User", NS) is not None
         else root.find("User")
     )
-    if user_elem is None and (root.tag.endswith("User") or root.tag == "User"):
-        user_elem = root
-
     if user_elem is None:
         return IdentityCollectionResult(
             errors=("MISSING_USER_ELEMENT",),
             is_complete=False,
         )
 
-    # In Trading XML, UserID is the public handle/username
-    username = _text(user_elem, "e:UserID") or _text(user_elem, "UserID")
+    # 6. UserID is required and must be non-empty
+    raw_user_id = _text(user_elem, "e:UserID") or _text(user_elem, "UserID")
+    username = raw_user_id.strip() if raw_user_id else None
     if not username:
         return IdentityCollectionResult(
             errors=("MISSING_USER_ID",),
             is_complete=False,
         )
 
-    feedback_score = _to_int(
-        _text(user_elem, "e:FeedbackScore") or _text(user_elem, "FeedbackScore")
-    )
+    # 7. Safe parsing of optional numerical metrics
+    feedback_score = None
+    raw_fb = _text(user_elem, "e:FeedbackScore") or _text(user_elem, "FeedbackScore")
+    if raw_fb:
+        try:
+            feedback_score = _to_int(raw_fb)
+        except (ValueError, TypeError):
+            pass
+
+    positive_feedback_percent = None
     pos_feedback_raw = _text(user_elem, "e:PositiveFeedbackPercent") or _text(
         user_elem, "PositiveFeedbackPercent"
     )
-    positive_feedback_percent = None
     if pos_feedback_raw:
         try:
             positive_feedback_percent = float(pos_feedback_raw)
@@ -348,8 +560,14 @@ def normalize_trading_xml_get_user(
     )
     reg_date = parse_ebay_time(reg_date_raw) if reg_date_raw else None
 
+    # 8. Site to registration marketplace resolution using documented mapping
     site = _text(user_elem, "e:Site") or _text(user_elem, "Site")
-    marketplace_id = f"EBAY_{site}" if site else None
+    marketplace_id: str | None = None
+    if site:
+        site_clean = site.strip()
+        marketplace_id = EBAY_SITE_TO_MARKETPLACE.get(site_clean)
+        if marketplace_id is None and site_clean.startswith("EBAY_"):
+            marketplace_id = site_clean
 
     seller_business_type = (
         (
@@ -368,8 +586,20 @@ def normalize_trading_xml_get_user(
     else:
         account_type = AccountType.UNKNOWN
 
-    is_verified = bool(evidence and evidence.account_verified)
-    entitlement_verified = bool(evidence and evidence.api_entitlement_verified)
+    # Grounded verification: XML UserID alone never certifies stable modern ID.
+    # Offline fixtures and synthetic booleans never certify live verification.
+    is_live_provenance = bool(
+        evidence and evidence.provenance_source != "unverified_offline"
+    )
+    is_verified = bool(
+        evidence
+        and evidence.account_verified
+        and evidence.token_binding_verified
+        and is_live_provenance
+    )
+    entitlement_verified = bool(
+        evidence and evidence.api_entitlement_verified and is_live_provenance
+    )
     evidence_level = "verified" if is_verified else "unverified_offline"
 
     normalized = NormalizedAccountIdentity(
@@ -388,13 +618,13 @@ def normalize_trading_xml_get_user(
     return IdentityCollectionResult(
         identity=normalized,
         is_complete=True,
-        account_id=evidence.verified_account_id if evidence else None,
+        account_id=evidence.verified_account_id if is_verified and evidence else None,
         username=username,
         account_verified=is_verified,
         entitlement_verified=entitlement_verified,
         errors=(),
         diagnostics={
-            "source": "trading_xml_get_user",
+            "xml_complete": True,
             "has_feedback_score": feedback_score is not None,
             "has_registration_date": reg_date is not None,
         },
@@ -423,9 +653,9 @@ def normalize_rest_identity_get_user(
             )
         try:
             data = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
+        except json.JSONDecodeError:
             return IdentityCollectionResult(
-                errors=(f"MALFORMED_JSON: {type(exc).__name__}",),
+                errors=("MALFORMED_JSON",),
                 is_complete=False,
             )
     elif isinstance(payload_or_json, Mapping):
@@ -436,14 +666,10 @@ def normalize_rest_identity_get_user(
             is_complete=False,
         )
 
-    # Detect API error response
+    # Fail closed on error objects
     if "errors" in data and isinstance(data["errors"], list) and data["errors"]:
-        first_err = data["errors"][0]
-        err_msg = (
-            first_err.get("message") if isinstance(first_err, dict) else str(first_err)
-        )
         return IdentityCollectionResult(
-            errors=(f"REST_API_ERROR: {sanitize_diagnostic_string(str(err_msg))}",),
+            errors=("REST_API_ERROR",),
             is_complete=False,
         )
 
@@ -462,6 +688,30 @@ def normalize_rest_identity_get_user(
             is_complete=False,
         )
 
+    clean_user_id = user_id.strip()
+    clean_username = username.strip()
+
+    # Grounded verification & Account ID conflict check
+    id_conflict = False
+    if evidence and evidence.verified_account_id:
+        if evidence.verified_account_id != clean_user_id:
+            id_conflict = True
+
+    is_live_provenance = bool(
+        evidence and evidence.provenance_source != "unverified_offline"
+    )
+    is_verified = bool(
+        evidence
+        and evidence.account_verified
+        and evidence.token_binding_verified
+        and not id_conflict
+        and is_live_provenance
+    )
+    entitlement_verified = bool(
+        evidence and evidence.api_entitlement_verified and is_live_provenance
+    )
+    evidence_level = "verified" if is_verified else "unverified_offline"
+
     raw_account_type = str(data.get("accountType") or "").strip().upper()
     if raw_account_type == "BUSINESS":
         account_type = AccountType.BUSINESS
@@ -475,13 +725,13 @@ def normalize_rest_identity_get_user(
         str(raw_marketplace_id).strip() if raw_marketplace_id else None
     )
 
-    is_verified = bool(evidence and evidence.account_verified)
-    entitlement_verified = bool(evidence and evidence.api_entitlement_verified)
-    evidence_level = "verified" if is_verified else "unverified_offline"
+    errors: list[str] = []
+    if id_conflict:
+        errors.append("ACCOUNT_ID_CONFLICT")
 
     normalized = NormalizedAccountIdentity(
-        user_id=user_id.strip(),
-        username=username.strip(),
+        user_id=clean_user_id,
+        username=clean_username,
         account_type=account_type,
         registration_marketplace_id=registration_marketplace_id,
         feedback_score=None,  # REST Identity does not return feedback metrics
@@ -496,16 +746,16 @@ def normalize_rest_identity_get_user(
 
     return IdentityCollectionResult(
         identity=normalized,
-        is_complete=True,
-        account_id=user_id.strip(),
-        username=username.strip(),
+        is_complete=not errors,
+        account_id=clean_user_id if not id_conflict else None,
+        username=clean_username,
         account_verified=is_verified,
         entitlement_verified=entitlement_verified,
-        errors=(),
+        errors=tuple(errors),
         diagnostics={
-            "source": "rest_identity_get_user",
-            "account_type": str(account_type),
-            "marketplace_id": registration_marketplace_id or "UNKNOWN",
+            "modern_complete": not errors,
+            "account_verified": is_verified,
+            "entitlement_verified": entitlement_verified,
         },
     )
 
@@ -532,9 +782,9 @@ def normalize_graphql_user(
             )
         try:
             data = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
+        except json.JSONDecodeError:
             return IdentityCollectionResult(
-                errors=(f"MALFORMED_JSON: {type(exc).__name__}",),
+                errors=("MALFORMED_JSON",),
                 is_complete=False,
             )
     elif isinstance(payload_or_json, Mapping):
@@ -546,12 +796,8 @@ def normalize_graphql_user(
         )
 
     if "errors" in data and isinstance(data["errors"], list) and data["errors"]:
-        first_err = data["errors"][0]
-        err_msg = (
-            first_err.get("message") if isinstance(first_err, dict) else str(first_err)
-        )
         return IdentityCollectionResult(
-            errors=(f"GRAPHQL_API_ERROR: {sanitize_diagnostic_string(str(err_msg))}",),
+            errors=("GRAPHQL_API_ERROR",),
             is_complete=False,
         )
 
@@ -586,8 +832,18 @@ def normalize_graphql_user(
     else:
         account_type = AccountType.UNKNOWN
 
-    is_verified = bool(evidence and evidence.account_verified)
-    entitlement_verified = bool(evidence and evidence.api_entitlement_verified)
+    is_live_provenance = bool(
+        evidence and evidence.provenance_source != "unverified_offline"
+    )
+    is_verified = bool(
+        evidence
+        and evidence.account_verified
+        and evidence.token_binding_verified
+        and is_live_provenance
+    )
+    entitlement_verified = bool(
+        evidence and evidence.api_entitlement_verified and is_live_provenance
+    )
     evidence_level = "verified" if is_verified else "unverified_offline"
 
     normalized = NormalizedAccountIdentity(
@@ -612,7 +868,7 @@ def normalize_graphql_user(
         entitlement_verified=entitlement_verified,
         errors=(),
         diagnostics={
-            "source": "graphql_user",
+            "modern_complete": True,
             "has_user_id": user_id is not None,
         },
     )
@@ -626,8 +882,6 @@ class IdentityFieldComparison:
     """Field-level comparison outcome between XML and Modern Identity."""
 
     field_name: str
-    xml_value_pseudonym: str | None
-    modern_value_pseudonym: str | None
     status: str
     notes: str
 
@@ -666,6 +920,10 @@ def compare_identity_snapshots(
     # In Milestone 8, migration readiness is strictly blocked (validation-only milestone)
     blocking_reasons.append("M8_VALIDATION_ONLY_NO_PRODUCTION_CUTOVER")
 
+    # Check for upstream snapshot errors
+    if "ACCOUNT_ID_CONFLICT" in modern_snapshot.errors:
+        blocking_reasons.append("ACCOUNT_ID_CONFLICT")
+
     # Field comparisons
     # Field: username (public handle)
     xml_username = xml_ident.username if xml_ident else None
@@ -674,80 +932,62 @@ def compare_identity_snapshots(
     if xml_username and mod_username:
         if xml_username == mod_username:
             username_status = PARITY_EXACT_MATCH
-            username_note = "Public username matches exactly between Trading XML and Modern Identity."
+            username_note = NOTE_USERNAME_EXACT_MATCH
         elif xml_username.lower() == mod_username.lower():
             username_status = PARITY_EQUIVALENT_NORMALIZED
-            username_note = "Public username matches case-insensitively after canonical lowercase normalization."
+            username_note = NOTE_USERNAME_CASE_NORMALIZED
         else:
             username_status = PARITY_DIFFERENT_SEMANTICS
-            username_note = (
-                "Public username mismatch between Trading XML and Modern Identity."
-            )
+            username_note = NOTE_USERNAME_MISMATCH
             blocking_reasons.append("USERNAME_MISMATCH")
     elif mod_username:
         username_status = PARITY_MISSING_FIELD
-        username_note = (
-            "Username present in modern identity but missing from Trading XML."
-        )
+        username_note = NOTE_USERNAME_MISSING_XML
     else:
         username_status = PARITY_MISSING_FIELD
-        username_note = "Username missing in modern identity."
-        blocking_reasons.append("MISSING_MODERN_USERNAME")
+        username_note = NOTE_USERNAME_MISSING_MODERN
+        blocking_reasons.append("MISSING_OR_INVALID_USERNAME")
 
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="username",
-            xml_value_pseudonym=pseudonymize_identifier(xml_username, "user")
-            if xml_username
-            else None,
-            modern_value_pseudonym=pseudonymize_identifier(mod_username, "user")
-            if mod_username
-            else None,
             status=username_status,
             notes=username_note,
         )
     )
 
     # Field: user_id (immutable account ID)
-    mod_user_id = mod_ident.user_id if mod_ident else None
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="user_id",
-            xml_value_pseudonym=None,
-            modern_value_pseudonym=pseudonymize_identifier(mod_user_id, "account")
-            if mod_user_id
-            else None,
             status=PARITY_DIFFERENT_SEMANTICS,
-            notes=(
-                "Trading XML UserID is the public handle (username); modern REST userId is "
-                "the immutable opaque system identifier. They cannot be used interchangeably."
-            ),
+            notes=NOTE_USER_ID_SEMANTICS,
         )
     )
 
     # Field: account_type
     xml_type = xml_ident.account_type if xml_ident else AccountType.UNKNOWN
     mod_type = mod_ident.account_type if mod_ident else AccountType.UNKNOWN
-    if xml_type != AccountType.UNKNOWN and mod_type != AccountType.UNKNOWN:
+
+    if xml_type in (AccountType.BUSINESS, AccountType.INDIVIDUAL) and mod_type in (
+        AccountType.BUSINESS,
+        AccountType.INDIVIDUAL,
+    ):
         if xml_type == mod_type:
             type_status = PARITY_EXACT_MATCH
-            type_note = f"Account type {xml_type} matches exactly."
+            type_note = NOTE_ACCOUNT_TYPE_EXACT_MATCH
         else:
             type_status = PARITY_DIFFERENT_SEMANTICS
-            type_note = f"Account type differs: XML={xml_type}, Modern={mod_type}."
-            warnings.append("ACCOUNT_TYPE_DIFFERENCE")
-    elif mod_type != AccountType.UNKNOWN:
-        type_status = PARITY_EQUIVALENT_NORMALIZED
-        type_note = f"Modern identity provides account type {mod_type}; XML does not report business type."
+            type_note = NOTE_ACCOUNT_TYPE_MISMATCH
+            blocking_reasons.append("ACCOUNT_TYPE_MISMATCH")
     else:
+        # One or both unknown -> unverified, cannot claim equivalence
         type_status = PARITY_UNVERIFIED
-        type_note = "Account type could not be determined."
+        type_note = NOTE_ACCOUNT_TYPE_UNVERIFIED
 
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="account_type",
-            xml_value_pseudonym=str(xml_type),
-            modern_value_pseudonym=str(mod_type),
             status=type_status,
             notes=type_note,
         )
@@ -756,57 +996,46 @@ def compare_identity_snapshots(
     # Field: registration_marketplace_id
     xml_mkt = xml_ident.registration_marketplace_id if xml_ident else None
     mod_mkt = mod_ident.registration_marketplace_id if mod_ident else None
+
     if xml_mkt and mod_mkt:
         if xml_mkt == mod_mkt:
             mkt_status = PARITY_EXACT_MATCH
-            mkt_note = f"Registration marketplace {xml_mkt} matches."
+            mkt_note = NOTE_MARKETPLACE_EXACT_MATCH
         else:
-            mkt_status = PARITY_EQUIVALENT_NORMALIZED
-            mkt_note = f"Marketplace normalized: XML={xml_mkt}, Modern={mod_mkt}."
+            # Verified conflict between two distinct marketplaces is DIFFERENT_SEMANTICS
+            mkt_status = PARITY_DIFFERENT_SEMANTICS
+            mkt_note = NOTE_MARKETPLACE_MISMATCH
+            blocking_reasons.append("MARKETPLACE_MISMATCH")
     elif mod_mkt:
-        mkt_status = PARITY_EQUIVALENT_NORMALIZED
-        mkt_note = f"Modern marketplace {mod_mkt}; XML omitted site."
+        mkt_status = PARITY_MISSING_FIELD
+        mkt_note = NOTE_MARKETPLACE_MISSING
     else:
         mkt_status = PARITY_MISSING_FIELD
-        mkt_note = "Registration marketplace missing in modern response."
+        mkt_note = NOTE_MARKETPLACE_MISSING
 
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="registration_marketplace_id",
-            xml_value_pseudonym=xml_mkt,
-            modern_value_pseudonym=mod_mkt,
             status=mkt_status,
             notes=mkt_note,
         )
     )
 
     # Field: feedback_score (present in XML GetUser, not in REST Identity)
-    xml_fb = xml_ident.feedback_score if xml_ident else None
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="feedback_score",
-            xml_value_pseudonym="[PRESENT_IN_XML]" if xml_fb is not None else None,
-            modern_value_pseudonym="[NOT_IN_IDENTITY_API]",
             status=PARITY_MISSING_FIELD,
-            notes=(
-                "Feedback score is returned by Trading XML GetUser but is omitted from REST "
-                "Commerce Identity. Handled independently by REST Feedback API."
-            ),
+            notes=NOTE_FEEDBACK_SCORE_UNSUPPORTED,
         )
     )
 
     # Field: registration_date
-    xml_reg = xml_ident.registration_date if xml_ident else None
     field_comparisons.append(
         IdentityFieldComparison(
             field_name="registration_date",
-            xml_value_pseudonym="[PRESENT_IN_XML]" if xml_reg is not None else None,
-            modern_value_pseudonym="[NOT_IN_IDENTITY_API]",
             status=PARITY_MISSING_FIELD,
-            notes=(
-                "Registration date is returned by Trading XML GetUser but is omitted from REST "
-                "Commerce Identity."
-            ),
+            notes=NOTE_REGISTRATION_DATE_UNSUPPORTED,
         )
     )
 
@@ -814,15 +1043,25 @@ def compare_identity_snapshots(
         xml_username and mod_username and xml_username.lower() == mod_username.lower()
     )
 
+    # Strict account continuity check:
+    # Requires complete collections, no errors, both independently authenticated,
+    # matching usernames, matching account types, and no account ID conflict.
+    has_continuity = bool(
+        xml_snapshot.is_complete
+        and modern_snapshot.is_complete
+        and xml_snapshot.account_verified
+        and modern_snapshot.account_verified
+        and username_matches
+        and "ACCOUNT_ID_CONFLICT" not in blocking_reasons
+        and "ACCOUNT_TYPE_MISMATCH" not in blocking_reasons
+        and "MARKETPLACE_MISMATCH" not in blocking_reasons
+    )
+
     return {
         "xml_source": xml_ident.source if xml_ident else "unknown",
         "modern_source": mod_ident.source if mod_ident else "unknown",
         "username_matches": username_matches,
-        "account_continuity_verified": bool(
-            xml_snapshot.account_verified
-            and modern_snapshot.account_verified
-            and username_matches
-        ),
+        "account_continuity_verified": has_continuity,
         "migration_readiness": "ready" if not blocking_reasons else "blocked",
         "blocking_reasons": tuple(dict.fromkeys(blocking_reasons)),
         "warnings": tuple(dict.fromkeys(warnings)),
@@ -840,49 +1079,119 @@ def compare_identity_snapshots(
             "xml_errors": xml_snapshot.errors,
             "modern_errors": modern_snapshot.errors,
             "required_scope": COMMERCE_IDENTITY_READONLY_SCOPE,
+            "account_verified": has_continuity,
+            "entitlement_verified": modern_snapshot.entitlement_verified,
         },
     }
 
 
 # ---------------------------------------------------------------------------
-# Report Sanitization & Privacy Export
+# Report Sanitization & Privacy Export (Strict Default-Deny Schema)
 # ---------------------------------------------------------------------------
 def sanitize_identity_parity_report(report: dict[str, Any]) -> dict[str, Any]:
-    """Ensure report contains only allowlisted keys, symbolic codes, and pseudonyms."""
+    """Ensure report strictly adheres to default-deny schema with no raw strings or secrets."""
+    if not isinstance(report, dict):
+        return {
+            "migration_readiness": "blocked",
+            "blocking_reasons": ["UNKNOWN_ERROR"],
+        }
+
     sanitized: dict[str, Any] = {}
 
-    for k, v in report.items():
-        if k in FORBIDDEN_REPORT_KEYS:
-            continue
-        if k == "fields" and isinstance(v, dict):
-            clean_fields: dict[str, Any] = {}
-            for field_name, field_data in v.items():
-                if field_name not in MONITORED_IDENTITY_FIELDS:
-                    continue
-                clean_fields[field_name] = {
-                    "status": field_data.get("status", "unknown"),
-                    "label": field_data.get("label", "Unknown"),
-                    "notes": sanitize_diagnostic_string(
-                        str(field_data.get("notes", ""))
-                    ),
-                }
-            sanitized["fields"] = clean_fields
-        elif k in ("blocking_reasons", "warnings") and isinstance(v, (list, tuple)):
-            sanitized[k] = [sanitize_diagnostic_string(str(item)) for item in v]
-        elif k == "diagnostics" and isinstance(v, dict):
-            sanitized["diagnostics"] = {
-                diag_k: (
-                    tuple(sanitize_diagnostic_string(str(e)) for e in diag_v)
-                    if isinstance(diag_v, (list, tuple))
-                    else diag_v
-                )
-                for diag_k, diag_v in v.items()
-                if diag_k not in FORBIDDEN_REPORT_KEYS
+    # 1. Sources (allowlisted string codes only)
+    xml_src = report.get("xml_source")
+    sanitized["xml_source"] = (
+        xml_src if xml_src in ("trading_xml_get_user", "unknown") else "unknown"
+    )
+
+    mod_src = report.get("modern_source")
+    sanitized["modern_source"] = (
+        mod_src
+        if mod_src in ("rest_identity_get_user", "graphql_user", "unknown")
+        else "unknown"
+    )
+
+    # 2. Strict booleans
+    sanitized["username_matches"] = bool(report.get("username_matches", False))
+    sanitized["account_continuity_verified"] = bool(
+        report.get("account_continuity_verified", False)
+    )
+
+    # 3. Migration readiness (strictly "blocked" or "ready")
+    mr = report.get("migration_readiness")
+    sanitized["migration_readiness"] = mr if mr in ("ready", "blocked") else "blocked"
+
+    # 4. Blocking reasons (strictly allowlisted symbolic error codes)
+    raw_blocking = report.get("blocking_reasons", ())
+    clean_blocking: list[str] = []
+    if isinstance(raw_blocking, (list, tuple)):
+        for item in raw_blocking:
+            s_item = str(item)
+            if s_item in ALLOWED_SYMBOLIC_ERROR_CODES:
+                clean_blocking.append(s_item)
+            else:
+                clean_blocking.append("BLOCKED_UNKNOWN")
+    sanitized["blocking_reasons"] = clean_blocking
+
+    # 5. Warnings (strictly allowlisted symbolic error codes)
+    raw_warnings = report.get("warnings", ())
+    clean_warnings: list[str] = []
+    if isinstance(raw_warnings, (list, tuple)):
+        for item in raw_warnings:
+            s_item = str(item)
+            if s_item in ALLOWED_SYMBOLIC_ERROR_CODES:
+                clean_warnings.append(s_item)
+    sanitized["warnings"] = clean_warnings
+
+    # 6. Monitored Fields (strictly MONITORED_IDENTITY_FIELDS with approved note templates)
+    raw_fields = report.get("fields", {})
+    clean_fields: dict[str, Any] = {}
+    if isinstance(raw_fields, dict):
+        for field_name in MONITORED_IDENTITY_FIELDS:
+            field_data = raw_fields.get(field_name, {})
+            if not isinstance(field_data, dict):
+                continue
+            status = field_data.get("status")
+            if status not in PARITY_LABELS:
+                status = PARITY_UNVERIFIED
+
+            note = str(field_data.get("notes", ""))
+            # Strictly verify note is from approved fixed templates
+            if note not in FIXED_NOTE_TEMPLATES:
+                note = "Status verified."
+
+            clean_fields[field_name] = {
+                "status": status,
+                "label": PARITY_LABELS[status],
+                "notes": note,
             }
-        elif isinstance(v, (bool, int, float)) or v is None:
-            sanitized[k] = v
-        elif isinstance(v, str):
-            sanitized[k] = sanitize_diagnostic_string(v)
+    sanitized["fields"] = clean_fields
+
+    # 7. Diagnostics (strictly ALLOWED_DIAGNOSTIC_KEYS and scalar/symbolic types)
+    raw_diag = report.get("diagnostics", {})
+    clean_diag: dict[str, Any] = {}
+    if isinstance(raw_diag, dict):
+        for k in ALLOWED_DIAGNOSTIC_KEYS:
+            if k not in raw_diag:
+                continue
+            val = raw_diag[k]
+            if k in (
+                "xml_complete",
+                "modern_complete",
+                "account_verified",
+                "entitlement_verified",
+            ):
+                clean_diag[k] = bool(val)
+            elif k == "required_scope":
+                clean_diag[k] = COMMERCE_IDENTITY_READONLY_SCOPE
+            elif k in ("xml_errors", "modern_errors"):
+                if isinstance(val, (list, tuple)):
+                    clean_diag[k] = tuple(
+                        str(e) for e in val if str(e) in ALLOWED_SYMBOLIC_ERROR_CODES
+                    )
+                else:
+                    clean_diag[k] = ()
+    sanitized["diagnostics"] = clean_diag
 
     return sanitized
 
@@ -905,7 +1214,8 @@ def render_identity_parity_markdown(report: dict[str, Any]) -> str:
     if blocking:
         lines.append("## Blocking Reasons")
         for b in blocking:
-            lines.append(f"- 🛑 `{b}`")
+            diag_desc = GENERIC_DIAGNOSTIC_MESSAGES.get(b, b)
+            lines.append(f"- 🛑 `{b}`: {diag_desc}")
         lines.append("")
 
     warnings = sanitized.get("warnings", [])

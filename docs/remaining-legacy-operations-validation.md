@@ -25,11 +25,11 @@ Across the entire `ha-ebay` codebase, exactly five Trading XML operations are de
 
 | Operation | Production Call Site | Purpose & Consumed Fields | Modern Candidate Replacement | Milestone / Parity Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **`GetUser`** | `clients/feedback.py:35` | Resolves public username (`<User><UserID>`) for REST Feedback endpoints | REST Commerce Identity `getUser` (`GET /commerce/identity/v1/user/`) | **Milestone 8**: Validated offline; production cutover blocked pending identity scope grant. |
-| **`GetMyeBayBuying`** | `section_fetch.py:354` | Retrieves buyer `WatchList` and `BidList` items | Candidate GraphQL `userWatchList` and `userBiddingActivity` | **Milestones 1 & 4**: Validated offline; production cutover blocked by unreleased GraphQL user scopes. |
-| **`GetMyeBaySelling`** | `section_fetch.py:369` | Retrieves seller `ActiveList`, `SoldList`, and `UnsoldList` items | Candidate GraphQL `sellerListingSearch` + REST Sell Fulfillment `getOrders` | **Milestones 5 & 7**: Validated offline; production cutover blocked by unreleased GraphQL seller scopes. |
+| **`GetUser`** | `clients/feedback.py:35` | Resolves public username (`<User><UserID>`) for REST Feedback endpoints | REST Commerce Identity `getUser` (`GET /commerce/identity/v1/user/`) | **Milestone 8**: Validated offline; production cutover blocked pending identity scope grant & multi-account policy. |
+| **`GetMyeBayBuying`** | `section_fetch.py:354` | Retrieves buyer `WatchList` and `BidList` items | Candidate GraphQL `userWatchList` and `userBiddingActivity` | **Milestones 1 & 4**: Validated offline; production cutover blocked by unverified/unreleased GraphQL user scopes. |
+| **`GetMyeBaySelling`** | `section_fetch.py:369` | Retrieves seller `ActiveList`, `SoldList`, and `UnsoldList` items | Candidate GraphQL `sellerListingSearch` + REST Sell Fulfillment `getOrders` | **Milestones 5 & 7**: Validated offline; production cutover blocked by unverified GraphQL seller listing scopes. |
 | **`GetSellerList`** | `section_fetch.py:407` | Retrieves item `HitCount` (views) as optional fallback when analytics report lacks data | REST Sell Analytics `getTrafficReport` (`GET /sell/analytics/v1/traffic_report`) | **Milestones 5 & 8**: Optional fallback; REST Analytics traffic report is preferred primary. |
-| **`GetBestOffers`** | `section_fetch.py:427` | Retrieves active seller best offer counts per listing | REST Sell Negotiation `findBestOffers` (`GET /sell/negotiation/v1/offer`) | **Milestone 6**: Validated offline; production cutover blocked pending negotiation scope alignment. |
+| **`GetBestOffers`** | `section_fetch.py:427` | Retrieves active seller best offer counts per listing | Candidate GraphQL `sellerNegotiationHistory` (exploratory, M6) | **Milestone 6**: Validated offline; production cutover blocked. Official REST Sell Negotiation API ([Release Notes](https://www.developer.ebay.com/develop/api/negotiation-api/release-notes)) provides `findEligibleItems` and `sendOfferToInterestedBuyers` (discount offers to buyers), neither of which returns seller Best Offers negotiation history. |
 
 ### Retired / Non-Existent Operations Audit
 
@@ -77,11 +77,11 @@ REST Commerce Identity getUser:
 | `feedback_score` | `<FeedbackScore>` | N/A | `missing_field` | Excluded from REST Identity. Handled independently by REST Feedback API. |
 | `registration_date` | `<RegistrationDate>` | N/A | `missing_field` | Excluded from REST Identity. |
 
-### 3.2 Feedback API Interoperability Risk
+### 3.2 Feedback API Interoperability Risk & Data Handling Updates
 
-The REST Feedback API endpoints (`/buy/feedback/v1/...`) require the public username as the `user_id` query parameter (e.g., `GET /buy/feedback/v1/feedback_rating_summary?user_id=alpha_seller`).
+The REST Feedback API endpoints (`/buy/feedback/v1/...`) are documented to require the public username as the `user_id` query parameter (e.g., `GET /buy/feedback/v1/feedback_rating_summary?user_id=alpha_seller`).
 
-If a modernization implementation naively passed REST Identity `userId` (`urn:ebay:user:1234567890`) to the Feedback API, eBay returns HTTP 404 or 400 because the Feedback service indexes ratings by public `username`, not opaque `userId`. Milestone 8 establishes canonical model `NormalizedAccountIdentity` where `username` and `user_id` are strictly typed and differentiated.
+Under eBay's [2025 Data Handling Updates](https://developer.ebay.com/api-docs/static/data-handling-update.html), modern APIs are progressively adopting opaque account identifiers. However, current production Feedback endpoints index summary metrics by public handle, making substitution of modern internal `userId` unverified. Milestone 8 establishes canonical model `NormalizedAccountIdentity` where `username` and `user_id` are strictly typed and differentiated.
 
 ---
 
@@ -89,12 +89,12 @@ If a modernization implementation naively passed REST Identity `userId` (`urn:eb
 
 ### 4.1 Scope Comparison
 
-- **Trading XML `GetUser`:** Authorized under the base core scope `https://api.ebay.com/oauth/api_scope`. All existing Home Assistant users already have this scope granted.
-- **REST Commerce Identity `getUser`:** Requires `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`.
+- **Trading XML `GetUser`:** Authorized under the base core scope `https://api.ebay.com/oauth/api_scope`. All standard Home Assistant configurations include this scope.
+- **REST Commerce Identity `getUser`:** Officially specifies `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`.
 
 ### 4.2 Why Production Cutover Is Blocked
 
-Attempting to cut over `GetUser` to REST Identity in production would immediately fail for 100% of existing users with `INSUFFICIENT_SCOPE` (HTTP 403), breaking Feedback updates and requiring every user to re-authenticate.
+Attempting to cut over `GetUser` to REST Identity in production would fail for existing users whose OAuth grants do not contain `commerce.identity.readonly`, returning `INSUFFICIENT_SCOPE` (HTTP 403), breaking Feedback updates and triggering re-authorization prompts. While individual developer tokens might possess varying grants, the integration's standard requested scope set does not include it.
 
 Under Home Assistant architectural policies:
 1. No speculative or ungranted OAuth scopes may be forced onto existing users.

@@ -116,9 +116,9 @@ LEGACY_OPERATIONS_INVENTORY: tuple[dict[str, Any], ...] = (
         "purpose": "Resolve public username for REST Feedback API (GET /buy/feedback/v1/...)",
         "fields_consumed": ("User/UserID (public username)",),
         "modern_candidate": "REST Commerce Identity getUser (GET /commerce/identity/v1/user/)",
-        "scope_required": "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly",
+        "scope_required": "https://api.ebay.com/oauth/api_scope/commerce.identity.readonly (documented in official spec; unconfigured in requested scopes; account-specific grants unverified)",
         "milestone": "M8",
-        "status": "Validated offline; production cutover blocked pending identity scope & multi-account policy",
+        "status": "Validated offline; production cutover blocked pending identity scope & multi-account policy. REST userId is immutable identifier; REST Feedback API data handling evolving under eBay 2025 privacy updates.",
         "baseline_provider": "hybrid",
     },
     {
@@ -127,7 +127,7 @@ LEGACY_OPERATIONS_INVENTORY: tuple[dict[str, Any], ...] = (
         "purpose": "Fetch buyer watched items (WatchList) and buyer bids (BidList)",
         "fields_consumed": ("WatchList", "BidList"),
         "modern_candidate": "GraphQL userWatchList / userBiddingActivity",
-        "scope_required": "buy.watchlist.read, buy.bidding.read (speculative/unreleased)",
+        "scope_required": "UNVERIFIED (speculative buy.watchlist.read / buy.bidding.read unconfirmed by eBay)",
         "milestone": "M1 (Watchlist), M4 (Bidding)",
         "status": "Validated offline; production cutover blocked by OAuth scope unavailability",
         "baseline_provider": "trading_xml",
@@ -138,7 +138,7 @@ LEGACY_OPERATIONS_INVENTORY: tuple[dict[str, Any], ...] = (
         "purpose": "Fetch active seller listings (ActiveList) and ended listings (SoldList, UnsoldList)",
         "fields_consumed": ("ActiveList", "SoldList", "UnsoldList"),
         "modern_candidate": "GraphQL sellerListingSearch + REST Sell Fulfillment getOrders",
-        "scope_required": "sell.fulfillment.readonly (granted), GraphQL sellerListingSearch scope (unreleased)",
+        "scope_required": "sell.fulfillment.readonly (granted), GraphQL sellerListingSearch scope (UNVERIFIED)",
         "milestone": "M5 (ActiveList), M7 (Sold/Unsold)",
         "status": "Validated offline; production cutover blocked by GraphQL seller scope unavailability",
         "baseline_provider": "trading_xml",
@@ -159,10 +159,10 @@ LEGACY_OPERATIONS_INVENTORY: tuple[dict[str, Any], ...] = (
         "codebase_callsite": "custom_components/ebay/section_fetch.py:427",
         "purpose": "Fetch seller active best offer counts per listing",
         "fields_consumed": ("BestOfferArray/BestOffer", "Item/BestOfferDetails"),
-        "modern_candidate": "REST Sell Negotiation findBestOffers (GET /sell/negotiation/v1/offer)",
-        "scope_required": "https://api.ebay.com/oauth/api_scope/sell.inventory (or negotiation scope)",
+        "modern_candidate": "Candidate GraphQL sellerNegotiationHistory (exploratory, M6)",
+        "scope_required": "UNVERIFIED",
         "milestone": "M6",
-        "status": "Validated offline; production cutover blocked pending negotiation scope alignment",
+        "status": "Validated offline; production cutover blocked. Official REST Sell Negotiation only provides findEligibleItems and sendOfferToInterestedBuyers, which do not return seller Best Offers history.",
         "baseline_provider": "trading_xml",
     },
     {
@@ -235,19 +235,26 @@ def render_audit_matrix_markdown() -> str:
         "   - REST Identity `getUser` returns `userId` (opaque immutable ID) and `username` (public handle)."
     )
     lines.append(
-        "   - The REST Feedback API requires the public username in `user_id` query parameters; substituting REST `userId` causes API errors."
+        "   - The REST Feedback API documentation requires public username in `user_id` query parameters; data handling requirements continue to evolve under eBay 2025 updates."
     )
     lines.append(
-        "   - REST Identity requires scope `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`, which is not granted to existing users."
+        "   - REST Identity officially specifies `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`. This scope is unconfigured in requested scopes, and existing account-specific grants are unverified."
     )
-    lines.append("3. **Production Isolation:**")
+    lines.append("3. **Best Offers API Reality:**")
+    lines.append(
+        "   - Official REST Sell Negotiation API contains `findEligibleItems` and `sendOfferToInterestedBuyers`, neither of which retrieves seller Best Offers history."
+    )
+    lines.append(
+        "   - Best Offers history remains exploratory under candidate GraphQL queries evaluated in Milestone 6."
+    )
+    lines.append("4. **Production Isolation:**")
     lines.append(
         "   - Milestone 8 is strictly read-only validation. Production Home Assistant coordinators and entities remain unchanged."
     )
     return "\n".join(lines)
 
 
-def run_synthetic_parity_verification() -> dict[str, Any]:
+def run_synthetic_parity_verification() -> tuple[dict[str, Any], bool]:
     """Execute offline synthetic verification without credentials or network access."""
     xml_data = get_synthetic_get_user_xml()
     rest_data = get_synthetic_rest_identity_json()
@@ -255,7 +262,15 @@ def run_synthetic_parity_verification() -> dict[str, Any]:
     xml_snap = normalize_trading_xml_get_user(xml_data)
     rest_snap = normalize_rest_identity_get_user(rest_data)
 
-    return compare_identity_snapshots(xml_snap, rest_snap)
+    report = compare_identity_snapshots(xml_snap, rest_snap)
+    is_valid = bool(
+        xml_snap.is_complete
+        and rest_snap.is_complete
+        and not xml_snap.errors
+        and not rest_snap.errors
+        and report.get("username_matches")
+    )
+    return report, is_valid
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +377,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    if args.xml_fixture or args.rest_fixture or args.graphql_fixture:
+    is_fixture_mode = bool(
+        args.xml_fixture or args.rest_fixture or args.graphql_fixture
+    )
+    has_custom_error = False
+
+    if is_fixture_mode:
         if not (args.xml_fixture and (args.rest_fixture or args.graphql_fixture)):
             sys.stderr.write(
                 "Error: When using custom fixtures, --xml-fixture and at least one modern fixture "
@@ -399,9 +419,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         report = compare_identity_snapshots(xml_snap, mod_snap)
+
+        # Fail closed on fixture errors or incomplete collections
+        fatal_blocking = {
+            "TRADING_XML_GET_USER_INCOMPLETE",
+            "MODERN_IDENTITY_INCOMPLETE",
+            "ACCOUNT_ID_CONFLICT",
+            "USERNAME_MISMATCH",
+            "ACCOUNT_TYPE_MISMATCH",
+            "MARKETPLACE_MISMATCH",
+        }
+        active_fatal = set(report.get("blocking_reasons", ())).intersection(
+            fatal_blocking
+        )
+
+        if (
+            not xml_snap.is_complete
+            or not mod_snap.is_complete
+            or xml_snap.errors
+            or mod_snap.errors
+            or not report.get("username_matches")
+            or active_fatal
+        ):
+            has_custom_error = True
     else:
         # Default synthetic demo
-        report = run_synthetic_parity_verification()
+        report, is_demo_valid = run_synthetic_parity_verification()
+        if not is_demo_valid:
+            has_custom_error = True
 
     sanitized = sanitize_identity_parity_report(report)
 
@@ -417,10 +462,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(output_str)
 
-    # In synthetic demo mode, exit 0 if username matches and no errors
-    if sanitized.get("username_matches"):
-        return 0
-    return 1
+    if has_custom_error:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
