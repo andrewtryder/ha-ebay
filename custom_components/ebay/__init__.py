@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -106,7 +107,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .repairs import async_save_repair_streaks
 
     coordinator = entry.runtime_data
-    coordinator.cancel_scheduled_events()
+    if hasattr(coordinator, "async_shutdown"):
+        shutdown_res = coordinator.async_shutdown()
+        if asyncio.iscoroutine(shutdown_res) or hasattr(shutdown_res, "__await__"):
+            await shutdown_res
+        elif hasattr(coordinator, "cancel_scheduled_events"):
+            coordinator.cancel_scheduled_events()
+    elif hasattr(coordinator, "cancel_scheduled_events"):
+        coordinator.cancel_scheduled_events()
     await async_save_repair_streaks(hass, entry.entry_id, coordinator._repair_streaks)
     await async_save_ending_soon_fired(
         hass, entry.entry_id, coordinator._fired_ending_soon

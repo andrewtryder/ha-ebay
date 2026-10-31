@@ -128,6 +128,17 @@ async def async_get_config_entry_diagnostics(
         "truncated_collections": data.get("truncated_collections", {}),
         "api_warnings": data.get("api_warnings", []),
         "scheduled_ending_soon_timer_count": coordinator.scheduled_ending_soon_count,
+        "rate_limiting": (
+            coordinator.api.get_rate_limiting_diagnostics()
+            if hasattr(coordinator, "api")
+            and hasattr(coordinator.api, "get_rate_limiting_diagnostics")
+            else {
+                "throttled": False,
+                "rest_cooldown_remaining_seconds": 0.0,
+                "trading_cooldown_remaining_seconds": 0.0,
+                "last_retry_count": 0,
+            }
+        ),
         "redacted": sorted(TO_REDACT),
     }
 

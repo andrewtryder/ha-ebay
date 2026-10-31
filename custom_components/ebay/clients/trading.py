@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import xml.etree.ElementTree as ET
@@ -31,11 +32,13 @@ from ..parsers.xml import (
     _auth_like_error,
     _duration_ms,
     _page_number_from_xml,
+    _rate_limit_error,
     _reported_total_pages,
     _text,
     extract_trading_warnings,
 )
 from .errors import EbayApiError, EbayAuthError, EbayParseError
+from .resilience import EndpointFamily, RateLimitTracker, parse_retry_after
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +50,13 @@ class TradingClientMixin:
     site_id: str
     _endpoints: Any
     _api_warnings: list[dict[str, str | None]]
+
+    @property
+    def rate_limit_tracker(self) -> RateLimitTracker:
+        """Return the shared or instance RateLimitTracker."""
+        if not hasattr(self, "_rate_limit_tracker") or self._rate_limit_tracker is None:
+            self._rate_limit_tracker = RateLimitTracker()
+        return self._rate_limit_tracker
 
     async def async_call_trading_api(self, call_name: str, xml_body: str) -> ET.Element:
         """Call a read-only Trading API operation."""
@@ -64,6 +74,17 @@ class TradingClientMixin:
         self, call_name: str, xml_body: str
     ) -> ET.Element:
         """Call a Trading API operation once."""
+        client_id = getattr(self, "client_id", None)
+        tracker = self.rate_limit_tracker
+        cooldown = tracker.cooldown_remaining(EndpointFamily.TRADING, client_id)
+        if cooldown > 2.0:
+            raise EbayApiError(
+                f"eBay Trading API in cooldown for {call_name} (cooldown_remaining={cooldown:.1f}s)",
+                status=429,
+            )
+        elif cooldown > 0.0:
+            await asyncio.sleep(cooldown)
+
         access_token = await self.async_get_access_token()
         page = _page_number_from_xml(xml_body)
         headers = {
@@ -92,6 +113,23 @@ class TradingClientMixin:
                     )
                     raise EbayAuthError(
                         f"eBay Trading API auth failed with HTTP {response.status}"
+                    )
+                if response.status == 429:
+                    retry_after_hdr = response.headers.get("Retry-After")
+                    if retry_after_hdr is not None:
+                        delay = parse_retry_after(retry_after_hdr, default_delay=5.0)
+                        tracker.record_throttled(
+                            EndpointFamily.TRADING, delay, client_id
+                        )
+                        _LOGGER.debug(
+                            "Trading API call rate-limited call=%s status=429 delay=%.1fs duration_ms=%.1f",
+                            call_name,
+                            delay,
+                            _duration_ms(start),
+                        )
+                    raise EbayApiError(
+                        f"eBay Trading API failed with HTTP {response.status}",
+                        status=429,
                     )
                 if response.status >= 400:
                     _LOGGER.debug(
@@ -125,6 +163,12 @@ class TradingClientMixin:
                 ack,
                 _duration_ms(start),
             )
+            if _rate_limit_error(root):
+                tracker.record_throttled(EndpointFamily.TRADING, 30.0, client_id)
+                raise EbayApiError(
+                    f"eBay Trading API returned Ack={ack!r} (rate limited)",
+                    status=429,
+                )
             if _auth_like_error(root):
                 raise EbayAuthError(f"eBay Trading API returned Ack={ack!r}")
             raise EbayApiError(f"eBay Trading API returned Ack={ack!r}")

@@ -800,7 +800,7 @@ def test_reauth_and_site_id_repair_flows(monkeypatch: pytest.MonkeyPatch) -> Non
 
     entry = _entry(entry_id="entry-repair")
     hass = Mock()
-    hass.async_create_task = Mock()
+    hass.async_create_task = Mock(side_effect=lambda coro: coro.close())
     hass.config_entries.flow.async_init = AsyncMock()
     hass.config_entries.async_update_entry = Mock()
     hass.config_entries.async_reload = AsyncMock()

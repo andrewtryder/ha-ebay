@@ -29,8 +29,9 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | [#101](https://github.com/andrewtryder/ha-ebay/pull/101) | **Merged** (`823dce0`) |
 | **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | [#102](https://github.com/andrewtryder/ha-ebay/pull/102) | **Merged** (`e34298f`) |
 | **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | [#103](https://github.com/andrewtryder/ha-ebay/pull/103) | **Merged** (`ee7b769`): Same-app multi-account onboarding, canonical AccountIdentity, duplicate matrix, reauth protection, zero cutover |
-| **Milestone 10** | Guided BYO eBay OAuth Architecture & Onboarding Specification | `docs/ebay-one-click-oauth-architecture` | PR | **Completed (Current PR)**: Architecture decision record, threat model, feasibility analysis, guided BYO onboarding wizard specification, zero managed credentials |
-| **Milestone 11** | Reliability, Quotas, & Compatibility Hardening | `feat/ebay-modern-api-reliability` | TBD | Planned |
+| **Milestone 10** | Guided BYO eBay OAuth Architecture & Onboarding Specification | `docs/ebay-one-click-oauth-architecture` | [#104](https://github.com/andrewtryder/ha-ebay/pull/104) | **Merged** (`856f213`): Architecture decision record, threat model, feasibility analysis, guided BYO onboarding wizard specification, zero managed credentials |
+| **Milestone 10.1** | Guided BYO eBay OAuth Onboarding Implementation | `feat/ebay-guided-oauth-onboarding` | [#105](https://github.com/andrewtryder/ha-ebay/pull/105) | **Merged** (`49ad7f8`): Guided BYO onboarding wizard, RuName callback verification, keyset shortcut, manual fallback, zero secret redisclosure |
+| **Milestone 11** | Reliability, Rate Limits & Home Assistant Compatibility Hardening | `feat/ebay-reliability-hardening` | PR | **Completed (Current PR)**: Bounded retry policy, Retry-After delta & HTTP-date parsing, RateLimitTracker, last-good-data preservation, event churn suppression, OAuth timeout & lifecycle shutdown |
 | **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
 
 ---

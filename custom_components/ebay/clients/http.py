@@ -34,6 +34,12 @@ from .errors import (
     classify_rest_status,
     map_rest_failure_category,
 )
+from .resilience import (
+    BoundedRetryPolicy,
+    EndpointFamily,
+    RateLimitTracker,
+    parse_retry_after,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -179,6 +185,36 @@ class RestClientMixin:
         if not hasattr(self, "_token_refresh_lock") or self._token_refresh_lock is None:
             self._token_refresh_lock = asyncio.Lock()
         return self._token_refresh_lock
+
+    @property
+    def rate_limit_tracker(self) -> RateLimitTracker:
+        """Return the shared or instance RateLimitTracker."""
+        if not hasattr(self, "_rate_limit_tracker") or self._rate_limit_tracker is None:
+            self._rate_limit_tracker = RateLimitTracker()
+        return self._rate_limit_tracker
+
+    @property
+    def retry_policy(self) -> BoundedRetryPolicy:
+        """Return the BoundedRetryPolicy."""
+        if not hasattr(self, "_retry_policy") or self._retry_policy is None:
+            self._retry_policy = BoundedRetryPolicy()
+        return self._retry_policy
+
+    def get_rate_limiting_diagnostics(self) -> dict[str, Any]:
+        """Return non-sensitive rate-limiting and retry diagnostics."""
+        tracker = self.rate_limit_tracker
+        rest_remaining = tracker.cooldown_remaining(
+            EndpointFamily.REST, getattr(self, "client_id", None)
+        )
+        trading_remaining = tracker.cooldown_remaining(
+            EndpointFamily.TRADING, getattr(self, "client_id", None)
+        )
+        return {
+            "throttled": (rest_remaining > 0.0 or trading_remaining > 0.0),
+            "rest_cooldown_remaining_seconds": round(rest_remaining, 1),
+            "trading_cooldown_remaining_seconds": round(trading_remaining, 1),
+            "last_retry_count": getattr(self, "_last_retry_count", 0),
+        }
 
     async def async_refresh_access_token(
         self, *, failed_token: str | None = None
@@ -347,6 +383,31 @@ class RestClientMixin:
         language = (
             accept_language if accept_language is not None else self._accept_language
         )
+        tracker = self.rate_limit_tracker
+        cooldown = tracker.cooldown_remaining(
+            EndpointFamily.REST, getattr(self, "client_id", None)
+        )
+        if cooldown > 2.0:
+            failure = build_api_failure(
+                op,
+                url,
+                429,
+                {
+                    "error": "throttled_cooldown_active",
+                    "retry_after": round(cooldown, 1),
+                },
+                partial_category,
+                "transient",
+            )
+            _LOGGER.debug(
+                "REST GET throttled fast-fail category=%s cooldown_remaining=%.1fs",
+                partial_category,
+                cooldown,
+            )
+            self._raise_partial_failure(partial_category, failure=failure)
+        elif cooldown > 0.0:
+            await asyncio.sleep(cooldown)
+
         access_token = await self.async_get_access_token()
         request_start = time.monotonic()
         headers = {
@@ -382,11 +443,19 @@ class RestClientMixin:
                         error_payload = None
 
                     if response.status == 429:
-                        retry_after = response.headers.get("Retry-After")
+                        retry_after_hdr = response.headers.get("Retry-After")
+                        retry_after_s = parse_retry_after(
+                            retry_after_hdr, default_delay=5.0
+                        )
+                        tracker.record_throttled(
+                            EndpointFamily.REST,
+                            retry_after_s,
+                            getattr(self, "client_id", None),
+                        )
                         sleep_s = 0
-                        if retry_after is not None:
+                        if retry_after_hdr is not None:
                             try:
-                                sleep_s = min(int(retry_after), 5)
+                                sleep_s = min(int(float(retry_after_s)), 5)
                             except (TypeError, ValueError):
                                 sleep_s = 0
                         if sleep_s > 0:

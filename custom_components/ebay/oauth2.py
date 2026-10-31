@@ -9,7 +9,7 @@ import time
 from http import HTTPStatus
 from typing import Any, cast
 
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientTimeout
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.config_entry_oauth2_flow import (
@@ -140,7 +140,12 @@ class EbayOAuth2Implementation(LocalOAuth2Implementation):
         }
         _LOGGER.debug("Sending eBay OAuth token request to %s", self.token_url)
         try:
-            resp = await session.post(self.token_url, headers=headers, data=data)
+            resp = await session.post(
+                self.token_url,
+                headers=headers,
+                data=data,
+                timeout=ClientTimeout(total=30),
+            )
         except (ClientError, TimeoutError) as exc:
             raise oauth_token_transient_error(
                 "eBay OAuth token request failed temporarily",

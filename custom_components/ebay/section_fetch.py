@@ -396,9 +396,19 @@ class SectionFetchMixin:
                         _safe_exception_context(exc),
                     )
                     partial_failures.append("sold_unsold_classification")
-                    selling_classification = {}
-                    sold_items_count = None
-                    unsold_items_count = None
+                    # Preserve existing classification and counts on transient failure
+                    if not selling_classification:
+                        selling_classification = dict(
+                            base.get("selling_classification") or {}
+                        )
+                    if sold_items_count is None:
+                        sold_items_count = base.get("summary", {}).get(
+                            "sold_items_count"
+                        )
+                    if unsold_items_count is None:
+                        unsold_items_count = base.get("summary", {}).get(
+                            "unsold_items_count"
+                        )
                     truncated_collections["sold_unsold"] = True
             try:
                 (
@@ -417,6 +427,13 @@ class SectionFetchMixin:
                     _safe_exception_context(exc),
                 )
                 partial_failures.append("seller_list_views")
+                # Preserve prior views on transient failure
+                for item_id in selling:
+                    if (
+                        item_id in previous_selling
+                        and "views" in previous_selling[item_id]
+                    ):
+                        selling[item_id]["views"] = previous_selling[item_id]["views"]
 
             try:
                 page = 1
@@ -452,6 +469,13 @@ class SectionFetchMixin:
                     _safe_exception_context(exc),
                 )
                 partial_failures.append("active_offers")
+                # Preserve prior offers on transient failure
+                for item_id in selling:
+                    if (
+                        item_id in previous_selling
+                        and "offers" in previous_selling[item_id]
+                    ):
+                        selling[item_id]["offers"] = previous_selling[item_id]["offers"]
             _stamp_section_attempt(
                 SECTION_SELLING,
                 success=True,
@@ -487,6 +511,16 @@ class SectionFetchMixin:
                     if analytics_partial:
                         partial_failures.append("analytics_views")
                         analytics_ok = False
+                        # Preserve prior analytics for items that could not be refreshed
+                        for item_id in selling:
+                            if (
+                                "analytics_views_30d" not in selling[item_id]
+                                and item_id in previous_selling
+                                and "analytics_views_30d" in previous_selling[item_id]
+                            ):
+                                selling[item_id]["analytics_views_30d"] = (
+                                    previous_selling[item_id]["analytics_views_30d"]
+                                )
                 except EbayAuthError:
                     raise
                 except (EbayError, aiohttp.ClientError, TimeoutError) as exc:
@@ -496,6 +530,14 @@ class SectionFetchMixin:
                     )
                     partial_failures.append("analytics_views")
                     analytics_ok = False
+                    for item_id in selling:
+                        if (
+                            item_id in previous_selling
+                            and "analytics_views_30d" in previous_selling[item_id]
+                        ):
+                            selling[item_id]["analytics_views_30d"] = previous_selling[
+                                item_id
+                            ]["analytics_views_30d"]
             _stamp_section_attempt(
                 SECTION_ANALYTICS,
                 success=analytics_ok,

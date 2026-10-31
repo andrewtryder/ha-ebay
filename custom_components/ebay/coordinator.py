@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -169,6 +170,7 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
             _LOGGER,
             name=f"{DOMAIN}_{entry.entry_id}",
             update_interval=timedelta(minutes=int(options[CONF_POLL_INTERVAL])),
+            config_entry=entry,
         )
 
     def recent_events(self, kind: str) -> list[dict[str, Any]]:
@@ -742,6 +744,22 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
             cancel()
         self._scheduled.clear()
         self._async_notify_timer_listeners()
+
+    async def async_shutdown(self) -> None:
+        """Cancel background tasks, listeners, and timers on entry unload."""
+        self.cancel_scheduled_events()
+        self._timer_listeners.clear()
+        self._event_callbacks.clear()
+        task = getattr(self, "_ending_soon_fired_save_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._ending_soon_fired_save_task = None
+        if hasattr(super(), "async_shutdown") and hasattr(self, "_debounced_refresh"):
+            await super().async_shutdown()
 
 
 def _baseline_payload(
