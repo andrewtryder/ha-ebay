@@ -10,7 +10,9 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .account_identity import get_entry_account_identity
 from .const import (
+    CONF_ACCOUNT_ID,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENDING_SOON_THRESHOLD,
@@ -34,6 +36,7 @@ from .options_parse import parse_price_targets, pinned_ids
 from .sections import SECTION_SPECS
 
 TO_REDACT = {
+    CONF_ACCOUNT_ID,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_REFRESH_TOKEN,
@@ -68,6 +71,7 @@ async def async_get_config_entry_diagnostics(
         "domain": DOMAIN,
         "environment": entry.data.get(CONF_ENVIRONMENT),
         "site_id": entry.data.get(CONF_SITE_ID),
+        "account_identity": get_entry_account_identity(entry).to_diagnostic_dict(),
         "enabled_features": {
             key: options.get(spec.option_key) if spec.option_key else None
             for key, spec in SECTION_SPECS.items()

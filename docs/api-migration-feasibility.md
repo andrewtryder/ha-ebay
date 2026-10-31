@@ -197,14 +197,19 @@ The validation harness includes 6 built-in probes for safe schema and contract d
 [Milestone 7: Sold & Unsold Listing Classification] -> MERGED (PR #101)
              │
              ▼
-[Milestone 8: Remaining Legacy Operations & Identity Validation] (CURRENT)
+[Milestone 8: Remaining Legacy Operations & Identity Validation] -> MERGED (PR #102)
   - Canonical Identity Model: custom_components/ebay/parsers/identity_parity.py
   - Complete Operations Matrix CLI: scripts/validate_legacy_fields_parity.py
   - Comprehensive Audit: docs/remaining-legacy-operations-validation.md
   - Production coordinators unchanged (Trading XML GetUser authoritative; zero cutover)
              │
              ▼
-[Milestone 9: Account Identity & Multiple Accounts Foundation]
+[Milestone 9: Account Identity & Multiple Accounts Foundation] (CURRENT)
+  - Canonical AccountIdentity model: custom_components/ebay/account_identity.py
+  - Same-application multi-account support enabled and tested
+  - Duplicate detection matrix (Cases A–E) & reauth account switching protections
+  - Backward-compatible version 5 ConfigEntry migration preserving legacy unique IDs
+  - Zero modern provider cutover; 100% production isolation
              │
              ▼
 [Future Production Cutover]:

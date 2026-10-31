@@ -12,6 +12,12 @@ from homeassistant.core import callback
 from homeassistant.helpers import config_entry_oauth2_flow, selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .account_identity import (
+    async_verify_authenticated_account,
+    compute_account_unique_id,
+    get_entry_account_identity,
+    is_same_account,
+)
 from .api import (
     CORE_SCOPE,
     EbayApiClient,
@@ -25,7 +31,9 @@ from .api import (
 )
 from .const import (
     ALLOWED_PER_ITEM_CAPS,
+    CONF_ACCOUNT_IDENTITY,
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
+    CONF_ACCOUNT_USERNAME,
     CONF_ANALYTICS_ENABLED,
     CONF_BUYING_ENABLED,
     CONF_CLIENT_ID,
@@ -83,7 +91,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     """Handle an eBay config flow."""
 
     DOMAIN = DOMAIN
-    VERSION = 4
+    VERSION = 5
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -144,11 +152,12 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     errors=errors,
                     description_placeholders=self._setup_description_placeholders(),
                 )
-            await self.async_set_unique_id(
-                f"{self._data[CONF_ENVIRONMENT]}:{self._data[CONF_CLIENT_ID]}"
-            )
-            if self.source != config_entries.SOURCE_REAUTH:
-                self._abort_if_unique_id_configured()
+            if self.source == config_entries.SOURCE_REAUTH:
+                entry = self._get_reauth_entry()
+                entry_unique_id = getattr(entry, "unique_id", None)
+                if entry_unique_id:
+                    await self.async_set_unique_id(entry_unique_id)
+                    self._abort_if_unique_id_mismatch(reason="wrong_account")
 
             self._requested_scopes = self._scopes_for_authorization()
             self.flow_impl = EbayOAuth2Implementation(
@@ -183,10 +192,97 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             "token": token,
             CONF_OAUTH_SCOPES: resolve_granted_scopes(self._requested_scopes, token),
         }
+
+        # Authenticate and verify account identity with the freshly obtained access token
+        access_token = token.get("access_token", "")
+        session = async_get_clientsession(self.hass)
+        account_identity = await async_verify_authenticated_account(
+            session,
+            environment=self._data[CONF_ENVIRONMENT],
+            access_token=access_token,
+            client_id=self._data.get(CONF_CLIENT_ID, ""),
+            site_id=self._data.get(CONF_SITE_ID, "0"),
+        )
+
         if self.source == config_entries.SOURCE_REAUTH:
+            entry = self._get_reauth_entry()
+            # If identity verification fails during reauth, fail closed
+            if not account_identity.is_verified:
+                _LOGGER.warning(
+                    "Reauthorization identity verification failed: %s",
+                    account_identity.failure_reason,
+                )
+                return self.async_abort(reason="cannot_connect")
+
+            # Check for account switching during reauthorization
+            existing_identity = get_entry_account_identity(entry)
+            if (
+                existing_identity.account_id
+                and existing_identity.account_id != account_identity.account_id
+            ):
+                _LOGGER.warning(
+                    "Reauthorization account mismatch: original account_id does not match newly authenticated account"
+                )
+                return self.async_abort(reason="account_mismatch")
+            if (
+                existing_identity.username
+                and account_identity.username
+                and existing_identity.username.lower()
+                != account_identity.username.lower()
+            ):
+                _LOGGER.warning(
+                    "Reauthorization username mismatch: original %s vs newly authenticated %s",
+                    existing_identity.username,
+                    account_identity.username,
+                )
+                return self.async_abort(reason="account_mismatch")
+
+            entry_data[CONF_ACCOUNT_IDENTITY] = account_identity.to_config_entry_dict()
             return self._finish_reauth(entry_data)
+
+        # New configuration flow:
+        if not account_identity.is_verified or not account_identity.account_id:
+            _LOGGER.warning(
+                "Account identity could not be verified during setup: %s",
+                account_identity.failure_reason,
+            )
+            return self.async_abort(reason="account_unverifiable")
+
+        account_unique_id = compute_account_unique_id(
+            self._data[CONF_ENVIRONMENT], account_identity.account_id
+        )
+
+        # Duplicate detection across all existing entries (Case B & Case C)
+        for existing_entry in self._async_current_entries():
+            if existing_entry.unique_id == account_unique_id:
+                return self.async_abort(reason="already_configured")
+            existing_id = get_entry_account_identity(existing_entry)
+            if existing_id and is_same_account(existing_id, account_identity):
+                return self.async_abort(reason="already_configured")
+            # Legacy entry check
+            if (
+                existing_entry.unique_id
+                == f"{self._data[CONF_ENVIRONMENT]}:{self._data[CONF_CLIENT_ID]}"
+            ):
+                legacy_user = existing_entry.data.get(CONF_ACCOUNT_USERNAME)
+                if (
+                    legacy_user
+                    and account_identity.username
+                    and legacy_user.lower() == account_identity.username.lower()
+                ):
+                    return self.async_abort(reason="already_configured")
+
+        await self.async_set_unique_id(account_unique_id)
+        self._abort_if_unique_id_configured()
+
+        entry_data[CONF_ACCOUNT_IDENTITY] = account_identity.to_config_entry_dict()
+        title = (
+            f"eBay ({account_identity.username})"
+            if account_identity.username
+            else "eBay"
+        )
         return self.async_create_entry(
-            title="eBay",
+            title=title,
             data=entry_data,
             options=DEFAULT_OPTIONS,
         )

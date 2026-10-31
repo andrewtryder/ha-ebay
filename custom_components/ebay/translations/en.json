@@ -58,6 +58,8 @@
       "required": "This field is required."
     },
     "abort": {
+      "account_mismatch": "The authorized eBay account does not match the account configured for this integration entry.",
+      "account_unverifiable": "Could not verify the authenticated eBay account identity.",
       "already_configured": "An eBay integration entry is already configured with these credentials.",
       "oauth_failed": "Could not authorize with eBay.",
       "oauth_timeout": "Timed out while authorizing with eBay.",

@@ -19,6 +19,12 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 from voluptuous_serialize import convert
 
+from custom_components.ebay.account_identity import (
+    AccountBindingState,
+    AccountIdentifierType,
+    AccountIdentity,
+    AccountIdentityProvenance,
+)
 from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
@@ -627,11 +633,25 @@ def test_credentials_are_stripped_before_unique_id_and_oauth(
     )
 
     assert result["type"] == "external"
-    assert unique_ids == ["production:client-id"]
     assert flow._data[CONF_CLIENT_ID] == "client-id"
     assert flow._data[CONF_CLIENT_SECRET] == "client-secret"
     assert flow._data[CONF_RUNAME] == "Example-Runame"
     assert flow._data[CONF_SITE_ID] == "0"
+
+    # In M9, unique ID is set after OAuth upon verified account identity
+    asyncio.run(
+        flow.async_oauth_create_entry(
+            {
+                "auth_implementation": "ebay:production:client-id",
+                "token": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                },
+            }
+        )
+    )
+    assert unique_ids == ["production:test_user_id"]
 
 
 def test_credentials_reject_invalid_site_id(
@@ -1135,6 +1155,28 @@ def _flow(monkeypatch: pytest.MonkeyPatch) -> EbayConfigFlow:
     flow.flow_id = "flow-123"
     monkeypatch.setattr(flow, "async_set_unique_id", _async_noop)
     monkeypatch.setattr(flow, "_abort_if_unique_id_configured", lambda *args: None)
+    monkeypatch.setattr(
+        flow, "_abort_if_unique_id_mismatch", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(flow, "_async_current_entries", lambda: [])
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: object(),
+    )
+
+    async def _mock_verify(*args: Any, **kwargs: Any) -> AccountIdentity:
+        return AccountIdentity(
+            account_id="test_user_id",
+            username="test_user",
+            provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
+            binding_state=AccountBindingState.VERIFIED,
+            identifier_type=AccountIdentifierType.USER_ID,
+        )
+
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        _mock_verify,
+    )
     return flow
 
 

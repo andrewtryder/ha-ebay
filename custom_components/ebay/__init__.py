@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from .const import (
+    CONF_ACCOUNT_ID,
+    CONF_ACCOUNT_IDENTITY,
+    CONF_ACCOUNT_USERNAME,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
@@ -131,7 +134,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate config entries to the current schema and entity unique IDs."""
-    if entry.version > 4:
+    if entry.version > 5:
         _LOGGER.debug(
             "Rejecting eBay config entry migration entry_id=%s version=%s",
             entry.entry_id,
@@ -178,6 +181,29 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.config_entries.async_update_entry(entry, data=data, version=4)
         _LOGGER.debug(
             "Migrated eBay config entry for expanded OAuth scopes entry_id=%s to_version=4",
+            entry.entry_id,
+        )
+
+    if entry.version < 5:
+        # Backward-compatible account identity association without rewriting unique IDs.
+        data = dict(entry.data)
+        if CONF_ACCOUNT_IDENTITY not in data:
+            data[CONF_ACCOUNT_IDENTITY] = {
+                "entry_id": entry.entry_id,
+                "environment": data.get(CONF_ENVIRONMENT, "production"),
+                "client_id": data.get(CONF_CLIENT_ID, ""),
+                "account_id": data.get(CONF_ACCOUNT_ID),
+                "identifier_type": "legacy_app_environment",
+                "username": data.get(CONF_ACCOUNT_USERNAME),
+                "binding_state": "legacy_compatible",
+                "provenance": "legacy_migration",
+                "verified_at": None,
+                "failure_reason": "none",
+                "reauth_generation": data.get(CONF_REAUTH_GENERATION, 0),
+            }
+        hass.config_entries.async_update_entry(entry, data=data, version=5)
+        _LOGGER.debug(
+            "Migrated eBay config entry for account identity isolation entry_id=%s to_version=5",
             entry.entry_id,
         )
 

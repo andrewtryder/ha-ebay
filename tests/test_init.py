@@ -12,6 +12,12 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 import custom_components.ebay as ebay_integration
+from custom_components.ebay.account_identity import (
+    AccountBindingState,
+    AccountIdentifierType,
+    AccountIdentity,
+    AccountIdentityProvenance,
+)
 from custom_components.ebay.const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -20,6 +26,30 @@ from custom_components.ebay.const import (
     CONF_RUNAME,
     CONF_SITE_ID,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_identity_verification() -> Any:
+    async def _mock_verify(*args: Any, **kwargs: Any) -> AccountIdentity:
+        return AccountIdentity(
+            account_id="client",
+            username="client",
+            binding_state=AccountBindingState.VERIFIED,
+            provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
+            identifier_type=AccountIdentifierType.USER_ID,
+        )
+
+    with (
+        patch(
+            "custom_components.ebay.config_flow.async_verify_authenticated_account",
+            side_effect=_mock_verify,
+        ),
+        patch(
+            "custom_components.ebay.config_flow.async_get_clientsession",
+            return_value=Mock(),
+        ),
+    ):
+        yield
 
 
 def _entry_data(**overrides: Any) -> dict[str, Any]:
@@ -99,6 +129,28 @@ def _patch_setup(*, coordinator: Mock, client: Any = None) -> ExitStack:
             return_value=Mock(),
         )
     )
+
+    async def _mock_verify(*args: Any, **kwargs: Any) -> AccountIdentity:
+        return AccountIdentity(
+            account_id="client",
+            username="client",
+            binding_state=AccountBindingState.VERIFIED,
+            provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
+            identifier_type=AccountIdentifierType.USER_ID,
+        )
+
+    stack.enter_context(
+        patch(
+            "custom_components.ebay.config_flow.async_verify_authenticated_account",
+            side_effect=_mock_verify,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "custom_components.ebay.config_flow.async_get_clientsession",
+            return_value=Mock(),
+        )
+    )
     stack.enter_context(
         patch(
             "homeassistant.helpers.aiohttp_client.async_get_clientsession",
@@ -145,15 +197,15 @@ def test_migrate_v1_refresh_token_to_v2() -> None:
     ):
         assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
 
-    assert entry.version == 4
+    assert entry.version == 5
     assert "token" in entry.data
     assert entry.data["token"]["refresh_token"] == "legacy-refresh"
-    assert hass.config_entries.async_update_entry.call_count == 3
+    assert hass.config_entries.async_update_entry.call_count == 4
 
 
 def test_migrate_rejects_future_version() -> None:
     hass = Mock()
-    entry = _mock_entry(version=5)
+    entry = _mock_entry(version=6)
     assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is False
 
 
@@ -174,8 +226,30 @@ def test_migrate_v3_to_v4_clears_oauth_scopes() -> None:
         data=_entry_data(**{CONF_OAUTH_SCOPES: "old-scope"}),
     )
     assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
-    assert entry.version == 4
+    assert entry.version == 5
     assert CONF_OAUTH_SCOPES not in entry.data
+
+
+def test_migrate_v4_to_v5_adds_account_identity() -> None:
+    from custom_components.ebay.const import CONF_ACCOUNT_IDENTITY
+
+    hass = Mock()
+
+    def _update_entry(entry: Mock, **kwargs: Any) -> None:
+        if "data" in kwargs:
+            entry.data = kwargs["data"]
+        if "version" in kwargs:
+            entry.version = kwargs["version"]
+
+    hass.config_entries.async_update_entry = Mock(side_effect=_update_entry)
+    entry = _mock_entry(version=4, data=_entry_data())
+    assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
+    assert entry.version == 5
+    assert CONF_ACCOUNT_IDENTITY in entry.data
+    assert entry.data[CONF_ACCOUNT_IDENTITY]["binding_state"] == "legacy_compatible"
+    assert (
+        entry.data[CONF_ACCOUNT_IDENTITY]["identifier_type"] == "legacy_app_environment"
+    )
 
 
 def test_async_setup_entry_requires_core_oauth_scope() -> None:
@@ -240,7 +314,7 @@ def test_migrate_v2_renames_legacy_sensor_unique_ids(
     ):
         assert asyncio.run(ebay_integration.async_migrate_entry(hass, entry)) is True
 
-    assert entry.version == 4
+    assert entry.version == 5
     assert migrated == [
         (
             f"{entry.entry_id}_selling_total_sold",
