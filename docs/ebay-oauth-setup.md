@@ -208,11 +208,16 @@ exchange and creates the integration entry.
 
 ## Multiple eBay accounts
 
-A configuration is unique by environment and Client ID. Only one eBay account
-can therefore be configured for a given developer application credential set.
+As of Milestone 9, **you can configure multiple distinct eBay accounts using the same eBay developer application keyset**. You do not need to register separate developer applications on eBay to monitor additional accounts.
 
-To monitor another eBay account, create a separate eBay developer application
-and configure it with a different Client ID.
+To add another account:
+1. Go to **Settings → Devices & services → Add integration** and select **eBay**.
+2. Enter the same **App ID**, **Cert ID**, and **RuName** as your existing entry.
+3. When the eBay sign-in and consent page appears in your browser, sign in with your **other** regular eBay account and grant access.
+4. Home Assistant verifies the account's durable identifier (`EIASToken`) and creates a separate, completely isolated `ConfigEntry` (e.g. `eBay (second_seller)`).
+
+> [!NOTE]
+> If eBay does not return a durable `EIASToken` for an account or the account identity is ambiguous, setup will fail closed (`account_ambiguous`) to protect your installation from duplicate or conflicted entries. Authorizing the exact same account twice will safely abort with `already_configured`.
 
 ## Manual authorization fallback
 

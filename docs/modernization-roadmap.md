@@ -29,7 +29,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | [#101](https://github.com/andrewtryder/ha-ebay/pull/101) | **Merged** (`823dce0`) |
 | **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | [#102](https://github.com/andrewtryder/ha-ebay/pull/102) | **Merged** (`e34298f`) |
 | **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | [#103](https://github.com/andrewtryder/ha-ebay/pull/103) | **Merged** (`ee7b769`): Same-app multi-account onboarding, canonical AccountIdentity, duplicate matrix, reauth protection, zero cutover |
-| **Milestone 10** | One-Click eBay OAuth Architecture Assessment | `docs/ebay-one-click-oauth-architecture` | PR | **Completed (Current PR)**: Architecture decision record, threat model, feasibility matrix, zero managed credentials, BYO baseline maintained |
+| **Milestone 10** | Guided BYO eBay OAuth Architecture & Onboarding Specification | `docs/ebay-one-click-oauth-architecture` | PR | **Completed (Current PR)**: Architecture decision record, threat model, feasibility analysis, guided BYO onboarding wizard specification, zero managed credentials |
 | **Milestone 11** | Reliability, Quotas, & Compatibility Hardening | `feat/ebay-modern-api-reliability` | TBD | Planned |
 | **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
 
@@ -161,13 +161,15 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Strict data isolation across accounts for entities, coordinators, storage stores, and feedback username caches.
   - Milestone status: **Completed and merged in PR #103 (`ee7b769`).**
 
-### 11. One-Click eBay OAuth Architecture Assessment (Milestone 10)
+### 11. Guided BYO eBay OAuth Architecture Assessment (Milestone 10)
 - **Feasibility & Architecture Decision**:
   - Authored comprehensive Architecture Decision Record in [`docs/one-click-oauth-architecture.md`](one-click-oauth-architecture.md).
-  - Evaluated 5 architectural tracks across technical feasibility, legal compliance, secret exposure risk, and maintenance overhead.
-  - Reached **CONDITIONAL GO (Phased Evolution)**: Hard NO-GO on embedded/redistributed client secrets or maintainer-hosted brokers; continue Bring-Your-Own (BYO) developer credentials as primary baseline; recommend Home Assistant `application_credentials` integration as near-term UX enhancement; designate Nabu Casa Home Assistant Cloud Account Linking as the sole legitimate long-term path for zero-credential one-click linking if `ha-ebay` is ever proposed for Core.
+  - Adopted **GO — Guided Bring-Your-Own (BYO) eBay OAuth Setup**: Every user continues to own and configure their own eBay developer keyset. Firmly rejected shared embedded secrets and maintainer-hosted brokers.
+  - Separated independent tasks: (1) One-time portal keyset creation (remains on eBay), (2) One-time account consent (OAuth web flow), and (3) Automated token management and refresh (handled locally by Home Assistant). Users never copy or paste legacy Auth'n'Auth tokens.
+  - Evaluated Home Assistant Core `application_credentials`: marked conditional due to RuName and environment schema mismatches; concluded that a specialized custom config-flow wizard delivers a cleaner, safer UX.
+  - Authored actionable implementation specification for an upcoming feature PR adding an in-flow guided onboarding wizard with copyable callback URLs, portal guidance, and clean input validation.
 - **Contract & Security Findings**:
   - Confirmed eBay OAuth mandates RuName for `redirect_uri` and Basic Auth with client secret for token exchange; PKCE is not supported for public client token exchange.
   - Documented that OAuth grants and refresh tokens are non-transferable across developer keysets.
-  - Retained 100% of Milestone 9 multi-account guarantees (`EIASToken`, 3-state equivalence, atomic reauthorization).
-  - Milestone status: **Architecture assessment completed; zero production cutover.** Next planned workstream: **Milestone 11 (Reliability, Quotas, & Compatibility Hardening)**.
+  - Preserved 100% of Milestone 9 multi-account guarantees (`EIASToken`, 3-state equivalence, atomic reauthorization).
+  - Milestone status: **Architecture assessment completed; zero production cutover.** Next planned workstream: **Guided BYO Onboarding Wizard Implementation (Milestone 10.1 Feature PR) / Milestone 11 (Reliability, Quotas, & Compatibility Hardening)**.

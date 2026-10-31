@@ -212,11 +212,11 @@ The validation harness includes 6 built-in probes for safe schema and contract d
   - Zero modern provider cutover; 100% production isolation
              │
              ▼
-[Milestone 10: One-Click OAuth Architecture Assessment] (CURRENT)
+[Milestone 10: Guided BYO OAuth Architecture & Onboarding Specification] (CURRENT)
   - Architecture Decision Record: docs/one-click-oauth-architecture.md
-  - Strict adherence to BYO credentials baseline; zero secret redistribution
+  - Permanent adoption of user-owned developer keyset baseline (BYO)
+  - Actionable specification for Home Assistant in-flow guided onboarding wizard
   - Hard NO-GO on embedded secrets or maintainer-hosted broker proxies
-  - Path toward official Home Assistant Cloud linking via Nabu Casa identified
              │
              ▼
 [Future Production Cutover]:
