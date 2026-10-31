@@ -25,10 +25,10 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 4** | Auction & Bidding Modernization Preparation & Parity Harness | `feat/ebay-auction-validation` | [#97](https://github.com/andrewtryder/ha-ebay/pull/97) | **Merged** (`4c2f394`) |
 | **Milestone 5** | Active Seller Listings Normalization and Parity Validation | `feat/ebay-seller-listings-validation` | [#98](https://github.com/andrewtryder/ha-ebay/pull/98) | **Merged** (`4ac5c80`) |
 | **Tooling & Foundation** | Modernize uv Tooling & Prepare Existing-User Migration | `chore/uv-ha-2026-10-migration-foundation` | [#99](https://github.com/andrewtryder/ha-ebay/pull/99) | **Merged** (`e0a957b`) |
-| **Milestone 6** | Best Offers & Negotiation History Modernization Package | `feat/ebay-offers-modernization` | PR | **Completed** (Read-only validation package completed; production migration blocked pending live entitlement and parity evidence) |
-| **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | TBD | **Next Planned Workstream** |
-| **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | TBD | Planned |
-| **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | TBD | Planned |
+| **Milestone 6** | Best Offers & Negotiation History Modernization Package | `feat/ebay-offers-modernization` | [#100](https://github.com/andrewtryder/ha-ebay/pull/100) | **Merged** (`cc59442`) |
+| **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | [#101](https://github.com/andrewtryder/ha-ebay/pull/101) | **Merged** (`823dce0`) |
+| **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | PR | **Completed (Current PR)**: Full XML inventory audit, REST Identity parity validation, Feedback/Messages/Standards audited, zero cutover |
+| **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | TBD | **Next Planned Workstream** |
 | **Milestone 10** | One-Click eBay OAuth Architecture Assessment | Design deliverable | TBD | Planned |
 | **Milestone 11** | Reliability, Quotas, & Compatibility Hardening | `feat/ebay-modern-api-reliability` | TBD | Planned |
 | **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
@@ -131,4 +131,19 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Evaluates all monitored classification fields (`sold_items_count`, `unsold_items_count`, `sold_item_ids`, `unsold_item_ids`, `selling_classification`, `item_id`, `lifecycle_state`, `sale_classification`, `quantity_sold`, `ended_at`) across the 6-state parity taxonomy.
   - Anti-false-positive rule: Empty collections evaluate record fields as unverified and report inconclusive status.
   - Strict privacy protections: Default-deny report schema, deterministic SHA-256 item pseudonymization (`item_<sha256_12>`), allowlisted symbolic error codes, and generic diagnostic messages.
-  - Milestone status: **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Next planned workstream: **Milestone 8 (Remaining Trading XML Operations)**.
+  - Milestone status: **Read-only validation package completed; merged in PR #101.**
+
+### 9. Remaining Legacy Operations & Account Identity Modernization (Milestone 8)
+- **Authoritative Codebase Audit & Ground Truth Discovery**:
+  - Conducted full dependency scan of Trading XML operations across the codebase: `GetUser`, `GetMyeBayBuying`, `GetMyeBaySelling`, `GetSellerList`, and `GetBestOffers`.
+  - Corrected false assumptions regarding `GetFeedback` and `GetMemberMessages`: Neither operation is called in the codebase. Home Assistant already natively queries the modern eBay REST Feedback API (`GET /buy/feedback/v1/...`) and REST Messages API (`GET /commerce/message/v1/conversation`).
+  - Identified the exact role of `GetUser`: Called solely in `custom_components/ebay/clients/feedback.py:35` to obtain `<User><UserID>` (the public account handle / username) to pass as query parameter `user_id` to REST Feedback endpoints.
+  - Verified modern REST Commerce Identity endpoint `GET /commerce/identity/v1/user/`: Discovered that modern `userId` is an immutable, opaque system identifier that **cannot** be passed to REST Feedback (which requires `username`).
+  - Audited scope requirements: REST Commerce Identity requires `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`, which is not granted to existing users. Production cutover is strictly blocked to prevent authentication failures and re-auth prompts.
+- **Read-Only Identity Parity Module & Legacy Operations Audit Harness**:
+  - Added [`custom_components/ebay/parsers/identity_parity.py`](../custom_components/ebay/parsers/identity_parity.py) and CLI harness [`scripts/validate_legacy_fields_parity.py`](../scripts/validate_legacy_fields_parity.py).
+  - Built canonical typed models (`NormalizedAccountIdentity`, `IdentityCollectionResult`, `AccountType`) and read-only GraphQL identity contract probes.
+  - Evaluates monitored fields (`username`, `user_id`, `account_type`, `registration_marketplace_id`, `feedback_score`, `registration_date`) across the established 6-state taxonomy.
+  - CLI harness features `--audit-matrix` to print or export the complete legacy operations dependency matrix in Markdown or JSON.
+  - Strict privacy protections: Automatic SHA-256 user and account pseudonymization (`user_<sha256_12>`, `account_<sha256_12>`), credential redaction, and allowlisted error codes.
+  - Milestone status: **Read-only validation completed; zero production cutover.** Next planned workstream: **Milestone 9 (Account Identity & Multiple Accounts)**.
