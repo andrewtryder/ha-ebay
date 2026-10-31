@@ -61,6 +61,7 @@
       "invalid_client_id": "Enter a valid eBay App ID / Client ID.",
       "invalid_client_id_runame": "App ID / Client ID cannot be the RuName. Enter your eBay App ID.",
       "invalid_client_id_url": "App ID / Client ID cannot be a URL. Enter your eBay App ID.",
+      "invalid_environment": "Select a supported eBay environment (Production or Sandbox).",
       "invalid_runame": "Enter a valid eBay RuName.",
       "invalid_runame_title": "RuName must be the eBay-generated redirect name, not a display title.",
       "invalid_runame_url": "RuName must be the eBay-generated redirect name, not a callback URL.",

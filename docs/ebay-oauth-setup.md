@@ -135,12 +135,15 @@ In the **Enter eBay application keys** form, enter your credentials:
 
 The integration automatically trims leading and trailing whitespace from every field
 and validates that:
-- You have not pasted a URL or Display Title into the RuName field.
-- You have not pasted an RuName or URL into the App ID / Client ID field.
+- A valid eBay environment (`production` or `sandbox`) is selected; invalid values fail closed.
+- The Cert ID / Client Secret uses a password-type selector to mask input.
+- You have not pasted a URL, Display Title, internal whitespace, or control characters into the RuName field.
+- You have not pasted an RuName, URL, internal whitespace, or control characters into the App ID / Client ID field.
 - All required fields are present.
 
-If validation fails, your validly entered keys are preserved in the form so you do not
-need to re-enter them.
+If validation fails, your valid App ID, RuName, Environment, and Marketplace selections
+are preserved in the form. For security, your Client Secret is never redisclosed in frontend
+form schemas and must be re-entered on validation retry or reauthorization.
 
 Leave **Manual authorization (troubleshooting fallback)** unchecked for standard
 automatic setup.

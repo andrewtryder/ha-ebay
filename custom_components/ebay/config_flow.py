@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import unicodedata
 from typing import Any
 
 import voluptuous as vol
@@ -170,9 +171,12 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     else OAUTH_MODE_CALLBACK
                 )
             if errors:
+                clean_defaults = {
+                    k: v for k, v in self._data.items() if k != CONF_CLIENT_SECRET
+                }
                 return self.async_show_form(
                     step_id="credentials",
-                    data_schema=self._credentials_schema(self._data),
+                    data_schema=self._credentials_schema(clean_defaults),
                     errors=errors,
                     description_placeholders=self._setup_description_placeholders(),
                 )
@@ -486,10 +490,9 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     CONF_CLIENT_ID,
                     default=defaults.get(CONF_CLIENT_ID, ""),
                 ): str,
-                vol.Required(
-                    CONF_CLIENT_SECRET,
-                    default=defaults.get(CONF_CLIENT_SECRET, ""),
-                ): str,
+                vol.Required(CONF_CLIENT_SECRET): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
                 vol.Required(
                     CONF_RUNAME,
                     default=defaults.get(CONF_RUNAME, ""),
@@ -522,12 +525,14 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         }
 
     def _reauth_defaults(self) -> dict[str, Any]:
-        """Return defaults from the existing entry during reauth."""
+        """Return safe non-secret defaults from the existing entry during reauth."""
         if self.source != config_entries.SOURCE_REAUTH:
             return {}
-        defaults = dict(self._get_reauth_entry().data)
-        defaults[CONF_CLIENT_SECRET] = ""
-        return defaults
+        return {
+            k: v
+            for k, v in self._get_reauth_entry().data.items()
+            if k != CONF_CLIENT_SECRET
+        }
 
     def _scopes_for_authorization(self) -> str:
         """Return scopes for the current authorize/reauth attempt."""
@@ -1099,6 +1104,20 @@ def _schema_price_target_remove(targets: list[dict[str, str]]) -> vol.Schema:
     )
 
 
+def _has_disallowed_identifier_chars(val: str) -> bool:
+    """Check if an identifier contains whitespace, control characters, or non-printable chars."""
+    for c in val:
+        if c.isspace():
+            return True
+        code = ord(c)
+        if code < 32 or (127 <= code <= 159):
+            return True
+        cat = unicodedata.category(c)
+        if cat in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"):
+            return True
+    return False
+
+
 def _normalize_credentials(
     user_input: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -1107,9 +1126,18 @@ def _normalize_credentials(
     data.pop("manual_authorization", None)
     errors: dict[str, str] = {}
 
-    raw_env = data.get(CONF_ENVIRONMENT)
-    env = "production" if raw_env is None else str(raw_env).strip()
-    data[CONF_ENVIRONMENT] = env if env in ENVIRONMENTS else "production"
+    # Environment validation (fail-closed)
+    if CONF_ENVIRONMENT in user_input and user_input[CONF_ENVIRONMENT] is not None:
+        raw_env = str(user_input[CONF_ENVIRONMENT]).strip()
+        if raw_env in ENVIRONMENTS:
+            data[CONF_ENVIRONMENT] = raw_env
+        elif raw_env.lower() in ENVIRONMENTS:
+            data[CONF_ENVIRONMENT] = raw_env.lower()
+        else:
+            data[CONF_ENVIRONMENT] = raw_env
+            errors[CONF_ENVIRONMENT] = "invalid_environment"
+    else:
+        data[CONF_ENVIRONMENT] = "production"
 
     for field in (
         CONF_CLIENT_ID,
@@ -1126,7 +1154,7 @@ def _normalize_credentials(
     client_id = data.get(CONF_CLIENT_ID, "")
     runame = data.get(CONF_RUNAME, "")
 
-    # Validate RuName format: must not be a URL or a Display Title
+    # Validate RuName format: must not be a URL, Display Title, or contain whitespace/control chars
     if CONF_RUNAME not in errors:
         if (
             "://" in runame
@@ -1142,8 +1170,10 @@ def _normalize_credentials(
             "display title",
         ):
             errors[CONF_RUNAME] = "invalid_runame_title"
+        elif _has_disallowed_identifier_chars(runame):
+            errors[CONF_RUNAME] = "invalid_runame"
 
-    # Validate Client ID format: must not be a URL, an RuName, or contain whitespace
+    # Validate Client ID format: must not be a URL, an RuName, or contain whitespace/control chars
     if CONF_CLIENT_ID not in errors:
         if (
             "://" in client_id
@@ -1154,7 +1184,7 @@ def _normalize_credentials(
             errors[CONF_CLIENT_ID] = "invalid_client_id_url"
         elif runame and client_id == runame:
             errors[CONF_CLIENT_ID] = "invalid_client_id_runame"
-        elif " " in client_id:
+        elif _has_disallowed_identifier_chars(client_id):
             errors[CONF_CLIENT_ID] = "invalid_client_id"
 
     if (
