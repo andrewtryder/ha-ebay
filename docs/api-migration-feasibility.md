@@ -165,15 +165,16 @@ The validation harness includes 6 built-in probes for safe schema and contract d
 
 ---
 
-### 2.6 Milestone 8: Remaining Trading XML Operations
+### 2.6 Milestone 8: Remaining Trading XML Operations & Account Identity
 
 | Legacy Operation | Modern Replacement | Status | Analysis & HA Impact |
 |---|---|---|---|
-| **`GetUser`** | REST **Commerce Identity API** (`GET /commerce/identity/v1/user/`) | **[OFFICIAL SPEC]** High Feasibility | Used for account ID, username, registration site, and seller business status. Requires `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly`. |
-| **`GetFeedback`** | None | **[NO REPLACEMENT]** | Official eBay Modern APIs Migration Guide confirms no direct modern REST/GraphQL equivalent for full public feedback scores and comments. Trading XML `GetFeedback` must remain the permanent source. |
-| **`GetSellerDashboard`** / **`GetSellerStandardsProfiles`** | REST **Sell Analytics API** (`GET /sell/analytics/v1/seller_standards_profile`) | **[OFFICIAL SPEC]** Already Integrated | Already used in `ha-ebay` for seller standards and defect tracking under `CONF_SELLER_STANDARDS_ENABLED`. |
-| **`GetMemberMessages`** | None (Post-Order / Notification topics only) | **[NO REPLACEMENT]** | eBay has deprecated member-to-member message retrieval in modern APIs; buyer questions are only delivered via Event Notification webhooks or legacy XML. |
-| **`GetMyeBayBuying` (`LostList`)** | None | **[NO REPLACEMENT]** | eBay migration guide explicitly states: *"Retrieve LostList: No replacement (this feature is no longer supported in My eBay)."* |
+| **`GetUser`** | REST **Commerce Identity API** (`GET /commerce/identity/v1/user/`) | **[OFFICIAL SPEC]** Validated Offline (M8) | Used at `clients/feedback.py:35` solely for username lookup (`<User><UserID>`) for REST Feedback endpoints. Modern REST `username` matches; however, REST `userId` is an opaque immutable identifier; Feedback API data handling continues to evolve under eBay 2025 updates. Requires scope `https://api.ebay.com/oauth/api_scope/commerce.identity.readonly` (unconfigured in integration requested scopes; account-specific grants unverified). Production cutover blocked. |
+| **`GetFeedback`** | REST **Feedback API** (`GET /buy/feedback/v1/...`) | **[OFFICIAL SPEC]** Already REST-Native | Audited in M8: `GetFeedback` is NOT called in `ha-ebay`. The integration already uses REST Feedback for summary (`/feedback_rating_summary`), entries (`/feedback`), and awaiting feedback (`/awaiting_feedback`). |
+| **`GetSellerDashboard`** / **`GetSellerStandardsProfiles`** | REST **Sell Analytics API** (`GET /sell/analytics/v1/seller_standards_profile`) | **[OFFICIAL SPEC]** Already REST-Native | Already used in `ha-ebay` for seller standards and defect tracking under `CONF_SELLER_STANDARDS_ENABLED`. |
+| **`GetMemberMessages`** | REST **Commerce Messages API** (`GET /commerce/message/v1/conversation`) | **[OFFICIAL SPEC]** Already REST-Native | Audited in M8: `GetMemberMessages` is NOT called in `ha-ebay`. Production integrates natively with REST Messages for member conversations. |
+| **`GetSellerList`** | REST **Sell Analytics API** (`GET /sell/analytics/v1/traffic_report`) | **[OFFICIAL SPEC]** Optional Fallback | Used only as fallback in `section_fetch.py:407` for `HitCount` (views) when analytics reports lack listing-level data. |
+| **`GetMyeBayBuying` (`LostList`)** | None | **[NO REPLACEMENT]** | eBay migration guide explicitly states: *"Retrieve LostList: No replacement (this feature is no longer supported in My eBay)."* Never called in `ha-ebay`. |
 
 ---
 
@@ -187,20 +188,25 @@ The validation harness includes 6 built-in probes for safe schema and contract d
 [Milestone 4: Auction/Bidding Parity Harness] -> MERGED (PR #97)
              │
              ▼
-[Milestone 5: Active Seller Listings Parity Harness] (CURRENT)
-  - Isolated normalizer: custom_components/ebay/parsers/seller_parity.py
-  - Standalone validation CLI: scripts/validate_seller_parity.py
-  - Full offline tests & documentation
-  - Production coordinator unchanged (Trading XML ActiveList authoritative)
+[Milestone 5: Active Seller Listings Parity Harness] -> MERGED (PR #98)
              │
              ▼
-[Future Milestone 7: Sold Orders via Sell Fulfillment REST]
-  - High feasibility: public REST API, already optional in ha-ebay
+[Milestone 6: Best Offers Parity Harness] -> MERGED (PR #100)
              │
              ▼
-[Future Milestone 6: Best Offers via Sell Negotiation REST]
+[Milestone 7: Sold & Unsold Listing Classification] -> MERGED (PR #101)
              │
              ▼
-[Future Milestones 2, 4, 5 Live Cutover]:
+[Milestone 8: Remaining Legacy Operations & Identity Validation] (CURRENT)
+  - Canonical Identity Model: custom_components/ebay/parsers/identity_parity.py
+  - Complete Operations Matrix CLI: scripts/validate_legacy_fields_parity.py
+  - Comprehensive Audit: docs/remaining-legacy-operations-validation.md
+  - Production coordinators unchanged (Trading XML GetUser authoritative; zero cutover)
+             │
+             ▼
+[Milestone 9: Account Identity & Multiple Accounts Foundation]
+             │
+             ▼
+[Future Production Cutover]:
   - Only when eBay scope/entitlement gating is resolved.
 ```
