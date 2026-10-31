@@ -44,12 +44,15 @@ during the initial `async_step_credentials` form handler—**before the user eve
 
 ### Critical Identity Invariants
 1. **`EIASToken` is an Account Identifier, NOT a Credential**: `EIASToken` is an encrypted string representing the account; it is never treated as a secret or OAuth authorization token.
-2. **Conditional Availability**: `EIASToken` is conditionally returned depending on account type and developer status. The system therefore implements a strict, prioritized hierarchy:
-   - **Primary**: `EIASToken` (Type: `AccountIdentifierType.EIASTOKEN`).
-   - **Fallback**: `UserID` (Type: `AccountIdentifierType.USER_ID`).
-   - **Fail-Closed**: If neither is returned or the document is malformed, identification fails closed.
-3. **No Cross-Family Conflation**: REST `userId` is never assumed to match XML `EIASToken`.
-4. **No Speculative Scopes**: We do not request `commerce.identity.readonly`. Authentication identity verification is performed strictly via authenticated, read-only Trading XML `GetUser` under the existing core scope (`https://api.ebay.com/oauth/api_scope`).
+2. **Conditional Availability & Durable Uniqueness Policy**:
+   - `EIASToken` is conditionally returned depending on account type and developer status.
+   - **Primary Durable Identifier**: `EIASToken` (Type: `AccountIdentifierType.EIASTOKEN`). Multi-account onboarding requires a verified `EIASToken` to guarantee durable isolation and prevent duplicate entries across renames.
+   - **Fallback Policy**: If an account returns only mutable `UserID` (Type: `AccountIdentifierType.USER_ID`), multi-account setup on the same application blocks activation (`account_unverifiable`) rather than making false claims of durable isolation. Existing legacy entries remain intact.
+   - **Fail-Closed**: If neither identifier is returned or the XML document is malformed, identification fails closed.
+3. **Legitimate Rename Continuity**: When durable `EIASToken` matches an existing entry, reauthorization accepts a changed display username as a legitimate rename. The stored username and display title are updated, while `entry_id`, `unique_id`, and entity unique IDs remain completely intact.
+4. **Data Minimization & Log Privacy**: Raw usernames and EIASTokens are never logged in warning/info logs (only symbolic reason codes and entry IDs are emitted). Opaque hexadecimal identifiers returned in `UserID` are omitted from entry display titles.
+5. **No Cross-Family Conflation**: REST `userId` is never assumed to match XML `EIASToken`.
+6. **No Speculative Scopes**: We do not request `commerce.identity.readonly`. Authentication identity verification is performed strictly via authenticated, read-only Trading XML `GetUser` under the existing core scope (`https://api.ebay.com/oauth/api_scope`).
 
 ---
 
@@ -97,6 +100,13 @@ The integration enforces explicit policy rules across all 5 operational cases:
 
 ## 6. Onboarding & Reauthorization Workflows
 
+### Unified Native and Manual OAuth Path
+Both native OAuth browser callbacks and manual OAuth code exchanges pass through the exact same post-token pipeline in `async_oauth_create_entry()`:
+1. `normalize_new_token()` formats token payload and timestamp.
+2. `resolve_granted_scopes()` evaluates requested vs granted scopes.
+3. `async_verify_authenticated_account()` makes an explicit, read-only `GetUser` call to discover the authenticated caller's identity.
+4. Identical duplicate-detection and reauthorization checks run regardless of whether manual or native OAuth was used.
+
 ### Setup Lifecycle
 ```
 User Enters App Credentials (client_id, client_secret, runame)
@@ -105,36 +115,36 @@ User Enters App Credentials (client_id, client_secret, runame)
 Credentials Normalized & Stored in Flow Draft (NO unique_id set yet)
                            │
                            ▼
-User Completes Native eBay OAuth Flow (Authorization Code Exchange)
+User Completes OAuth Flow (Native Callback OR Manual Code Exchange)
                            │
                            ▼
 Immediate Authenticated Trading XML GetUser Request (Bounded Timeout)
                            │
            ┌───────────────┴───────────────┐
            ▼                               ▼
-       Verified                       Unverified / Malformed
+       Verified                       Unverified / Malformed / Non-EIAS
            │                               │
            ▼                               ▼
 Compute Account Unique ID         Abort: account_unverifiable
 (f"{environment}:{account_id}")
            │
            ▼
-Check Duplicate Matrix (Cases B & C)
+Check Duplicate Matrix across All Entries (Cases B & C, including legacy entries)
            │
            ▼
 Create ConfigEntry:
 - unique_id = f"{environment}:{account_id}"
-- title = "eBay ({username})"
+- title = "eBay ({username})" (or "eBay" for opaque IDs)
 - data[account_identity] = serialized
 ```
 
 ### Reauthorization Lifecycle & Account-Switching Protection
-If an existing entry undergoes reauthorization (e.g. token expired or credentials rotated):
-1. **Identity Re-Verification**: The newly exchanged token executes `GetUser` to verify the authenticated identity.
-2. **Account Mismatch Check**:
-   - If original entry had `account_id` and the newly authenticated `account_id` differs: **ABORT (`account_mismatch`)**.
-   - If original entry had `username` and the newly authenticated `username` differs: **ABORT (`account_mismatch`)**.
-3. **Fail-Closed Protection**: If identity verification fails or times out during reauth: **ABORT (`cannot_connect`)**. The live configuration entry is preserved untouched.
+If an existing entry undergoes reauthorization (e.g. token expired, scopes expanded, or credentials rotated):
+1. **Identity Re-Verification**: The newly exchanged token executes `GetUser` to verify the freshly authenticated identity. If this verification fails, reauth aborts (`cannot_connect`).
+2. **Account Continuity & Mismatch Check**:
+   - **Verified Entry**: Compares existing identity with newly authenticated identity using `is_same_account()`. If durable `EIASToken` matches, reauth succeeds (including legitimate display username renames). If `EIASToken` conflicts, reauth aborts with **`account_mismatch`**.
+   - **Unbound Legacy Entry**: The system calls `async_verify_entry_existing_identity()` to read-only verify the legacy entry's prior identity using its existing token or token refresh. If verified and accounts match, the legacy entry's binding is upgraded to verified. If accounts mismatch, reauth aborts with **`account_mismatch`**. If the prior token cannot be verified (dead or revoked token), reauth fails closed and aborts with **`account_unverifiable`**, preventing arbitrary accounts from overwriting existing entries.
+3. **Fail-Closed Protection**: The live configuration entry is preserved untouched if reauthorization is aborted.
 
 ---
 

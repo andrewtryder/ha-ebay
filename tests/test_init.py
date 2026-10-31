@@ -36,12 +36,16 @@ def _mock_identity_verification() -> Any:
             username="client",
             binding_state=AccountBindingState.VERIFIED,
             provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
-            identifier_type=AccountIdentifierType.USER_ID,
+            identifier_type=AccountIdentifierType.EIASTOKEN,
         )
 
     with (
         patch(
             "custom_components.ebay.config_flow.async_verify_authenticated_account",
+            side_effect=_mock_verify,
+        ),
+        patch(
+            "custom_components.ebay.config_flow.async_verify_entry_existing_identity",
             side_effect=_mock_verify,
         ),
         patch(

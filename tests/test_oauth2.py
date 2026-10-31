@@ -28,6 +28,7 @@ from custom_components.ebay.account_identity import (
 from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
+    CONF_ACCOUNT_IDENTITY,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
@@ -878,7 +879,28 @@ def test_manual_reauth_updates_existing_entry(
     flow._state = "state-1"
     flow._consent_url = "https://auth.ebay.com/oauth2/authorize"
     flow._requested_scopes = CORE_SCOPE
-    entry = type("Entry", (), {"data": _flow_data(), "title": "eBay"})()
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "title": "eBay (test_user)",
+            "data": {
+                **_flow_data(),
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
+            },
+        },
+    )()
     updated: dict[str, Any] = {}
 
     class Client:
@@ -959,7 +981,28 @@ def test_reauth_updates_existing_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         "source": config_entries.SOURCE_REAUTH,
         "entry_id": "entry-1",
     }
-    entry = type("Entry", (), {"data": _flow_data(), "title": "eBay"})()
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "title": "eBay (test_user)",
+            "data": {
+                **_flow_data(),
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
+            },
+        },
+    )()
     flow._data = _flow_data(client_secret="new-secret")
     updated: dict[str, Any] = {}
 
@@ -1170,7 +1213,7 @@ def _flow(monkeypatch: pytest.MonkeyPatch) -> EbayConfigFlow:
             username="test_user",
             provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
             binding_state=AccountBindingState.VERIFIED,
-            identifier_type=AccountIdentifierType.USER_ID,
+            identifier_type=AccountIdentifierType.EIASTOKEN,
         )
 
     monkeypatch.setattr(
@@ -1368,10 +1411,22 @@ def test_reauth_success_commits_pending_options(
         "Entry",
         (),
         {
+            "entry_id": "entry-1",
             "data": {
                 **_flow_data(),
                 CONF_OAUTH_SCOPES: CORE_SCOPE,
                 CONF_PENDING_OPTIONS: pending,
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
             },
             "options": {"feedback_enabled": False},
             "title": "eBay",

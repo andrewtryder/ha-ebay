@@ -8,6 +8,7 @@ isolation across accounts using the same or different developer applications.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -23,16 +24,16 @@ from .clients.trading import COMPATIBILITY_LEVEL
 from .const import (
     CONF_ACCOUNT_IDENTITY,
     CONF_CLIENT_ID,
+    CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
     CONF_REAUTH_GENERATION,
+    CONF_SITE_ID,
     EBAY_XML_NS,
-    NS,
 )
 from .parsers.identity_parity import (
     pseudonymize_identifier,
 )
 from .parsers.trading_builders import build_get_user_xml
-from .parsers.xml import _text
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -268,36 +269,79 @@ def get_entry_account_identity(entry: ConfigEntry) -> AccountIdentity:
     )
 
 
+def _basic_auth_header(client_id: str, client_secret: str) -> str:
+    """Return standard HTTP Basic Auth header value."""
+    creds = f"{client_id}:{client_secret}".encode()
+    return f"Basic {base64.b64encode(creds).decode()}"
+
+
+def is_displayable_username(username: str | None) -> bool:
+    """Return True if username is a legitimate human-readable display handle.
+
+    Rejects None, empty, excessively long strings (>32 chars), opaque hexadecimal
+    hashes (e.g. 32-character or 64-character hex digests), strings containing
+    pipe/delimiter characters, and identifiers with known opaque prefixes.
+    """
+    if not username or not isinstance(username, str):
+        return False
+    clean = username.strip()
+    if len(clean) < 1 or len(clean) > 32:
+        return False
+    # Reject opaque hex hashes (e.g. 32-hex MD5/UUID hash or 64-hex SHA)
+    if len(clean) in (32, 64) and all(c in "0123456789abcdefABCDEF" for c in clean):
+        return False
+    # Reject strings containing delimiter markers used in opaque tokens/UUIDs
+    if any(c in clean for c in "|;/#&%=?"):
+        return False
+    # Valid eBay username characters: alphanumeric, dots, underscores, hyphens
+    return all(c.isalnum() or c in "._-" for c in clean)
+
+
 def is_same_account(
     identity_a: AccountIdentity | None,
     identity_b: AccountIdentity | None,
 ) -> bool:
     """Evaluate whether two account identities represent the exact same eBay account.
 
-    Requires positive evidence of matching environment and matching durable account_id,
-    or matching public username when account_id is equivalent. Fails closed.
+    Enforces identifier-type-aware semantics:
+    - Rejects heterogeneous identifier comparisons (e.g. EIASToken vs UserID or App-ID).
+    - If both are verified EIASTokens: matches strictly on account_id, allowing legitimate
+      username rename continuity, and rejecting conflicting durable IDs even if usernames match.
+    - If both are UserID fallbacks: matches on account_id (case-insensitive).
+    - Fails closed for unverified, missing, or incompatible identifier types.
     """
     if identity_a is None or identity_b is None:
         return False
 
-    if identity_a.environment.lower() != identity_b.environment.lower():
+    if identity_a.environment.strip().lower() != identity_b.environment.strip().lower():
         return False
 
-    # 1. Match on durable account_id (e.g. EIASToken or confirmed userId)
-    if (
-        identity_a.account_id
-        and identity_b.account_id
-        and identity_a.account_id.strip() == identity_b.account_id.strip()
-    ):
-        return True
+    # Block comparison across heterogeneous identifier namespaces
+    if identity_a.identifier_type != identity_b.identifier_type:
+        return False
 
-    # 2. Match on verified public username (case-insensitive)
-    if (
-        identity_a.username
-        and identity_b.username
-        and identity_a.username.strip().lower() == identity_b.username.strip().lower()
-    ):
-        return True
+    # Durable EIASToken comparison
+    if identity_a.identifier_type == AccountIdentifierType.EIASTOKEN:
+        if (
+            identity_a.account_id
+            and identity_b.account_id
+            and identity_a.account_id.strip() == identity_b.account_id.strip()
+        ):
+            # Same durable EIASToken: matches even if username changed (legitimate rename)
+            return True
+        # Conflicting durable IDs: never same account, even if usernames are identical
+        return False
+
+    # Mutable UserID fallback comparison
+    if identity_a.identifier_type == AccountIdentifierType.USER_ID:
+        if (
+            identity_a.account_id
+            and identity_b.account_id
+            and identity_a.account_id.strip().lower()
+            == identity_b.account_id.strip().lower()
+        ):
+            return True
+        return False
 
     return False
 
@@ -396,8 +440,16 @@ async def async_verify_authenticated_account(
             failure_reason=IdentityFailureReason.MALFORMED_RESPONSE,
         )
 
-    # Ack status check
-    ack = _text(root, "e:Ack")
+    # Ack status check in expected namespace
+    ack_elem = root.find(f"{{{EBAY_XML_NS}}}Ack")
+    if ack_elem is None or not ack_elem.text:
+        return AccountIdentity(
+            environment=environment,
+            client_id=client_id,
+            binding_state=AccountBindingState.FAILED,
+            failure_reason=IdentityFailureReason.MALFORMED_RESPONSE,
+        )
+    ack = ack_elem.text.strip()
     if ack not in ("Success", "Warning"):
         return AccountIdentity(
             environment=environment,
@@ -406,10 +458,18 @@ async def async_verify_authenticated_account(
             failure_reason=IdentityFailureReason.MALFORMED_RESPONSE,
         )
 
-    # Fatal errors check
-    for err_container in root.findall("e:Errors", NS):
-        sev = (_text(err_container, "e:SeverityCode") or "").strip().lower()
-        if sev == "error":
+    # Fatal errors check even alongside Ack=Success/Warning
+    errors_elems = [e for e in root.iter() if e.tag.endswith("Errors")]
+    for err_container in errors_elems:
+        sev_elem = err_container.find(f"{{{EBAY_XML_NS}}}SeverityCode")
+        if sev_elem is None:
+            sev_elem = err_container.find("SeverityCode")
+        severity = (
+            (sev_elem.text or "").strip().lower()
+            if sev_elem is not None and sev_elem.text
+            else ""
+        )
+        if severity == "error":
             return AccountIdentity(
                 environment=environment,
                 client_id=client_id,
@@ -417,30 +477,51 @@ async def async_verify_authenticated_account(
                 failure_reason=IdentityFailureReason.AUTH_FAILED,
             )
 
-    # Direct User element
-    user_elem = root.find(f"{{{EBAY_XML_NS}}}User")
-    if user_elem is None:
+    # Locate direct User element in expected namespace
+    direct_users = root.findall(f"{{{EBAY_XML_NS}}}User")
+    if len(direct_users) != 1:
         return AccountIdentity(
             environment=environment,
             client_id=client_id,
             binding_state=AccountBindingState.FAILED,
-            failure_reason=IdentityFailureReason.MISSING_IDENTIFIER,
+            failure_reason=IdentityFailureReason.MISSING_IDENTIFIER
+            if len(direct_users) == 0
+            else IdentityFailureReason.MALFORMED_RESPONSE,
+        )
+    user_elem = direct_users[0]
+
+    # Reject structurally inconsistent XML with nested or impostor User elements anywhere
+    all_users = [
+        e
+        for e in root.iter()
+        if e.tag == f"{{{EBAY_XML_NS}}}User" or e.tag.endswith("User")
+    ]
+    if len(all_users) != 1:
+        return AccountIdentity(
+            environment=environment,
+            client_id=client_id,
+            binding_state=AccountBindingState.FAILED,
+            failure_reason=IdentityFailureReason.MALFORMED_RESPONSE,
         )
 
-    raw_user_id = _text(user_elem, "e:UserID")
-    username = raw_user_id.strip() if raw_user_id else None
-    if not username:
+    # UserID is required and must be non-empty direct child in expected namespace
+    userid_elem = user_elem.find(f"{{{EBAY_XML_NS}}}UserID")
+    if userid_elem is None or not userid_elem.text or not userid_elem.text.strip():
         return AccountIdentity(
             environment=environment,
             client_id=client_id,
             binding_state=AccountBindingState.FAILED,
             failure_reason=IdentityFailureReason.MISSING_IDENTIFIER,
         )
+    username = userid_elem.text.strip()
 
     # Prefer stable EIASToken if present in User element; fall back to UserID
-    raw_eias = _text(user_elem, "e:EIASToken")
-    if raw_eias and raw_eias.strip():
-        account_id = raw_eias.strip()
+    eias_elem = user_elem.find(f"{{{EBAY_XML_NS}}}EIASToken")
+    raw_eias = (
+        eias_elem.text.strip() if eias_elem is not None and eias_elem.text else ""
+    )
+    if raw_eias:
+        account_id = raw_eias
         id_type = AccountIdentifierType.EIASTOKEN
     else:
         account_id = username
@@ -456,4 +537,96 @@ async def async_verify_authenticated_account(
         provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
         verified_at=datetime.now(timezone.utc),
         failure_reason=IdentityFailureReason.NONE,
+    )
+
+
+async def async_verify_entry_existing_identity(
+    session: aiohttp.ClientSession,
+    entry: ConfigEntry,
+    *,
+    timeout_seconds: float = DEFAULT_IDENTITY_VERIFICATION_TIMEOUT,
+) -> AccountIdentity:
+    """Attempt read-only verification of an existing entry's authenticated identity.
+
+    Uses stored access_token, falling back to a token refresh if the access token
+    has expired. Fails closed with an unverified AccountIdentity if verification fails.
+    """
+    entry_data = getattr(entry, "data", {}) or {}
+    token = entry_data.get("token")
+    environment = entry_data.get(CONF_ENVIRONMENT, "production")
+    client_id = entry_data.get(CONF_CLIENT_ID, "")
+    site_id = entry_data.get(CONF_SITE_ID, "0")
+
+    if not isinstance(token, dict):
+        return AccountIdentity(
+            entry_id=getattr(entry, "entry_id", None),
+            environment=environment,
+            client_id=client_id,
+            binding_state=AccountBindingState.FAILED,
+            failure_reason=IdentityFailureReason.MISSING_IDENTIFIER,
+        )
+
+    access_token = token.get("access_token")
+    if access_token and isinstance(access_token, str) and access_token.strip():
+        identity = await async_verify_authenticated_account(
+            session,
+            environment=environment,
+            access_token=access_token,
+            client_id=client_id,
+            site_id=site_id,
+            timeout_seconds=timeout_seconds,
+        )
+        if identity.is_verified:
+            return identity
+
+    # If access token was expired/rejected, attempt token refresh if credentials are present
+    refresh_token = token.get("refresh_token")
+    client_secret = entry_data.get(CONF_CLIENT_SECRET)
+
+    if (
+        refresh_token
+        and isinstance(refresh_token, str)
+        and refresh_token.strip()
+        and client_id
+        and client_secret
+    ):
+        endpoints = endpoints_for(environment)
+        headers = {
+            "Authorization": _basic_auth_header(client_id, client_secret),
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token.strip(),
+        }
+        try:
+            async with session.post(
+                endpoints.token,
+                headers=headers,
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+            ) as resp:
+                if resp.status == 200:
+                    payload = await resp.json(content_type=None)
+                    new_access_token = payload.get("access_token")
+                    if new_access_token and isinstance(new_access_token, str):
+                        refreshed_identity = await async_verify_authenticated_account(
+                            session,
+                            environment=environment,
+                            access_token=new_access_token,
+                            client_id=client_id,
+                            site_id=site_id,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        if refreshed_identity.is_verified:
+                            return refreshed_identity
+        except Exception:
+            pass
+
+    return AccountIdentity(
+        entry_id=getattr(entry, "entry_id", None),
+        environment=environment,
+        client_id=client_id,
+        binding_state=AccountBindingState.FAILED,
+        failure_reason=IdentityFailureReason.AUTH_FAILED,
     )
