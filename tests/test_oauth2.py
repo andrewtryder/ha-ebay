@@ -1512,6 +1512,45 @@ def test_reauth_with_pending_options_uses_async_update_and_abort(
     assert "manual_authorization" not in called["update_and_abort"]["data"]
 
 
+def test_reauth_with_staged_title_uses_async_update_and_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_finish_reauth passes staged new title atomically into async_update_and_abort."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": _flow_data(),
+            "options": {},
+            "title": "eBay (old_user)",
+        },
+    )()
+    called: dict[str, Any] = {}
+
+    def _mock_update_and_abort(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        called["update_and_abort"] = kwargs
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_and_abort", _mock_update_and_abort)
+
+    # 1. New title is passed when it differs from entry.title
+    result = flow._finish_reauth(_flow_data(), title="eBay (new_user)")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert called["update_and_abort"]["title"] == "eBay (new_user)"
+
+    # 2. When title is identical to entry.title, title is not in kwargs
+    called.clear()
+    result = flow._finish_reauth(_flow_data(), title="eBay (old_user)")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert "title" not in called["update_and_abort"]
+
+
 def test_reauth_cancel_discards_pending_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

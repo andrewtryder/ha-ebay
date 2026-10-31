@@ -53,6 +53,8 @@ during the initial `async_step_credentials` form handler—**before the user eve
 4. **Data Minimization & Log Privacy**: Raw usernames and EIASTokens are never logged in warning/info logs (only symbolic reason codes and entry IDs are emitted). Opaque hexadecimal identifiers returned in `UserID` are omitted from entry display titles.
 5. **No Cross-Family Conflation**: REST `userId` is never assumed to match XML `EIASToken`.
 6. **No Speculative Scopes**: We do not request `commerce.identity.readonly`. Authentication identity verification is performed strictly via authenticated, read-only Trading XML `GetUser` under the existing core scope (`https://api.ebay.com/oauth/api_scope`).
+7. **Refusal of Weak UserID Continuity**: eBay documents `UserID` as mutable (users can rename accounts or eBay may reassign inactive usernames). Therefore, matching `UserID`s alone are NEVER accepted as proof of identity continuity for reauthorization or duplicate exclusion.
+8. **Three-State Equivalence**: Identity comparisons distinguish `SAME` (proven matching durable `EIASToken`), `DIFFERENT` (proven conflicting durable `EIASToken`s or different environments), and `UNKNOWN` (heterogeneous types, mutable `USER_ID`s, or unverified states).
 
 ---
 
@@ -61,6 +63,18 @@ during the initial `async_step_credentials` form handler—**before the user eve
 Implemented in `custom_components/ebay/account_identity.py`:
 
 ```python
+class AccountEquivalence(StrEnum):
+    """Result of comparing two eBay account identities."""
+
+    SAME = (
+        "same"  # Proven matching durable authenticated account identifier (EIASToken)
+    )
+    DIFFERENT = "different"  # Proven conflicting durable identifiers within verified environment
+    UNKNOWN = (
+        "unknown"  # Missing, incompatible, mutable, or insufficient identity evidence
+    )
+
+
 @dataclass(frozen=True)
 class AccountIdentity:
     entry_id: str | None = None
@@ -77,6 +91,7 @@ class AccountIdentity:
 ```
 
 ### Typed Enums
+- **`AccountEquivalence`**: `SAME`, `DIFFERENT`, `UNKNOWN`.
 - **`AccountIdentifierType`**: `EIASTOKEN`, `USER_ID`, `LEGACY_APP_ENVIRONMENT`, `UNKNOWN`.
 - **`AccountIdentityProvenance`**: `AUTHENTICATED_GET_USER`, `LEGACY_MIGRATION`, `UNVERIFIED_OFFLINE`.
 - **`AccountBindingState`**: `VERIFIED`, `LEGACY_COMPATIBLE`, `UNVERIFIED`, `CONFLICT`, `FAILED`.
@@ -86,15 +101,15 @@ class AccountIdentity:
 
 ## 5. Duplicate Detection & Uniqueness Matrix
 
-The integration enforces explicit policy rules across all 5 operational cases:
+The integration enforces explicit three-state policy rules across all operational cases:
 
 | Scenario | Condition | System Action | Policy Result |
 |---|---|---|---|
-| **Case A** | Same App ID, Different Accounts | App credentials match, but `account_id` differs | **ALLOWED**: Independent `ConfigEntry` created with unique ID `f"{environment}:{account_id}"` and title `eBay ({username})`. |
-| **Case B** | Same App ID, Same Account | Matches existing entry `unique_id` or `is_same_account()` | **ABORT (`already_configured`)**: Prevents duplicate entry creation. |
-| **Case C** | Different App ID, Same Account | Different credentials, but matching `account_id` or `username` | **ABORT (`already_configured`)**: Prevents multiple developer apps from configuring the same eBay account. |
-| **Case D** | Legacy Pre-M9 Entry Already Configured | Legacy entry uses `f"{environment}:{client_id}"` | **PRESERVED**: Legacy entry retains entry_id, entity unique IDs, and options. If reauthenticated, updates in-place. |
-| **Case E** | Account Identity Unverifiable / Ambiguous | Network error, timeout, non-200, or invalid XML | **FAIL-CLOSED (`account_unverifiable` / `cannot_connect`)**: Never guesses account identity. |
+| **Case A** | Same App ID, Different Accounts | App credentials match, but durable `EIASToken` differs (`AccountEquivalence.DIFFERENT`) | **ALLOWED**: Independent `ConfigEntry` created with unique ID `f"{environment}:{account_id}"` and title `eBay ({username})`. |
+| **Case B** | Same App ID, Same Account | Matches existing entry `unique_id` or `AccountEquivalence.SAME` | **ABORT (`already_configured`)**: Prevents duplicate entry creation. |
+| **Case C** | Different App ID, Same Account | Different credentials, but matching durable `EIASToken` (`AccountEquivalence.SAME`) | **ABORT (`already_configured`)**: Prevents multiple developer apps from configuring the same eBay account. |
+| **Case D** | Legacy Pre-M9 Entry Unverifiable or Mutable UserID | Prior entry identity yields `AccountEquivalence.UNKNOWN` against candidate | **FAIL-CLOSED (`account_ambiguous`)**: Because setup cannot prove the candidate is a distinct principal from the legacy entry, duplicate creation is blocked. |
+| **Case E** | Account Identity Unverifiable / Ambiguous | Network error, timeout, non-200, invalid XML, or EIASToken conditionally omitted | **FAIL-CLOSED (`account_unverifiable` / `cannot_connect`)**: Never guesses account identity or permits unverified onboarding. |
 
 ---
 
@@ -129,7 +144,10 @@ Compute Account Unique ID         Abort: account_unverifiable
 (f"{environment}:{account_id}")
            │
            ▼
-Check Duplicate Matrix across All Entries (Cases B & C, including legacy entries)
+Check Duplicate Matrix across All Entries (Cases B, C, & D)
+- Matching EIASToken -> Abort: already_configured
+- Ambiguous / Incomparable (UNKNOWN) -> Abort: account_ambiguous
+- Proven Different EIASToken -> Continue
            │
            ▼
 Create ConfigEntry:
@@ -138,13 +156,16 @@ Create ConfigEntry:
 - data[account_identity] = serialized
 ```
 
-### Reauthorization Lifecycle & Account-Switching Protection
+### Reauthorization Lifecycle & Atomic Credential Updates
 If an existing entry undergoes reauthorization (e.g. token expired, scopes expanded, or credentials rotated):
-1. **Identity Re-Verification**: The newly exchanged token executes `GetUser` to verify the freshly authenticated identity. If this verification fails, reauth aborts (`cannot_connect`).
+1. **Identity Re-Verification**: The newly exchanged token executes `GetUser` to verify the freshly authenticated identity. The candidate MUST return a verified durable `EIASToken` (Type: `AccountIdentifierType.EIASTOKEN`); otherwise reauth aborts (`cannot_connect` or `account_unverifiable`).
 2. **Account Continuity & Mismatch Check**:
-   - **Verified Entry**: Compares existing identity with newly authenticated identity using `is_same_account()`. If durable `EIASToken` matches, reauth succeeds (including legitimate display username renames). If `EIASToken` conflicts, reauth aborts with **`account_mismatch`**.
-   - **Unbound Legacy Entry**: The system calls `async_verify_entry_existing_identity()` to read-only verify the legacy entry's prior identity using its existing token or token refresh. If verified and accounts match, the legacy entry's binding is upgraded to verified. If accounts mismatch, reauth aborts with **`account_mismatch`**. If the prior token cannot be verified (dead or revoked token), reauth fails closed and aborts with **`account_unverifiable`**, preventing arbitrary accounts from overwriting existing entries.
-3. **Fail-Closed Protection**: The live configuration entry is preserved untouched if reauthorization is aborted.
+   - Evaluates `equiv = compare_account_identities(existing_identity, account_identity)`.
+   - **`AccountEquivalence.DIFFERENT`**: Reauth aborts with **`account_mismatch`**.
+   - **`AccountEquivalence.UNKNOWN`**: Reauth aborts with **`account_unverifiable`**. Legacy entries with only mutable `UserID` fallbacks cannot be reauthorized without proven immutable identity continuity.
+   - **`AccountEquivalence.SAME`**: Reauth proceeds. Legitimate username renames are accepted.
+3. **Atomic Single-Call Commit**: Staged title changes (e.g. `eBay (new_username)`) are passed directly into `self._finish_reauth(entry_data, title=new_title)`, which commits data, title, and options in a single call to `self.async_update_and_abort(entry, **kwargs)`. No premature `async_update_entry` call occurs before completion.
+4. **Strict Immutability on Abort or Failure**: If reauthorization aborts, fails verification, or throws an error, the existing entry's tokens, data, title, and options remain completely unchanged.
 
 ---
 
@@ -155,6 +176,8 @@ Existing users migrating from pre-M9 integration versions receive a seamless, no
 - **Zero Entity Registry Invalidation**: Entity unique IDs remain strictly formatted as `f"{entry.entry_id}_{key}"` or `f"{entry.entry_id}_{kind}_{item_id}_{suffix}"`. They are **never** rewritten to embed `account_id`.
 - **Zero Polling Workload**: Routine background polling performs zero extra `GetUser` calls.
 - **Rollback Safety**: Any entry with a version higher than 5 returns `False` immediately.
+- **Conditional EIASToken Limits**: When eBay omits `EIASToken` on an account, onboarding safely aborts (`account_unverifiable`), preventing false promises of multi-account isolation.
+- **Testing Verification Scope**: Test suites provide thorough unit and component test coverage using mock flows, isolated shims, and failure injection. Full live end-to-end integration across Home Assistant's active registry lifecycle requires a running Home Assistant instance.
 
 ---
 

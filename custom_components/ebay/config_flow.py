@@ -13,13 +13,14 @@ from homeassistant.helpers import config_entry_oauth2_flow, selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .account_identity import (
+    AccountEquivalence,
     AccountIdentifierType,
     async_verify_authenticated_account,
     async_verify_entry_existing_identity,
+    compare_account_identities,
     compute_account_unique_id,
     get_entry_account_identity,
     is_displayable_username,
-    is_same_account,
 )
 from .api import (
     CORE_SCOPE,
@@ -212,7 +213,7 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             entry = self._get_reauth_entry()
             entry_id = getattr(entry, "entry_id", None)
             # If identity verification fails during reauth, fail closed
-            if not account_identity.is_verified:
+            if not account_identity.is_verified or not account_identity.account_id:
                 _LOGGER.warning(
                     "Reauthorization aborted: newly authenticated account verification failed (reason=%s) for entry_id=%s",
                     account_identity.failure_reason,
@@ -220,34 +221,34 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                 )
                 return self.async_abort(reason="cannot_connect")
 
-            existing_identity = get_entry_account_identity(entry)
+            if account_identity.identifier_type != AccountIdentifierType.EIASTOKEN:
+                _LOGGER.warning(
+                    "Reauthorization aborted: newly authenticated account lacks durable EIASToken identifier for entry_id=%s",
+                    entry_id,
+                )
+                return self.async_abort(reason="account_unverifiable")
 
-            # If existing entry has a verified durable account binding
-            if existing_identity.is_verified and existing_identity.account_id:
-                if not is_same_account(existing_identity, account_identity):
-                    _LOGGER.warning(
-                        "Reauthorization aborted: account mismatch detected for entry_id=%s",
-                        entry_id,
-                    )
-                    return self.async_abort(reason="account_mismatch")
-            else:
-                # Unbound legacy entry: attempt read-only verification of prior identity
-                prior_identity = await async_verify_entry_existing_identity(
+            existing_identity = get_entry_account_identity(entry)
+            if not existing_identity.is_verified or not existing_identity.account_id:
+                existing_identity = await async_verify_entry_existing_identity(
                     session, entry
                 )
-                if not prior_identity.is_verified:
-                    _LOGGER.warning(
-                        "Reauthorization aborted: legacy account identity could not be verified for entry_id=%s",
-                        entry_id,
-                    )
-                    return self.async_abort(reason="account_unverifiable")
 
-                if not is_same_account(prior_identity, account_identity):
-                    _LOGGER.warning(
-                        "Reauthorization aborted: account mismatch detected for legacy entry_id=%s",
-                        entry_id,
-                    )
-                    return self.async_abort(reason="account_mismatch")
+            equiv = compare_account_identities(existing_identity, account_identity)
+            if equiv == AccountEquivalence.DIFFERENT:
+                _LOGGER.warning(
+                    "Reauthorization aborted: account mismatch detected for entry_id=%s",
+                    entry_id,
+                )
+                return self.async_abort(reason="account_mismatch")
+
+            if equiv != AccountEquivalence.SAME:
+                _LOGGER.warning(
+                    "Reauthorization aborted: cannot verify identity continuity for entry_id=%s (equivalence=%s)",
+                    entry_id,
+                    equiv,
+                )
+                return self.async_abort(reason="account_unverifiable")
 
             # Update entry data with verified identity
             entry_data[CONF_ACCOUNT_IDENTITY] = account_identity.to_config_entry_dict()
@@ -256,17 +257,14 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             if account_identity.account_id:
                 entry_data[CONF_ACCOUNT_ID] = account_identity.account_id
 
-            # Legitimate rename: update title if username is a valid display name
-            if is_displayable_username(account_identity.username):
-                new_title = f"eBay ({account_identity.username})"
-                if (
-                    getattr(entry, "title", None) != new_title
-                    and hasattr(self.hass, "config_entries")
-                    and self.hass.config_entries
-                ):
-                    self.hass.config_entries.async_update_entry(entry, title=new_title)
+            # Legitimate rename: stage title update if username is a valid display name
+            new_title = (
+                f"eBay ({account_identity.username})"
+                if is_displayable_username(account_identity.username)
+                else None
+            )
 
-            return self._finish_reauth(entry_data)
+            return self._finish_reauth(entry_data, title=new_title)
 
         # New configuration flow:
         if not account_identity.is_verified or not account_identity.account_id:
@@ -293,29 +291,25 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                 return self.async_abort(reason="already_configured")
 
             existing_id = get_entry_account_identity(existing_entry)
-            if existing_id.is_verified and existing_id.account_id:
-                if is_same_account(existing_id, account_identity):
-                    return self.async_abort(reason="already_configured")
-            else:
-                # Unbound legacy entry check
-                is_same_app = str(
-                    existing_entry.data.get(CONF_ENVIRONMENT, "")
-                ).lower() == str(self._data[CONF_ENVIRONMENT]).lower() and str(
-                    existing_entry.data.get(CONF_CLIENT_ID, "")
-                ) == str(self._data[CONF_CLIENT_ID])
-                prior_identity = await async_verify_entry_existing_identity(
+            if not existing_id.is_verified or not existing_id.account_id:
+                existing_id = await async_verify_entry_existing_identity(
                     session, existing_entry
                 )
-                if prior_identity.is_verified:
-                    if is_same_account(prior_identity, account_identity):
-                        return self.async_abort(reason="already_configured")
-                elif is_same_app:
-                    # Same app with unverified legacy entry: fail closed to prevent duplicates
-                    _LOGGER.warning(
-                        "Setup aborted: existing legacy entry for same developer app has unverified identity entry_id=%s",
-                        getattr(existing_entry, "entry_id", None),
-                    )
-                    return self.async_abort(reason="already_configured")
+
+            equiv = compare_account_identities(existing_id, account_identity)
+            if equiv == AccountEquivalence.SAME:
+                _LOGGER.warning(
+                    "Setup aborted: matching durable account identity already configured in entry_id=%s",
+                    getattr(existing_entry, "entry_id", None),
+                )
+                return self.async_abort(reason="already_configured")
+
+            if equiv == AccountEquivalence.UNKNOWN:
+                _LOGGER.warning(
+                    "Setup aborted: cannot verify whether candidate account is distinct from existing entry_id=%s (equivalence=UNKNOWN)",
+                    getattr(existing_entry, "entry_id", None),
+                )
+                return self.async_abort(reason="account_ambiguous")
 
         await self.async_set_unique_id(account_unique_id)
         self._abort_if_unique_id_configured()
@@ -353,9 +347,9 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         self.hass.config_entries.async_update_entry(entry, data=data)
 
     def _finish_reauth(
-        self, entry_data: dict[str, Any]
+        self, entry_data: dict[str, Any], title: str | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Update the reauth entry, committing pending options when present."""
+        """Update the reauth entry, committing pending options and staged title when present."""
         entry = self._get_reauth_entry()
         pending = entry.data.get(CONF_PENDING_OPTIONS)
         cleaned = {
@@ -370,11 +364,12 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
             else 0
         )
         cleaned[CONF_REAUTH_GENERATION] = previous_generation + 1
+        kwargs: dict[str, Any] = {"data": cleaned}
+        if title is not None and title != getattr(entry, "title", None):
+            kwargs["title"] = title
         if isinstance(pending, dict):
-            return self.async_update_and_abort(
-                entry, data=cleaned, options=dict(pending)
-            )
-        return self.async_update_and_abort(entry, data=cleaned)
+            kwargs["options"] = dict(pending)
+        return self.async_update_and_abort(entry, **kwargs)
 
     async def async_step_reauth(
         self, entry_data: dict[str, Any]

@@ -82,6 +82,16 @@ class IdentityFailureReason(StrEnum):
     UNKNOWN = "unknown"
 
 
+class AccountEquivalence(StrEnum):
+    """Result of comparing two eBay account identities."""
+
+    SAME = "same"  # Proven matching durable authenticated account identifier
+    DIFFERENT = "different"  # Proven conflicting durable identifiers within verified environment
+    UNKNOWN = (
+        "unknown"  # Missing, incompatible, mutable, or insufficient identity evidence
+    )
+
+
 @dataclass(frozen=True)
 class AccountIdentity:
     """Canonical representation of an authenticated eBay account binding."""
@@ -297,53 +307,58 @@ def is_displayable_username(username: str | None) -> bool:
     return all(c.isalnum() or c in "._-" for c in clean)
 
 
-def is_same_account(
+def compare_account_identities(
     identity_a: AccountIdentity | None,
     identity_b: AccountIdentity | None,
-) -> bool:
-    """Evaluate whether two account identities represent the exact same eBay account.
+) -> AccountEquivalence:
+    """Evaluate account identity equivalence with explicit three-state semantics.
 
-    Enforces identifier-type-aware semantics:
-    - Rejects heterogeneous identifier comparisons (e.g. EIASToken vs UserID or App-ID).
-    - If both are verified EIASTokens: matches strictly on account_id, allowing legitimate
-      username rename continuity, and rejecting conflicting durable IDs even if usernames match.
-    - If both are UserID fallbacks: matches on account_id (case-insensitive).
-    - Fails closed for unverified, missing, or incompatible identifier types.
+    Distinguishes:
+    - SAME: Proven matching durable authenticated account identifier (EIASToken).
+    - DIFFERENT: Proven conflicting durable identifiers within the same verified environment.
+    - UNKNOWN: Missing, incompatible, mutable, or insufficient identity evidence.
+
+    Fails closed:
+    - Rejects heterogeneous identifier types (e.g. EIASToken vs UserID or App-ID) as UNKNOWN.
+    - Rejects mutable UserID comparisons as UNKNOWN (usernames can change or be reassigned).
+    - Rejects unverified, failed, or None identities as UNKNOWN.
+    - Requires matching environment. Different environments are DIFFERENT.
     """
     if identity_a is None or identity_b is None:
-        return False
+        return AccountEquivalence.UNKNOWN
+
+    if not identity_a.is_verified or not identity_b.is_verified:
+        return AccountEquivalence.UNKNOWN
 
     if identity_a.environment.strip().lower() != identity_b.environment.strip().lower():
-        return False
+        return AccountEquivalence.DIFFERENT
 
-    # Block comparison across heterogeneous identifier namespaces
-    if identity_a.identifier_type != identity_b.identifier_type:
-        return False
-
-    # Durable EIASToken comparison
-    if identity_a.identifier_type == AccountIdentifierType.EIASTOKEN:
+    # Both must have durable EIASToken identifiers for verified equivalence
+    if (
+        identity_a.identifier_type == AccountIdentifierType.EIASTOKEN
+        and identity_b.identifier_type == AccountIdentifierType.EIASTOKEN
+    ):
         if (
             identity_a.account_id
             and identity_b.account_id
             and identity_a.account_id.strip() == identity_b.account_id.strip()
         ):
-            # Same durable EIASToken: matches even if username changed (legitimate rename)
-            return True
-        # Conflicting durable IDs: never same account, even if usernames are identical
-        return False
+            # Positively proven same account across public username changes
+            return AccountEquivalence.SAME
+        # Conflicting durable EIASTokens within same environment
+        return AccountEquivalence.DIFFERENT
 
-    # Mutable UserID fallback comparison
-    if identity_a.identifier_type == AccountIdentifierType.USER_ID:
-        if (
-            identity_a.account_id
-            and identity_b.account_id
-            and identity_a.account_id.strip().lower()
-            == identity_b.account_id.strip().lower()
-        ):
-            return True
-        return False
+    # Heterogeneous or mutable identifier types (e.g. USER_ID fallback, LEGACY_APP_ENVIRONMENT)
+    # cannot establish proven equality or proven inequality without durable evidence.
+    return AccountEquivalence.UNKNOWN
 
-    return False
+
+def is_same_account(
+    identity_a: AccountIdentity | None,
+    identity_b: AccountIdentity | None,
+) -> bool:
+    """Evaluate whether two account identities represent proven same account."""
+    return compare_account_identities(identity_a, identity_b) == AccountEquivalence.SAME
 
 
 async def async_verify_authenticated_account(

@@ -58,6 +58,7 @@
       "required": "This field is required."
     },
     "abort": {
+      "account_ambiguous": "Cannot verify whether this eBay account is already configured. A durable account identifier was not available for comparison.",
       "account_mismatch": "The authorized eBay account does not match the account configured for this integration entry.",
       "account_unverifiable": "Could not verify the authenticated eBay account identity.",
       "already_configured": "An eBay integration entry is already configured with these credentials.",

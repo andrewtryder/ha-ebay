@@ -12,12 +12,14 @@ from homeassistant import config_entries
 
 from custom_components.ebay.account_identity import (
     AccountBindingState,
+    AccountEquivalence,
     AccountIdentifierType,
     AccountIdentity,
     AccountIdentityProvenance,
     IdentityFailureReason,
     async_verify_authenticated_account,
     async_verify_entry_existing_identity,
+    compare_account_identities,
     compute_account_unique_id,
     get_entry_account_identity,
     is_displayable_username,
@@ -202,68 +204,126 @@ def test_compute_account_unique_id() -> None:
 
 
 def test_is_same_account_logic() -> None:
-    """is_same_account enforces strict, identifier-type-aware matching semantics."""
+    """compare_account_identities and is_same_account enforce three-state matching semantics."""
     eias_a = AccountIdentity(
         environment="production",
         account_id="eias-1",
         identifier_type=AccountIdentifierType.EIASTOKEN,
         username="Alice",
+        binding_state=AccountBindingState.VERIFIED,
     )
     eias_rename = AccountIdentity(
         environment="production",
         account_id="eias-1",
         identifier_type=AccountIdentifierType.EIASTOKEN,
         username="AliceRenamed",
+        binding_state=AccountBindingState.VERIFIED,
     )
     eias_conflict = AccountIdentity(
         environment="production",
         account_id="eias-2",
         identifier_type=AccountIdentifierType.EIASTOKEN,
         username="Alice",
+        binding_state=AccountBindingState.VERIFIED,
     )
     user_id_fallback = AccountIdentity(
         environment="production",
         account_id="Alice",
         identifier_type=AccountIdentifierType.USER_ID,
         username="Alice",
+        binding_state=AccountBindingState.VERIFIED,
     )
     user_id_same = AccountIdentity(
         environment="production",
         account_id="alice",
         identifier_type=AccountIdentifierType.USER_ID,
         username="alice",
+        binding_state=AccountBindingState.VERIFIED,
     )
     eias_sandbox = AccountIdentity(
         environment="sandbox",
         account_id="eias-1",
         identifier_type=AccountIdentifierType.EIASTOKEN,
         username="Alice",
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    unverified_eias = AccountIdentity(
+        environment="production",
+        account_id="eias-1",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        username="Alice",
+        binding_state=AccountBindingState.UNVERIFIED,
     )
 
     # 1. Matching EIASToken allows legitimate username rename
+    assert compare_account_identities(eias_a, eias_rename) == AccountEquivalence.SAME
     assert is_same_account(eias_a, eias_rename) is True
-    # 2. Conflicting durable EIASTokens with same username are REJECTED
+
+    # 2. Conflicting durable EIASTokens within same environment are proven DIFFERENT
+    assert (
+        compare_account_identities(eias_a, eias_conflict)
+        == AccountEquivalence.DIFFERENT
+    )
     assert is_same_account(eias_a, eias_conflict) is False
-    # 3. Transitions between fallback USER_ID and EIASToken are rejected
+
+    # 3. Transitions between fallback USER_ID and EIASToken are UNKNOWN
+    assert (
+        compare_account_identities(eias_a, user_id_fallback)
+        == AccountEquivalence.UNKNOWN
+    )
+    assert (
+        compare_account_identities(user_id_fallback, eias_a)
+        == AccountEquivalence.UNKNOWN
+    )
     assert is_same_account(eias_a, user_id_fallback) is False
     assert is_same_account(user_id_fallback, eias_a) is False
-    # 4. Same USER_ID fallbacks match case-insensitively
-    assert is_same_account(user_id_fallback, user_id_same) is True
-    # 5. Identifier namespace collision (same string, different types) is rejected
+
+    # 4. Same USER_ID fallbacks cannot prove identity continuity (usernames are mutable) -> UNKNOWN
+    assert (
+        compare_account_identities(user_id_fallback, user_id_same)
+        == AccountEquivalence.UNKNOWN
+    )
+    assert is_same_account(user_id_fallback, user_id_same) is False
+
+    # 5. Identifier namespace collision (same string, different types) is UNKNOWN
     collision_eias = AccountIdentity(
         environment="production",
         account_id="same_token",
         identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
     )
     collision_user = AccountIdentity(
         environment="production",
         account_id="same_token",
         identifier_type=AccountIdentifierType.USER_ID,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    assert (
+        compare_account_identities(collision_eias, collision_user)
+        == AccountEquivalence.UNKNOWN
     )
     assert is_same_account(collision_eias, collision_user) is False
-    # 6. Different environment never matches
+
+    # 6. Different environments are DIFFERENT
+    assert (
+        compare_account_identities(eias_a, eias_sandbox) == AccountEquivalence.DIFFERENT
+    )
     assert is_same_account(eias_a, eias_sandbox) is False
-    # 7. None checks
+
+    # 7. Unverified identities yield UNKNOWN
+    assert (
+        compare_account_identities(unverified_eias, eias_a)
+        == AccountEquivalence.UNKNOWN
+    )
+    assert (
+        compare_account_identities(eias_a, unverified_eias)
+        == AccountEquivalence.UNKNOWN
+    )
+
+    # 8. None checks yield UNKNOWN
+    assert compare_account_identities(eias_a, None) == AccountEquivalence.UNKNOWN
+    assert compare_account_identities(None, eias_a) == AccountEquivalence.UNKNOWN
+    assert compare_account_identities(None, None) == AccountEquivalence.UNKNOWN
     assert is_same_account(eias_a, None) is False
     assert is_same_account(None, eias_a) is False
     assert is_same_account(None, None) is False
@@ -694,7 +754,7 @@ async def test_case_c_different_app_same_account_aborts_duplicate(
 async def test_case_d_legacy_entry_duplicate_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Case D: Pre-M9 legacy entry matching username triggers duplicate abort."""
+    """Case D: Pre-M9 legacy entry with unverifiable durable identity aborts account_ambiguous."""
     legacy_entry = Mock()
     legacy_entry.entry_id = "entry-legacy"
     legacy_entry.unique_id = "production:client-id"
@@ -738,7 +798,174 @@ async def test_case_d_legacy_entry_duplicate_check(
     )
 
     assert res["type"] == "abort"
+    assert res["reason"] == "account_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_case_d_unbound_legacy_with_verified_matching_eias_aborts_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unbound legacy entry whose prior identity returns matching EIASToken aborts already_configured."""
+    legacy_entry = Mock()
+    legacy_entry.entry_id = "entry-legacy"
+    legacy_entry.unique_id = "production:client-id"
+    legacy_entry.data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_USERNAME: "legacy_seller",
+    }
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow._data = _flow_data(client_id="client-id")
+
+    identity = AccountIdentity(
+        account_id="eias_legacy_123",
+        username="legacy_seller",
+        environment="production",
+        client_id="client-id",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_entry_existing_identity",
+        AsyncMock(return_value=identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+    monkeypatch.setattr(flow, "_async_current_entries", lambda: [legacy_entry])
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
     assert res["reason"] == "already_configured"
+
+
+@pytest.mark.asyncio
+async def test_case_d_cross_app_unbound_legacy_ambiguity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-existing entry on different developer app with unverified identity aborts account_ambiguous."""
+    legacy_entry = Mock()
+    legacy_entry.entry_id = "entry-legacy-app-a"
+    legacy_entry.unique_id = "production:client-app-a"
+    legacy_entry.data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-app-a",
+        CONF_ACCOUNT_USERNAME: "legacy_seller",
+    }
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow._data = _flow_data(client_id="client-app-b")
+
+    identity_b = AccountIdentity(
+        account_id="eias_new_app_b",
+        username="seller_b",
+        environment="production",
+        client_id="client-app-b",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=identity_b),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+    monkeypatch.setattr(flow, "_async_current_entries", lambda: [legacy_entry])
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-app-b",
+            "token": {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_case_d_stored_verified_userid_entry_aborts_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing entry with stored VERIFIED USER_ID binding aborts account_ambiguous against candidate EIASToken."""
+    stored_userid_identity = AccountIdentity(
+        account_id="legacy_seller",
+        username="legacy_seller",
+        environment="production",
+        client_id="client-id",
+        identifier_type=AccountIdentifierType.USER_ID,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    existing_entry = Mock()
+    existing_entry.entry_id = "entry-userid"
+    existing_entry.unique_id = "production:client-id"
+    existing_entry.data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_IDENTITY: stored_userid_identity.to_config_entry_dict(),
+        CONF_ACCOUNT_USERNAME: "legacy_seller",
+        CONF_ACCOUNT_ID: "legacy_seller",
+    }
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow._data = _flow_data(client_id="client-id")
+
+    candidate_identity = AccountIdentity(
+        account_id="eias_candidate_123",
+        username="legacy_seller",
+        environment="production",
+        client_id="client-id",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=candidate_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+    monkeypatch.setattr(flow, "_async_current_entries", lambda: [existing_entry])
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "tok",
+                "refresh_token": "ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_ambiguous"
 
 
 @pytest.mark.asyncio
@@ -1196,7 +1423,7 @@ def test_is_displayable_username_semantics() -> None:
 async def test_reauth_legitimate_username_rename_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When durable EIASToken matches, reauth accepts username rename and updates metadata."""
+    """When durable EIASToken matches, reauth accepts username rename and updates title and metadata atomically."""
     orig_identity = AccountIdentity(
         account_id="eias_durable_123",
         username="old_seller_handle",
@@ -1213,18 +1440,12 @@ async def test_reauth_legitimate_username_rename_succeeds(
         CONF_ACCOUNT_IDENTITY: orig_identity.to_config_entry_dict(),
         CONF_ACCOUNT_USERNAME: "old_seller_handle",
         CONF_ACCOUNT_ID: "eias_durable_123",
+        "token": {"access_token": "old_acc", "refresh_token": "old_ref"},
     }
+    entry.options = {"opt": "val"}
 
     flow = EbayConfigFlow()
-    hass_mock = Mock()
-    updated_titles: list[str] = []
-
-    def _mock_update_entry(ent: Any, **kwargs: Any) -> None:
-        if "title" in kwargs:
-            updated_titles.append(kwargs["title"])
-
-    hass_mock.config_entries.async_update_entry = _mock_update_entry
-    flow.hass = hass_mock
+    flow.hass = Mock()
     flow.context = {
         "source": config_entries.SOURCE_REAUTH,
         "entry_id": entry.entry_id,
@@ -1247,20 +1468,21 @@ async def test_reauth_legitimate_username_rename_succeeds(
         "custom_components.ebay.config_flow.async_get_clientsession",
         lambda hass: Mock(),
     )
-    reauth_updated: dict[str, Any] = {}
+    update_and_abort_calls: dict[str, Any] = {}
 
-    def _mock_finish_reauth(data: dict[str, Any]) -> dict[str, Any]:
-        reauth_updated.update(data)
+    def _mock_update_and_abort(ent: Any, **kwargs: Any) -> dict[str, Any]:
+        update_and_abort_calls["entry"] = ent
+        update_and_abort_calls.update(kwargs)
         return {"type": "abort", "reason": "reauth_successful"}
 
-    monkeypatch.setattr(flow, "_finish_reauth", _mock_finish_reauth)
+    monkeypatch.setattr(flow, "async_update_and_abort", _mock_update_and_abort)
 
     res = await flow.async_oauth_create_entry(
         {
             "auth_implementation": "ebay:production:client-id",
             "token": {
-                "access_token": "tok",
-                "refresh_token": "ref",
+                "access_token": "new_acc",
+                "refresh_token": "new_ref",
                 "expires_in": 7200,
             },
         }
@@ -1268,9 +1490,367 @@ async def test_reauth_legitimate_username_rename_succeeds(
 
     assert res["type"] == "abort"
     assert res["reason"] == "reauth_successful"
-    assert updated_titles == ["eBay (new_seller_handle)"]
-    assert reauth_updated[CONF_ACCOUNT_USERNAME] == "new_seller_handle"
-    assert reauth_updated[CONF_ACCOUNT_ID] == "eias_durable_123"
+    # Title committed atomically inside async_update_and_abort
+    assert update_and_abort_calls["entry"] is entry
+    assert update_and_abort_calls["title"] == "eBay (new_seller_handle)"
+    assert update_and_abort_calls["data"][CONF_ACCOUNT_USERNAME] == "new_seller_handle"
+    assert update_and_abort_calls["data"][CONF_ACCOUNT_ID] == "eias_durable_123"
+    assert update_and_abort_calls["data"]["token"]["refresh_token"] == "new_ref"
+
+
+@pytest.mark.asyncio
+async def test_reauth_fails_closed_legacy_userid_only_entry_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy entry with only UserID fallback aborts reauth account_unverifiable and leaves entry untouched."""
+    legacy_entry = Mock()
+    legacy_entry.entry_id = "entry-legacy-reauth"
+    legacy_entry.unique_id = "production:client-id"
+    legacy_entry.title = "eBay (legacy_seller)"
+    orig_data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_USERNAME: "legacy_seller",
+        "token": {"access_token": "orig_acc", "refresh_token": "orig_ref"},
+    }
+    legacy_entry.data = dict(orig_data)
+    orig_options = {"feedbacks": True}
+    legacy_entry.options = dict(orig_options)
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": legacy_entry.entry_id,
+    }
+    flow._data = _flow_data()
+
+    # Reauth grant returns only USER_ID even with matching username
+    userid_identity = AccountIdentity(
+        account_id="legacy_seller",
+        username="legacy_seller",
+        identifier_type=AccountIdentifierType.USER_ID,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: legacy_entry)
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=userid_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "candidate_acc",
+                "refresh_token": "candidate_ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_unverifiable"
+    # Strict immutability verification: entry remains completely untouched
+    assert legacy_entry.data == orig_data
+    assert legacy_entry.title == "eBay (legacy_seller)"
+    assert legacy_entry.options == orig_options
+    assert legacy_entry.data["token"]["refresh_token"] == "orig_ref"
+
+
+@pytest.mark.asyncio
+async def test_reauth_fails_closed_legacy_entry_candidate_eias_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy entry with only UserID attempting reauth with EIASToken aborts account_unverifiable and leaves entry untouched."""
+    legacy_entry = Mock()
+    legacy_entry.entry_id = "entry-legacy-reauth"
+    legacy_entry.unique_id = "production:client-id"
+    legacy_entry.title = "eBay (legacy_seller)"
+    orig_data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_USERNAME: "legacy_seller",
+        "token": {"access_token": "orig_acc", "refresh_token": "orig_ref"},
+    }
+    legacy_entry.data = dict(orig_data)
+    orig_options = {"feedbacks": True}
+    legacy_entry.options = dict(orig_options)
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": legacy_entry.entry_id,
+    }
+    flow._data = _flow_data()
+
+    # Reauth grant returns EIASToken, but prior legacy identity only has UserID fallback
+    candidate_eias_identity = AccountIdentity(
+        account_id="eias_new_candidate",
+        username="legacy_seller",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    prior_userid_identity = AccountIdentity(
+        account_id="legacy_seller",
+        username="legacy_seller",
+        identifier_type=AccountIdentifierType.USER_ID,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: legacy_entry)
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=candidate_eias_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_entry_existing_identity",
+        AsyncMock(return_value=prior_userid_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "candidate_acc",
+                "refresh_token": "candidate_ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_unverifiable"
+    # Strict immutability verification: entry remains completely untouched
+    assert legacy_entry.data == orig_data
+    assert legacy_entry.title == "eBay (legacy_seller)"
+    assert legacy_entry.options == orig_options
+    assert legacy_entry.data["token"]["refresh_token"] == "orig_ref"
+
+
+@pytest.mark.asyncio
+async def test_reauth_fails_closed_candidate_userid_only_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verified EIASToken entry reauthorizing with UserID-only grant aborts account_unverifiable and leaves entry untouched."""
+    verified_identity = AccountIdentity(
+        account_id="eias_durable_123",
+        username="verified_seller",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    entry = Mock()
+    entry.entry_id = "entry-verified"
+    entry.unique_id = "production:eias_durable_123"
+    entry.title = "eBay (verified_seller)"
+    orig_data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_IDENTITY: verified_identity.to_config_entry_dict(),
+        CONF_ACCOUNT_USERNAME: "verified_seller",
+        CONF_ACCOUNT_ID: "eias_durable_123",
+        "token": {"access_token": "orig_acc", "refresh_token": "orig_ref"},
+    }
+    entry.data = dict(orig_data)
+    orig_options = {"feedbacks": True}
+    entry.options = dict(orig_options)
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = _flow_data()
+
+    # Reauth grant only returns UserID (EIASToken conditionally omitted by eBay)
+    userid_identity = AccountIdentity(
+        account_id="verified_seller",
+        username="verified_seller",
+        identifier_type=AccountIdentifierType.USER_ID,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=userid_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "candidate_acc",
+                "refresh_token": "candidate_ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_unverifiable"
+    # Entry remains completely untouched
+    assert entry.data == orig_data
+    assert entry.title == "eBay (verified_seller)"
+    assert entry.options == orig_options
+    assert entry.data["token"]["refresh_token"] == "orig_ref"
+
+
+@pytest.mark.asyncio
+async def test_reauth_failure_injection_account_mismatch_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When reauth detects account mismatch, aborts account_mismatch and leaves entry untouched."""
+    verified_identity = AccountIdentity(
+        account_id="eias_account_A",
+        username="seller_A",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    entry = Mock()
+    entry.entry_id = "entry-mismatch"
+    entry.unique_id = "production:eias_account_A"
+    entry.title = "eBay (seller_A)"
+    orig_data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_IDENTITY: verified_identity.to_config_entry_dict(),
+        CONF_ACCOUNT_USERNAME: "seller_A",
+        CONF_ACCOUNT_ID: "eias_account_A",
+        "token": {"access_token": "orig_acc", "refresh_token": "orig_ref"},
+    }
+    entry.data = dict(orig_data)
+    orig_options = {"feedbacks": True}
+    entry.options = dict(orig_options)
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = _flow_data()
+
+    # User mistakenly authorized Account B
+    mismatched_identity = AccountIdentity(
+        account_id="eias_account_B",
+        username="seller_B",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=mismatched_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "mismatch_acc",
+                "refresh_token": "mismatch_ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "account_mismatch"
+    # Entry remains completely untouched
+    assert entry.data == orig_data
+    assert entry.title == "eBay (seller_A)"
+    assert entry.options == orig_options
+    assert entry.data["token"]["refresh_token"] == "orig_ref"
+
+
+@pytest.mark.asyncio
+async def test_reauth_failure_injection_network_failure_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When reauth fails identity verification due to network failure, aborts cannot_connect and leaves entry untouched."""
+    verified_identity = AccountIdentity(
+        account_id="eias_account_A",
+        username="seller_A",
+        identifier_type=AccountIdentifierType.EIASTOKEN,
+        binding_state=AccountBindingState.VERIFIED,
+    )
+    entry = Mock()
+    entry.entry_id = "entry-net-fail"
+    entry.unique_id = "production:eias_account_A"
+    entry.title = "eBay (seller_A)"
+    orig_data = {
+        CONF_ENVIRONMENT: "production",
+        CONF_CLIENT_ID: "client-id",
+        CONF_ACCOUNT_IDENTITY: verified_identity.to_config_entry_dict(),
+        CONF_ACCOUNT_USERNAME: "seller_A",
+        CONF_ACCOUNT_ID: "eias_account_A",
+        "token": {"access_token": "orig_acc", "refresh_token": "orig_ref"},
+    }
+    entry.data = dict(orig_data)
+    orig_options = {"feedbacks": True}
+    entry.options = dict(orig_options)
+
+    flow = EbayConfigFlow()
+    flow.hass = Mock()
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": entry.entry_id,
+    }
+    flow._data = _flow_data()
+
+    # Network failure during identity verification
+    failed_identity = AccountIdentity(
+        account_id=None,
+        username=None,
+        identifier_type=AccountIdentifierType.UNKNOWN,
+        binding_state=AccountBindingState.FAILED,
+        failure_reason=IdentityFailureReason.NETWORK_ERROR,
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        AsyncMock(return_value=failed_identity),
+    )
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: Mock(),
+    )
+
+    res = await flow.async_oauth_create_entry(
+        {
+            "auth_implementation": "ebay:production:client-id",
+            "token": {
+                "access_token": "new_acc",
+                "refresh_token": "new_ref",
+                "expires_in": 7200,
+            },
+        }
+    )
+
+    assert res["type"] == "abort"
+    assert res["reason"] == "cannot_connect"
+    # Entry remains completely untouched
+    assert entry.data == orig_data
+    assert entry.title == "eBay (seller_A)"
+    assert entry.options == orig_options
+    assert entry.data["token"]["refresh_token"] == "orig_ref"
 
 
 @pytest.mark.asyncio
@@ -1658,7 +2238,7 @@ async def test_async_verify_entry_existing_identity_lifecycle(
 async def test_simultaneous_multi_account_integration_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end integration mock lifecycle: two simultaneous accounts under one HA instance."""
+    """Component lifecycle test: two simultaneous distinct accounts under one HA instance."""
     # 1. Setup Account 1 via Native OAuth
     flow1 = EbayConfigFlow()
     flow1.hass = Mock()
