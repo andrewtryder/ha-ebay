@@ -27,9 +27,9 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Tooling & Foundation** | Modernize uv Tooling & Prepare Existing-User Migration | `chore/uv-ha-2026-10-migration-foundation` | [#99](https://github.com/andrewtryder/ha-ebay/pull/99) | **Merged** (`e0a957b`) |
 | **Milestone 6** | Best Offers & Negotiation History Modernization Package | `feat/ebay-offers-modernization` | [#100](https://github.com/andrewtryder/ha-ebay/pull/100) | **Merged** (`cc59442`) |
 | **Milestone 7** | Sold / Unsold Listing Classification Modernization Package | `feat/ebay-sold-unsold-modernization` | [#101](https://github.com/andrewtryder/ha-ebay/pull/101) | **Merged** (`823dce0`) |
-| **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | PR | **Completed (Current PR)**: Full XML inventory audit, REST Identity parity validation, Feedback/Messages/Standards audited, zero cutover |
-| **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | TBD | **Next Planned Workstream** |
-| **Milestone 10** | One-Click eBay OAuth Architecture Assessment | Design deliverable | TBD | Planned |
+| **Milestone 8** | Remaining Legacy Fields & API Operations Package | `feat/ebay-legacy-fields-modernization` | [#102](https://github.com/andrewtryder/ha-ebay/pull/102) | **Merged** (`e34298f`) |
+| **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | PR | **Completed (Current PR)**: Same-app multi-account onboarding, canonical AccountIdentity, duplicate matrix, reauth protection, zero cutover |
+| **Milestone 10** | One-Click eBay OAuth Architecture Assessment | Design deliverable | TBD | **Next Planned Workstream** |
 | **Milestone 11** | Reliability, Quotas, & Compatibility Hardening | `feat/ebay-modern-api-reliability` | TBD | Planned |
 | **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
 
@@ -146,4 +146,17 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Evaluates monitored fields (`username`, `user_id`, `account_type`, `registration_marketplace_id`, `feedback_score`, `registration_date`) across the established 6-state taxonomy.
   - CLI harness features `--audit-matrix` to print or export the complete legacy operations dependency matrix in Markdown or JSON.
   - Strict privacy protections: Automatic SHA-256 user and account pseudonymization (`user_<sha256_12>`, `account_<sha256_12>`), credential redaction, and allowlisted error codes.
-  - Milestone status: **Read-only validation completed; zero production cutover.** Next planned workstream: **Milestone 9 (Account Identity & Multiple Accounts)**.
+  - Milestone status: **Read-only validation completed; merged in PR #102.**
+
+### 10. Account Identity & Safe Multiple eBay Accounts (Milestone 9)
+- **Root Cause Resolution & Uniqueness Architecture**:
+  - Identified pre-M9 blocker in `custom_components/ebay/config_flow.py` where `async_set_unique_id(f"{environment}:{client_id}")` was called prior to OAuth, preventing multiple accounts under the same eBay developer application.
+  - Resolved limitation by deferring unique ID assignment to after OAuth completion, using authenticated, read-only Trading XML `GetUser` under the existing core scope (`https://api.ebay.com/oauth/api_scope`) to establish a canonical account unique ID `f"{environment}:{account_id}"`.
+  - Implemented typed `AccountIdentity` model in [`custom_components/ebay/account_identity.py`](../custom_components/ebay/account_identity.py) with prioritized identifier resolution: `EIASToken` (durable, encrypted token) preferred over `UserID` (public display username).
+- **Duplicate Detection Matrix & Reauthorization Security**:
+  - Implemented exhaustive 5-case duplicate policy matrix (Cases A–E) distinguishing same-application multiple accounts (allowed) from duplicate authorizations of the same account (aborted with `already_configured`).
+  - Added strict reauthorization protections: Reauthorizing with a different eBay account or username aborts with `account_mismatch` to prevent silent credential overwrite.
+- **Legacy Migration & Strict Isolation**:
+  - Config entry version bumped to 5 (`async_migrate_entry`), preserving all existing entry IDs, legacy unique IDs (`environment:client_id`), and entity unique IDs (`f"{entry.entry_id}_{key}"`).
+  - Strict data isolation across accounts for entities, coordinators, storage stores, and feedback username caches.
+  - Milestone status: **Completed and fully tested; zero production cutover.** Next planned workstream: **Milestone 10 (One-Click OAuth Assessment)**.

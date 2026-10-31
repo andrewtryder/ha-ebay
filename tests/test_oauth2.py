@@ -19,9 +19,16 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 from voluptuous_serialize import convert
 
+from custom_components.ebay.account_identity import (
+    AccountBindingState,
+    AccountIdentifierType,
+    AccountIdentity,
+    AccountIdentityProvenance,
+)
 from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
+    CONF_ACCOUNT_IDENTITY,
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
     CONF_ENVIRONMENT,
@@ -627,11 +634,25 @@ def test_credentials_are_stripped_before_unique_id_and_oauth(
     )
 
     assert result["type"] == "external"
-    assert unique_ids == ["production:client-id"]
     assert flow._data[CONF_CLIENT_ID] == "client-id"
     assert flow._data[CONF_CLIENT_SECRET] == "client-secret"
     assert flow._data[CONF_RUNAME] == "Example-Runame"
     assert flow._data[CONF_SITE_ID] == "0"
+
+    # In M9, unique ID is set after OAuth upon verified account identity
+    asyncio.run(
+        flow.async_oauth_create_entry(
+            {
+                "auth_implementation": "ebay:production:client-id",
+                "token": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_in": 7200,
+                },
+            }
+        )
+    )
+    assert unique_ids == ["production:test_user_id"]
 
 
 def test_credentials_reject_invalid_site_id(
@@ -858,7 +879,28 @@ def test_manual_reauth_updates_existing_entry(
     flow._state = "state-1"
     flow._consent_url = "https://auth.ebay.com/oauth2/authorize"
     flow._requested_scopes = CORE_SCOPE
-    entry = type("Entry", (), {"data": _flow_data(), "title": "eBay"})()
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "title": "eBay (test_user)",
+            "data": {
+                **_flow_data(),
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
+            },
+        },
+    )()
     updated: dict[str, Any] = {}
 
     class Client:
@@ -939,7 +981,28 @@ def test_reauth_updates_existing_entry(monkeypatch: pytest.MonkeyPatch) -> None:
         "source": config_entries.SOURCE_REAUTH,
         "entry_id": "entry-1",
     }
-    entry = type("Entry", (), {"data": _flow_data(), "title": "eBay"})()
+    entry = type(
+        "Entry",
+        (),
+        {
+            "entry_id": "entry-1",
+            "title": "eBay (test_user)",
+            "data": {
+                **_flow_data(),
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
+            },
+        },
+    )()
     flow._data = _flow_data(client_secret="new-secret")
     updated: dict[str, Any] = {}
 
@@ -1135,6 +1198,28 @@ def _flow(monkeypatch: pytest.MonkeyPatch) -> EbayConfigFlow:
     flow.flow_id = "flow-123"
     monkeypatch.setattr(flow, "async_set_unique_id", _async_noop)
     monkeypatch.setattr(flow, "_abort_if_unique_id_configured", lambda *args: None)
+    monkeypatch.setattr(
+        flow, "_abort_if_unique_id_mismatch", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(flow, "_async_current_entries", lambda: [])
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_get_clientsession",
+        lambda hass: object(),
+    )
+
+    async def _mock_verify(*args: Any, **kwargs: Any) -> AccountIdentity:
+        return AccountIdentity(
+            account_id="test_user_id",
+            username="test_user",
+            provenance=AccountIdentityProvenance.AUTHENTICATED_GET_USER,
+            binding_state=AccountBindingState.VERIFIED,
+            identifier_type=AccountIdentifierType.EIASTOKEN,
+        )
+
+    monkeypatch.setattr(
+        "custom_components.ebay.config_flow.async_verify_authenticated_account",
+        _mock_verify,
+    )
     return flow
 
 
@@ -1326,10 +1411,22 @@ def test_reauth_success_commits_pending_options(
         "Entry",
         (),
         {
+            "entry_id": "entry-1",
             "data": {
                 **_flow_data(),
                 CONF_OAUTH_SCOPES: CORE_SCOPE,
                 CONF_PENDING_OPTIONS: pending,
+                CONF_ACCOUNT_IDENTITY: {
+                    "entry_id": "entry-1",
+                    "environment": "production",
+                    "client_id": "client-id",
+                    "account_id": "test_user_id",
+                    "identifier_type": "eias_token",
+                    "username": "test_user",
+                    "binding_state": "verified",
+                    "provenance": "authenticated_get_user",
+                    "reauth_generation": 0,
+                },
             },
             "options": {"feedback_enabled": False},
             "title": "eBay",
@@ -1413,6 +1510,45 @@ def test_reauth_with_pending_options_uses_async_update_and_abort(
     assert called["update_and_abort"]["options"] == pending
     assert CONF_PENDING_OPTIONS not in called["update_and_abort"]["data"]
     assert "manual_authorization" not in called["update_and_abort"]["data"]
+
+
+def test_reauth_with_staged_title_uses_async_update_and_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_finish_reauth passes staged new title atomically into async_update_and_abort."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "entry-1",
+    }
+    entry = type(
+        "Entry",
+        (),
+        {
+            "data": _flow_data(),
+            "options": {},
+            "title": "eBay (old_user)",
+        },
+    )()
+    called: dict[str, Any] = {}
+
+    def _mock_update_and_abort(entry_arg: Any, **kwargs: Any) -> dict[str, Any]:
+        called["update_and_abort"] = kwargs
+        return {"type": "abort", "reason": "reauth_successful"}
+
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
+    monkeypatch.setattr(flow, "async_update_and_abort", _mock_update_and_abort)
+
+    # 1. New title is passed when it differs from entry.title
+    result = flow._finish_reauth(_flow_data(), title="eBay (new_user)")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert called["update_and_abort"]["title"] == "eBay (new_user)"
+
+    # 2. When title is identical to entry.title, title is not in kwargs
+    called.clear()
+    result = flow._finish_reauth(_flow_data(), title="eBay (old_user)")
+    assert result == {"type": "abort", "reason": "reauth_successful"}
+    assert "title" not in called["update_and_abort"]
 
 
 def test_reauth_cancel_discards_pending_options(

@@ -15,6 +15,10 @@ CONF_REFRESH_TOKEN = "refresh_token"
 CONF_RUNAME = "runame"
 CONF_SITE_ID = "site_id"
 
+CONF_ACCOUNT_IDENTITY = "account_identity"
+CONF_ACCOUNT_ID = "account_id"
+CONF_ACCOUNT_USERNAME = "account_username"
+
 CONF_ACCOUNT_PRIVILEGES_ENABLED = "account_privileges_enabled"
 CONF_ANALYTICS_ENABLED = "analytics_enabled"
 CONF_BUYING_ENABLED = "buying_enabled"

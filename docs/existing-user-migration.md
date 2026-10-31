@@ -130,11 +130,12 @@ flowchart TD
     I -- Yes --> E
 ```
 
-### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5, M6, M7, M8)
+### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5, M6, M7, M8, M9)
 - Define modern queries, data models, and fail-closed normalization parsers.
 - Build private, opt-in CLI parity test tools (`scripts/validate_*_parity.py`).
 - Implement exhaustive offline test suites covering partial errors, duplicate IDs, and contradictory pagination.
 - **Milestone 8 Completed**: Audited all residual Trading XML operations across the codebase. Built canonical identity model (`custom_components/ebay/parsers/identity_parity.py`) and master dependency matrix CLI (`scripts/validate_legacy_fields_parity.py`). Validated that existing user OAuth grants remain strictly on core `https://api.ebay.com/oauth/api_scope` with zero forced re-authentication and zero runtime cutover.
+- **Milestone 9 Completed**: Established canonical account identity bindings and enabled safe multi-account onboarding. Upgraded config entry schema to version 5 in `async_migrate_entry()`, safely associating `AccountIdentity` with `binding_state="legacy_compatible"` without altering legacy entry unique IDs (`environment:client_id`) or entity registry unique IDs (`f"{entry.entry_id}_{key}"`). Added strict reauthorization protections preventing account switching. Zero cutover to modern providers.
 
 ### Phase 2: Live Entitlement Verification
 - Confirm exact required OAuth scopes and developer entitlements via eBay GraphQL Explorer.
