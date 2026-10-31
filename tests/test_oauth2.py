@@ -10,7 +10,9 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
+import probatio
 import pytest
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.config_entry_oauth2_flow import (
@@ -502,16 +504,48 @@ def test_manual_fallback_still_shows_consent_url(
     )
 
 
-def test_initial_flow_starts_credentials_step(
+def test_user_step_shows_guided_menu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Initial setup starts directly with the credentials step in automatic mode."""
+    """Initial setup presents a menu offering guided onboarding or direct credential entry."""
     flow = _flow(monkeypatch)
 
     result = asyncio.run(flow.async_step_user())
 
+    assert result["type"] == "menu"
+    assert result["step_id"] == "user"
+    assert result["menu_options"] == ["redirect_guidance", "credentials"]
+    assert (
+        result["description_placeholders"]["developer_console_url"]
+        == DEVELOPER_CONSOLE_URL
+    )
+    assert (
+        result["description_placeholders"]["oauth_setup_guide_url"]
+        == OAUTH_SETUP_GUIDE_URL
+    )
+
+
+def test_user_step_with_credentials_bypasses_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting credentials directly to async_step_user proceeds to authorization."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(flow.async_step_user(_flow_data()))
+
+    assert result["type"] == "external"
+
+
+def test_redirect_guidance_step_shows_copyable_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guided redirect step displays exact runtime callback URLs and setup links."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(flow.async_step_redirect_guidance())
+
     assert result["type"] == "form"
-    assert result["step_id"] == "credentials"
+    assert result["step_id"] == "redirect_guidance"
     assert (
         result["description_placeholders"]["callback_url"]
         == "https://my.home-assistant.io/redirect/oauth"
@@ -520,6 +554,25 @@ def test_initial_flow_starts_credentials_step(
         result["description_placeholders"]["developer_console_url"]
         == DEVELOPER_CONSOLE_URL
     )
+    assert (
+        result["description_placeholders"]["privacy_policy_url"] == PRIVACY_POLICY_URL
+    )
+    assert (
+        result["description_placeholders"]["oauth_setup_guide_url"]
+        == OAUTH_SETUP_GUIDE_URL
+    )
+
+
+def test_redirect_guidance_submit_advances_to_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting the redirect guidance informational form proceeds to credentials."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(flow.async_step_redirect_guidance({}))
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
 
 
 def test_automatic_selection_shows_credentials_step(
@@ -534,31 +587,28 @@ def test_automatic_selection_shows_credentials_step(
     assert result["step_id"] == "credentials"
 
 
-def test_credentials_step_has_setup_placeholders(
+def test_prepare_application_alias_shows_redirect_guidance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Credentials step includes copyable callback and documentation placeholders."""
-    flow = _flow(monkeypatch)
-
-    result = asyncio.run(flow.async_step_credentials())
-
-    placeholders = result["description_placeholders"]
-    assert placeholders["callback_url"] == "https://my.home-assistant.io/redirect/oauth"
-    assert placeholders["developer_console_url"] == DEVELOPER_CONSOLE_URL
-    assert placeholders["oauth_setup_guide_url"] == OAUTH_SETUP_GUIDE_URL
-    assert placeholders["privacy_policy_url"] == PRIVACY_POLICY_URL
-
-
-def test_prepare_application_alias_shows_credentials_form(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Legacy prepare_application step alias forwards to credentials."""
+    """Legacy prepare_application step alias forwards to redirect_guidance."""
     flow = _flow(monkeypatch)
 
     result = asyncio.run(flow.async_step_prepare_application())
 
     assert result["type"] == "form"
-    assert result["step_id"] == "credentials"
+    assert result["step_id"] == "redirect_guidance"
+
+
+def test_authorization_method_alias_shows_user_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy authorization_method step alias forwards to async_step_user."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(flow.async_step_authorization_method())
+
+    assert result["type"] == "menu"
+    assert result["step_id"] == "user"
 
 
 def test_credentials_form_has_expected_fields_and_defaults(
@@ -608,6 +658,156 @@ def test_credentials_reject_blank_required_fields(
         CONF_RUNAME: "required",
         CONF_SITE_ID: "required",
     }
+
+
+@pytest.mark.parametrize(
+    "malformed_runame,expected_error",
+    [
+        ("https://my.home-assistant.io/redirect/oauth", "invalid_runame_url"),
+        ("http://example.com/callback", "invalid_runame_url"),
+        ("invalid/runame", "invalid_runame_url"),
+        ("Home Assistant", "invalid_runame_title"),
+        ("homeassistant", "invalid_runame_title"),
+        ("Display Title", "invalid_runame_title"),
+        ("My App RuName", "invalid_runame_title"),
+        ("RuName\tWithTab", "invalid_runame"),
+        ("RuName\nWithNewline", "invalid_runame"),
+        ("RuName\rWithCR", "invalid_runame"),
+        ("RuName\0WithNull", "invalid_runame"),
+        ("RuName\u00a0WithNBSP", "invalid_runame"),
+        ("RuName\u200bWithZeroWidth", "invalid_runame"),
+    ],
+)
+def test_credentials_reject_invalid_runame_formats(
+    monkeypatch: pytest.MonkeyPatch,
+    malformed_runame: str,
+    expected_error: str,
+) -> None:
+    """URLs, display titles, and control chars pasted into RuName are rejected with actionable errors."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials(_flow_data(runame=malformed_runame))
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {CONF_RUNAME: expected_error}
+
+
+@pytest.mark.parametrize(
+    "malformed_client_id,runame_val,expected_error",
+    [
+        ("https://developer.ebay.com", "Example-Runame", "invalid_client_id_url"),
+        ("http://localhost:8123", "Example-Runame", "invalid_client_id_url"),
+        ("client/id", "Example-Runame", "invalid_client_id_url"),
+        ("client id with space", "Example-Runame", "invalid_client_id"),
+        ("client\tid\twith\ttab", "Example-Runame", "invalid_client_id"),
+        ("client\nid\nwith\nnewline", "Example-Runame", "invalid_client_id"),
+        ("client\0id", "Example-Runame", "invalid_client_id"),
+        ("client\u00a0id", "Example-Runame", "invalid_client_id"),
+        ("client\u200bid", "Example-Runame", "invalid_client_id"),
+        ("Example-Runame", "Example-Runame", "invalid_client_id_runame"),
+    ],
+)
+def test_credentials_reject_invalid_client_id_formats(
+    monkeypatch: pytest.MonkeyPatch,
+    malformed_client_id: str,
+    runame_val: str,
+    expected_error: str,
+) -> None:
+    """URLs, whitespace, control chars, and RuNames pasted into Client ID are rejected."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(client_id=malformed_client_id, runame=runame_val)
+        )
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {CONF_CLIENT_ID: expected_error}
+
+
+def test_credentials_preserves_valid_fields_when_validation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid non-secret credentials are preserved in form defaults when field validation fails."""
+    flow = _flow(monkeypatch)
+
+    result = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id="my-valid-client",
+                client_secret="my-valid-secret",
+                runame="https://my.home-assistant.io/redirect/oauth",
+                site_id="0",
+            )
+        )
+    )
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {CONF_RUNAME: "invalid_runame_url"}
+
+    fields = _schema_fields(result["data_schema"])
+    assert fields[CONF_CLIENT_ID].default() == "my-valid-client"
+    assert fields[CONF_CLIENT_SECRET].default is vol.UNDEFINED
+    assert fields[CONF_SITE_ID].default() == "0"
+
+    # Verify serialized fields via probatio: client_secret must never have a default
+    serialized = probatio.to_field_list(
+        result["data_schema"], custom_serializer=cv.custom_serializer
+    )
+    secret_field = next(f for f in serialized if f["name"] == CONF_CLIENT_SECRET)
+    assert "default" not in secret_field
+    assert secret_field["selector"] == {
+        "text": {"type": "password", "multiline": False, "multiple": False}
+    }
+    assert "my-valid-secret" not in str(result)
+
+
+def test_reauth_bypasses_introductory_guidance_and_preserves_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reauthorization skips intro and redirect screens and pre-fills non-secret credentials."""
+    flow = _flow(monkeypatch)
+    flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "reauth_entry_id",
+    }
+    mock_entry = SimpleNamespace(
+        entry_id="reauth_entry_id",
+        unique_id="production:EIASTOKEN123",
+        title="eBay (testuser)",
+        data={
+            CONF_ENVIRONMENT: "production",
+            CONF_CLIENT_ID: "existing-client-id",
+            CONF_CLIENT_SECRET: "existing-client-secret",
+            CONF_RUNAME: "Existing-Runame",
+            CONF_SITE_ID: "0",
+        },
+        options={},
+    )
+    monkeypatch.setattr(flow, "_get_reauth_entry", lambda: mock_entry)
+
+    # Reauth confirm step
+    result_confirm = asyncio.run(flow.async_step_reauth_confirm())
+    assert result_confirm["type"] == "form"
+    assert result_confirm["step_id"] == "reauth_confirm"
+
+    # Confirming reauth leads directly to credentials without showing user or redirect_guidance
+    result_creds = asyncio.run(flow.async_step_reauth_confirm({}))
+    assert result_creds["type"] == "form"
+    assert result_creds["step_id"] == "credentials"
+
+    fields = _schema_fields(result_creds["data_schema"])
+    assert fields[CONF_CLIENT_ID].default() == "existing-client-id"
+    assert fields[CONF_CLIENT_SECRET].default is vol.UNDEFINED
+    assert fields[CONF_RUNAME].default() == "Existing-Runame"
+    assert fields[CONF_SITE_ID].default() == "0"
+    assert "existing-client-secret" not in str(result_creds)
 
 
 def test_credentials_are_stripped_before_unique_id_and_oauth(
@@ -1101,9 +1301,10 @@ def test_reauth_credentials_prefill_safe_fields_only(
     fields = _schema_fields(result["data_schema"])
     assert fields[CONF_ENVIRONMENT].default() == "production"
     assert fields[CONF_CLIENT_ID].default() == "client-id"
-    assert fields[CONF_CLIENT_SECRET].default() == ""
+    assert fields[CONF_CLIENT_SECRET].default is vol.UNDEFINED
     assert fields[CONF_RUNAME].default() == "Example-Runame"
     assert fields[CONF_SITE_ID].default() == "77"
+    assert "stored-secret" not in str(result)
 
 
 def test_reauth_confirm_credentials_form_serializes_and_validates(
@@ -1179,16 +1380,152 @@ def test_strings_and_english_translations_match_setup_keys() -> None:
     )
 
     assert strings == english
+    assert "invalid_environment" in strings["config"]["error"]
     steps = strings["config"]["step"]
     for step in (
         "prepare_application",
+        "redirect_guidance",
         "credentials",
         "manual",
     ):
         assert step in steps
     assert "menu_options" in steps["user"]
+    assert "redirect_guidance" in steps["user"]["menu_options"]
+    assert "credentials" in steps["user"]["menu_options"]
     assert "authorization_method" not in steps
     assert "oauth_mode" not in steps["credentials"]["data"]
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        "prod",
+        "sandboxx",
+        "invalid",
+        "staging",
+        "development",
+        "production1",
+        "null",
+        "true",
+        "0",
+    ],
+)
+def test_credentials_rejects_invalid_environments_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, bad_env: str
+) -> None:
+    """Explicit invalid environments are rejected fail-closed without silent fallback."""
+    flow = _flow(monkeypatch)
+    result = asyncio.run(flow.async_step_credentials(_flow_data(environment=bad_env)))
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "credentials"
+    assert result["errors"] == {CONF_ENVIRONMENT: "invalid_environment"}
+    assert flow._consent_url is None
+
+
+@pytest.mark.parametrize(
+    "env_input,expected_env",
+    [
+        ("production", "production"),
+        ("sandbox", "sandbox"),
+        (" PRODUCTION ", "production"),
+        ("  sandbox  ", "sandbox"),
+        ("Sandbox", "sandbox"),
+        ("Production", "production"),
+        (None, "production"),
+    ],
+)
+def test_credentials_accepts_valid_environments(
+    monkeypatch: pytest.MonkeyPatch, env_input: str | None, expected_env: str
+) -> None:
+    """Valid environment choices are accepted, normalized, or defaulted when absent."""
+    flow = _flow(monkeypatch)
+    data = _flow_data()
+    if env_input is None:
+        data.pop(CONF_ENVIRONMENT, None)
+    else:
+        data[CONF_ENVIRONMENT] = env_input
+    result = asyncio.run(flow.async_step_credentials(data))
+
+    assert result["type"] == "external"
+    assert flow._data[CONF_ENVIRONMENT] == expected_env
+
+
+def test_credentials_accepts_valid_hyphenated_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legitimate identifiers containing hyphens and alphanumeric characters are accepted."""
+    flow = _flow(monkeypatch)
+    result = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id="Developer-App-PRD-123456789-abcdef",
+                runame="My-Developer-App-PRD-12345",
+            )
+        )
+    )
+
+    assert result["type"] == "external"
+    assert flow._data[CONF_CLIENT_ID] == "Developer-App-PRD-123456789-abcdef"
+    assert flow._data[CONF_RUNAME] == "My-Developer-App-PRD-12345"
+
+
+def test_client_secret_is_never_redisclosed_in_any_form_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Client Secret is never serialized into form definitions across initial, retry, and reauth."""
+    flow = _flow(monkeypatch)
+
+    # 1. Initial credentials step
+    init_res = asyncio.run(flow.async_step_credentials())
+    init_fields = probatio.to_field_list(
+        init_res["data_schema"], custom_serializer=cv.custom_serializer
+    )
+    init_secret = next(f for f in init_fields if f["name"] == CONF_CLIENT_SECRET)
+    assert "default" not in init_secret
+    assert init_secret["selector"]["text"]["type"] == "password"
+
+    # 2. Retry after validation error
+    err_res = asyncio.run(
+        flow.async_step_credentials(
+            _flow_data(
+                client_id="client-id",
+                client_secret="super-sensitive-secret-value-123",
+                runame="invalid/runame",
+            )
+        )
+    )
+    assert err_res["type"] == "form"
+    assert err_res["errors"] == {CONF_RUNAME: "invalid_runame_url"}
+    err_fields = probatio.to_field_list(
+        err_res["data_schema"], custom_serializer=cv.custom_serializer
+    )
+    err_secret = next(f for f in err_fields if f["name"] == CONF_CLIENT_SECRET)
+    assert "default" not in err_secret
+    assert "super-sensitive-secret-value-123" not in str(err_res)
+
+    # 3. Reauth credentials step
+    reauth_flow = _flow(monkeypatch)
+    reauth_flow.context = {
+        "source": config_entries.SOURCE_REAUTH,
+        "entry_id": "reauth-entry-id",
+    }
+    mock_entry = SimpleNamespace(
+        entry_id="reauth-entry-id",
+        unique_id="production:EIASTOKEN123",
+        title="eBay (testuser)",
+        data=_flow_data(client_secret="existing-secret-456"),
+        options={},
+    )
+    monkeypatch.setattr(reauth_flow, "_get_reauth_entry", lambda: mock_entry)
+
+    reauth_res = asyncio.run(reauth_flow.async_step_credentials())
+    reauth_fields = probatio.to_field_list(
+        reauth_res["data_schema"], custom_serializer=cv.custom_serializer
+    )
+    reauth_secret = next(f for f in reauth_fields if f["name"] == CONF_CLIENT_SECRET)
+    assert "default" not in reauth_secret
+    assert "existing-secret-456" not in str(reauth_res)
 
 
 def _flow(monkeypatch: pytest.MonkeyPatch) -> EbayConfigFlow:

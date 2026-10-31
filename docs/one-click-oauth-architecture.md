@@ -229,8 +229,8 @@ flowchart TD
 
 ## 8. Summary of Documentation Alignments
 
-1. [`docs/one-click-oauth-architecture.md`](one-click-oauth-architecture.md): Rewritten as the comprehensive Architecture Decision Record specifying the Guided BYO OAuth model.
-2. [`docs/ebay-oauth-setup.md`](ebay-oauth-setup.md): Updated to correct multi-account documentation (confirming that M9 permits multiple accounts under one App ID) and providing copyable URLs.
-3. [`docs/modernization-roadmap.md`](modernization-roadmap.md): Updated Milestone 10 deliverable status.
+1. [`docs/one-click-oauth-architecture.md`](one-click-oauth-architecture.md): Architecture Decision Record specifying the Guided BYO OAuth model (implemented in Milestone 10.1).
+2. [`docs/ebay-oauth-setup.md`](ebay-oauth-setup.md): Updated to reflect the guided onboarding wizard screens, exact callback URLs, format validation rules, and multi-account capabilities.
+3. [`docs/modernization-roadmap.md`](modernization-roadmap.md): Updated Milestone 10 deliverable status (PR #104) and Milestone 10.1 implementation status.
 4. [`docs/existing-user-migration.md`](existing-user-migration.md): Clarified token non-transferability across developer apps.
 5. [`docs/multiple-ebay-accounts.md`](multiple-ebay-accounts.md): Reaffirmed that account identity is independent of developer keysets.

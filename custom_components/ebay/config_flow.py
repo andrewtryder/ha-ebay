@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import unicodedata
 from typing import Any
 
 import voluptuous as vol
@@ -115,9 +116,28 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Start the guided setup flow, defaulting directly to automatic callback."""
+        """Start the guided setup flow."""
         self._oauth_mode = OAUTH_MODE_CALLBACK
-        return await self.async_step_credentials(user_input)
+        if user_input is not None:
+            if CONF_CLIENT_ID in user_input or CONF_ENVIRONMENT in user_input:
+                return await self.async_step_credentials(user_input)
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["redirect_guidance", "credentials"],
+            description_placeholders=self._setup_description_placeholders(),
+        )
+
+    async def async_step_redirect_guidance(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Display exact callback URLs and RuName setup instructions."""
+        if user_input is not None:
+            return await self.async_step_credentials()
+        return self.async_show_form(
+            step_id="redirect_guidance",
+            data_schema=vol.Schema({}),
+            description_placeholders=self._setup_description_placeholders(),
+        )
 
     async def async_step_authorization_method(
         self, user_input: dict[str, Any] | None = None
@@ -135,8 +155,8 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
     async def async_step_prepare_application(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Backward-compatible alias for the credentials step."""
-        return await self.async_step_credentials(user_input)
+        """Backward-compatible alias for the redirect configuration step."""
+        return await self.async_step_redirect_guidance(user_input)
 
     async def async_step_credentials(
         self, user_input: dict[str, Any] | None = None
@@ -151,9 +171,12 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     else OAUTH_MODE_CALLBACK
                 )
             if errors:
+                clean_defaults = {
+                    k: v for k, v in self._data.items() if k != CONF_CLIENT_SECRET
+                }
                 return self.async_show_form(
                     step_id="credentials",
-                    data_schema=self._credentials_schema(self._data),
+                    data_schema=self._credentials_schema(clean_defaults),
                     errors=errors,
                     description_placeholders=self._setup_description_placeholders(),
                 )
@@ -467,7 +490,9 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
                     CONF_CLIENT_ID,
                     default=defaults.get(CONF_CLIENT_ID, ""),
                 ): str,
-                vol.Required(CONF_CLIENT_SECRET, default=""): str,
+                vol.Required(CONF_CLIENT_SECRET): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
                 vol.Required(
                     CONF_RUNAME,
                     default=defaults.get(CONF_RUNAME, ""),
@@ -500,10 +525,14 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         }
 
     def _reauth_defaults(self) -> dict[str, Any]:
-        """Return defaults from the existing entry during reauth."""
+        """Return safe non-secret defaults from the existing entry during reauth."""
         if self.source != config_entries.SOURCE_REAUTH:
             return {}
-        return dict(self._get_reauth_entry().data)
+        return {
+            k: v
+            for k, v in self._get_reauth_entry().data.items()
+            if k != CONF_CLIENT_SECRET
+        }
 
     def _scopes_for_authorization(self) -> str:
         """Return scopes for the current authorize/reauth attempt."""
@@ -1075,13 +1104,41 @@ def _schema_price_target_remove(targets: list[dict[str, str]]) -> vol.Schema:
     )
 
 
+def _has_disallowed_identifier_chars(val: str) -> bool:
+    """Check if an identifier contains whitespace, control characters, or non-printable chars."""
+    for c in val:
+        if c.isspace():
+            return True
+        code = ord(c)
+        if code < 32 or (127 <= code <= 159):
+            return True
+        cat = unicodedata.category(c)
+        if cat in ("Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp", "Zs"):
+            return True
+    return False
+
+
 def _normalize_credentials(
     user_input: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Normalize credential form input and report blank required fields."""
+    """Normalize credential form input, trim whitespace, and validate formats."""
     data = dict(user_input)
     data.pop("manual_authorization", None)
     errors: dict[str, str] = {}
+
+    # Environment validation (fail-closed)
+    if CONF_ENVIRONMENT in user_input and user_input[CONF_ENVIRONMENT] is not None:
+        raw_env = str(user_input[CONF_ENVIRONMENT]).strip()
+        if raw_env in ENVIRONMENTS:
+            data[CONF_ENVIRONMENT] = raw_env
+        elif raw_env.lower() in ENVIRONMENTS:
+            data[CONF_ENVIRONMENT] = raw_env.lower()
+        else:
+            data[CONF_ENVIRONMENT] = raw_env
+            errors[CONF_ENVIRONMENT] = "invalid_environment"
+    else:
+        data[CONF_ENVIRONMENT] = "production"
+
     for field in (
         CONF_CLIENT_ID,
         CONF_CLIENT_SECRET,
@@ -1093,6 +1150,43 @@ def _normalize_credentials(
         data[field] = value
         if not value:
             errors[field] = "required"
+
+    client_id = data.get(CONF_CLIENT_ID, "")
+    runame = data.get(CONF_RUNAME, "")
+
+    # Validate RuName format: must not be a URL, Display Title, or contain whitespace/control chars
+    if CONF_RUNAME not in errors:
+        if (
+            "://" in runame
+            or runame.startswith("http:")
+            or runame.startswith("https:")
+            or "/" in runame
+        ):
+            errors[CONF_RUNAME] = "invalid_runame_url"
+        elif " " in runame or runame.lower() in (
+            "home assistant",
+            "homeassistant",
+            "home-assistant",
+            "display title",
+        ):
+            errors[CONF_RUNAME] = "invalid_runame_title"
+        elif _has_disallowed_identifier_chars(runame):
+            errors[CONF_RUNAME] = "invalid_runame"
+
+    # Validate Client ID format: must not be a URL, an RuName, or contain whitespace/control chars
+    if CONF_CLIENT_ID not in errors:
+        if (
+            "://" in client_id
+            or client_id.startswith("http:")
+            or client_id.startswith("https:")
+            or "/" in client_id
+        ):
+            errors[CONF_CLIENT_ID] = "invalid_client_id_url"
+        elif runame and client_id == runame:
+            errors[CONF_CLIENT_ID] = "invalid_client_id_runame"
+        elif _has_disallowed_identifier_chars(client_id):
+            errors[CONF_CLIENT_ID] = "invalid_client_id"
+
     if (
         CONF_SITE_ID in data
         and data[CONF_SITE_ID]
