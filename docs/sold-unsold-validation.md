@@ -9,11 +9,14 @@ The primary mission of Milestone 7 is to modernize the classification of sold an
 > [!IMPORTANT]
 > **Production Protection Guarantee**: In accordance with the repository's migration policy, **no live production provider cutovers are performed in Milestone 7**. The Home Assistant runtime polling coordinators continue to use Trading XML `GetMyeBaySelling` as the authoritative source for sold and unsold listing counts and classifications. The modern classification parsers and validation tools execute strictly offline or in user-initiated, isolated, read-only diagnostic validation runs.
 
+**Status Record**:
+> **M7: Read-only classification validation completed; production migration blocked pending verified live authorization, complete listing census, and semantic parity.**
+
 ---
 
 ## 2. Legacy Trading XML Baseline Architecture
 
-### 2.1 Production Ingestion and Entity Contracts
+### 2.1 Production Ingestion and Entity Contracts **[REPOSITORY VERIFIED]** **[OFFLINE TESTED]**
 
 In the current production architecture, Home Assistant polls seller listings using `GetMyeBaySelling` via Trading XML:
 - **XML Operation**: `GetMyeBaySelling`
@@ -36,9 +39,9 @@ In the current production architecture, Home Assistant polls seller listings usi
 
 ---
 
-## 3. Modern Candidate API Capabilities & Distinctions
+## 3. Modern Candidate API Capabilities & Critical Boundaries
 
-### 3.1 GraphQL `sellerListingSearch` (Ended Listings)
+### 3.1 GraphQL `sellerListingSearch` (Ended Listings) **[OFFICIALLY DOCUMENTED]** **[OFFLINE TESTED]** **[LIVE UNVERIFIED]**
 
 The eBay GraphQL seller listing search API provides candidate queries for ended seller listings:
 - **Operation / Field**: `sellerListingSearch(status: [ENDED], range: ...)`
@@ -49,42 +52,44 @@ The eBay GraphQL seller listing search API provides candidate queries for ended 
   - `quantity`: Total listing quantity.
   - `itemEndDate` / `endTime`: Listing end timestamp (ISO 8601).
 
-> [!WARNING]
-> **Critical Distinction: Ended Lifecycle State vs. Sale Outcome**:
-> An ended listing is **not** automatically classified as unsold!
-> A completed auction with a winning bid or a fixed-price listing where all inventory was purchased will also have status `ENDED`.
-> Classification must strictly enforce:
-> - If `quantitySold > 0` $\rightarrow$ `SaleClassification.SOLD`.
-> - If `quantitySold == 0` $\rightarrow$ `SaleClassification.UNSOLD`.
-> - If `quantitySold` is `None` or absent $\rightarrow$ `SaleClassification.UNKNOWN`.
-> Blindly mapping all ended listings to unsold creates critical inventory and event corruption.
-
-### 3.2 REST Sell Fulfillment API `getOrders`
+### 3.2 REST Sell Fulfillment API `getOrders` **[OFFICIALLY DOCUMENTED]** **[REPOSITORY VERIFIED]** **[LIVE VERIFIED]**
 
 The eBay REST Sell Fulfillment API provides authoritative order details for sales:
 - **Endpoint**: `GET /sell/fulfillment/v1/order`
 - **Scopes**: `https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly` or `sell.fulfillment`
-- **Pagination Contract**:
-  - Uses **limit/offset pagination** (`limit` query parameter, max 50; `offset` query parameter, integer), returning `total: int`, `href`, `next`, and `prev`.
-  - **Correction**: `docs/api-migration-feasibility.md` previously described this as cursor pagination; official documentation and runtime inspection in `custom_components/ebay/clients/fulfillment.py` confirm limit/offset pagination.
-- **Key Limitations**:
-  - Fulfillment orders only record completed sales (`lineItems[*].legacyItemId`).
-  - An unsold listing generates **zero** orders; therefore, the Fulfillment API alone can **never** verify that an item was unsold.
-  - Order count $\ne$ sold items count (due to multi-line-item orders and multi-quantity line items).
-
-### 3.3 Composite Modern Normalization
-
-To accurately classify both sold and unsold listings using modern APIs, a **composite architecture** merges the two modern sources:
-1. **GraphQL Ended Listings**: Supplies the universe of listings that have ended within the lookback window, along with `quantitySold` and timestamps.
-2. **REST Fulfillment Orders**: Supplies confirmed sales and line-item order IDs.
-3. **Composite Resolver**:
-   - Matches line items and `quantitySold > 0` to confirm `SOLD`.
-   - Confirms `UNSOLD` only when `quantitySold == 0` and zero matching orders exist in complete, verified collections.
-   - Any ambiguous or missing signals fail closed to `UNKNOWN`.
+- **Pagination Contract**: Uses **limit/offset pagination** (`limit` query parameter, max 50; `offset` query parameter, integer), returning `total: int`, `href`, `next`, and `prev`.
 
 ---
 
-## 4. Strict Canonical Models & Data Structures
+## 4. Addressing Fundamental Domain Misconceptions
+
+To prevent architectural and data-integrity defects, the following seven misconceptions are explicitly corrected:
+
+### Misconception 1: "Ended automatically means unsold"
+- **Correction**: **False**. An ended listing is merely a listing whose lifecycle has terminated. A fixed-price item that sold out, an auction won by the highest bidder, and an item canceled or unsold all have lifecycle state `ENDED`.
+- **Rule**: If `quantitySold > 0`, the item is `SOLD`. If `quantitySold == 0`, the item is `UNSOLD`. If `quantitySold` is missing or unverified, the outcome is `UNKNOWN`. Never infer `unsold` purely from lifecycle `ended`.
+
+### Misconception 2: "Fulfillment orders are equivalent to a full sold/unsold listing census"
+- **Correction**: **False**. Fulfillment orders only document sales transactions. An unsold listing generates **zero** orders. Therefore, the Fulfillment API cannot discover or verify unsold listings.
+
+### Misconception 3: "Fulfillment uses cursor pagination"
+- **Correction**: **False**. REST Sell Fulfillment API `getOrders` uses **limit/offset pagination** (`limit` and `offset` query parameters, returning integer `total`), unlike the GraphQL cursors (`after` / `pageInfo.endCursor`). `docs/api-migration-feasibility.md` line 160 has been corrected accordingly.
+
+### Misconception 4: "Fulfillment order status and listing sale outcome are the same concept"
+- **Correction**: **False**. An order's status describes logistical fulfillment (`NOT_STARTED`, `IN_PROGRESS`, `FULFILLED`) or payment status (`PAID`). A listing's sale outcome describes whether an eBay listing resulted in a sale (`SOLD`) or concluded without selling (`UNSOLD`). An order may be cancelled or refunded post-sale while the underlying listing remains classified as sold in historical reporting.
+
+### Misconception 5: "Legacy classification and REST Fulfillment use identical date windows"
+- **Correction**: **False**. Legacy Trading XML `GetMyeBaySelling` enforces a strict 60-day window (`DurationInDays=60`). The REST Fulfillment API accepts arbitrary ISO timestamp filters (`creationdate`, `lastmodifieddate`) up to 90 days. Date windows must be strictly aligned during parity comparisons.
+
+### Misconception 6: "SKU inventory records can be substituted for verified eBay listing ItemIDs"
+- **Correction**: **False**. The eBay Sell Inventory API uses merchant-defined SKUs, which are optional and do not map 1:1 to eBay listing ItemIDs (especially for multi-variation listings or sellers who do not use Inventory API). Legacy Home Assistant sensors and events are keyed on numeric `ItemID`.
+
+### Misconception 7: "Official eBay documentation establishes authenticated GraphQL entitlement"
+- **Correction**: **False**. Official eBay documentation describes public and partner GraphQL endpoints. However, live access requires specific account entitlement and OAuth scopes. As observed in Milestone 1 and Milestone 5, candidate GraphQL queries return `FORBIDDEN` or unauthenticated without partner onboarding. Documentation does **not** equal live entitlement.
+
+---
+
+## 5. Strict Canonical Models & Data Structures
 
 Milestone 7 introduces typed, immutable classification structures in [`custom_components/ebay/parsers/sold_unsold_parity.py`](../custom_components/ebay/parsers/sold_unsold_parity.py):
 
@@ -122,7 +127,7 @@ Milestone 7 introduces typed, immutable classification structures in [`custom_co
 
 ---
 
-## 5. Parity Comparison Engine & 6-State Taxonomy
+## 6. Parity Comparison Engine & 6-State Taxonomy
 
 The parity comparison engine compares XML baseline and candidate snapshots across all monitored fields:
 
@@ -151,7 +156,7 @@ If both the XML baseline and candidate snapshots return verified empty collectio
 
 ---
 
-## 6. Diagnostic Privacy Architecture (Default-Deny)
+## 7. Diagnostic Privacy Architecture (Default-Deny)
 
 To protect user confidentiality during diagnostic reporting, Milestone 7 implements strict default-deny sanitization:
 
@@ -166,7 +171,7 @@ To protect user confidentiality during diagnostic reporting, Milestone 7 impleme
 
 ---
 
-## 7. Standalone CLI Parity Verification Harness
+## 8. Standalone CLI Parity Verification Harness
 
 The standalone CLI tool [`scripts/validate_sold_unsold_parity.py`](../scripts/validate_sold_unsold_parity.py) allows running parity comparisons completely offline or against live endpoints with bounded page traversal (1..25 pages).
 
