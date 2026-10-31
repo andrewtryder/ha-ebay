@@ -19,12 +19,12 @@ In accordance with Milestone 11 objectives:
 
 eBay does not operate a single global 5,000-call quota pool. Limits vary significantly by endpoint family and keyset tier:
 
-| Endpoint Family | Underlying Protocol | Official Baseline Quota | Observed Error Behavior | Throttling Action |
+| Endpoint Family | Underlying Protocol | Official Baseline Quota | Observed Error Behavior | Throttling & Retry Behavior |
 |---|---|---|---|---|
-| **Trading API** | SOAP / XML (`/ws/api.dll`) | Keyset-level daily call limit (historically 5,000/day for default keysets, expandable upon application review). | HTTP 429, or HTTP 200 with XML `Ack=Failure` and `ErrorCode` 518 ("Call usage limit reached") or 17 ("Daily limit exceeded"). | Recorded in `RateLimitTracker` under `EndpointFamily.TRADING`. Shared keyset cooldown applied; fast-fail if cooldown > 2.0s. |
-| **REST APIs** | JSON over HTTPS (`/sell/fulfillment`, `/sell/finances`, `/sell/analytics`, `/commerce/feedback`, etc.) | Resource-specific rate limits (often expressed per minute / hour per developer application or user token). REST-family cooldown protects against cascading 429s. | HTTP 429 with standard `Retry-After` header (delta-seconds or HTTP-date). | Recorded in `RateLimitTracker` under `EndpointFamily.REST`. Respects server `Retry-After` (stored up to 24 hours); fast-fail if cooldown > 2.0s. |
-| **GraphQL API** | JSON over HTTPS (`/commerce/user/graphql`) | Read-only validation queries only; not cut over in production. | HTTP 429 or execution throttled extension. | Recorded in `RateLimitTracker` under `EndpointFamily.GRAPHQL`. |
-| **OAuth Services** | Form POST (`/identity/v1/oauth2/token`) | Per-application token exchange and refresh rate limits. Independent token handling with 30s timeout. | HTTP 429 or `invalid_grant` / `invalid_request`. | Bounded retries for transient errors; reauth flow triggered on permanent invalid grant. |
+| **Trading API** | SOAP / XML (`/ws/api.dll`) | Keyset-level daily call limit (historically 5,000/day for default keysets, expandable upon application review). | HTTP 429, or HTTP 200 with XML `Ack=Failure` and `ErrorCode` 518 ("Call usage limit reached") or 17 ("Daily limit exceeded"). | **Uses shared tracker:** Recorded in `RateLimitTracker` under `EndpointFamily.TRADING`. Shared keyset cooldown applied; fast-fail if cooldown > 2.0s. Unified 3-attempt ceiling across 5xx retries and 401 token refresh. Permanent 403, 400, and 404 fail immediately with zero retries and zero refreshes. |
+| **REST APIs** | JSON over HTTPS (`/sell/fulfillment`, `/sell/finances`, `/sell/analytics`, `/commerce/feedback`, etc.) | Resource-specific rate limits (often expressed per minute / hour per developer application or user token). Although individual eBay REST resources have varying quota semantics, a conservative REST-family cooldown is applied to protect against cascading 429s. | HTTP 429 with standard `Retry-After` header (delta-seconds or HTTP-date). | **Uses shared tracker:** Recorded in `RateLimitTracker` under `EndpointFamily.REST`. Respects server `Retry-After` (stored up to 24 hours); fast-fail if cooldown > 2.0s. Unified 3-attempt ceiling across 5xx retries and 401 token refresh. Permanent 403, 400, and 404 fail immediately with zero retries. |
+| **GraphQL API** | JSON over HTTPS (`/commerce/user/graphql`) | Read-only validation queries only; not cut over in production. | HTTP 429 or execution throttled extension. | **Does NOT use shared tracker:** Uses independent, validation-only bounded retries (`MAX_GRAPHQL_RETRIES = 2`) for transient system or rate errors. Throttling is local to query execution; does not share cooldown state with Trading or REST. |
+| **OAuth Services** | Form POST (`/identity/v1/oauth2/token`) | Per-application token exchange and refresh rate limits. Independent token handling with 30s timeout. | HTTP 429 or `invalid_grant` / `invalid_request`. | **Does NOT use `BoundedRetryPolicy`:** Enforces explicit 30s socket timeout and double-checked locking under `_token_refresh_lock` to coordinate concurrent callers. Transient transport failures raise bounded exceptions; permanent invalid grant triggers native Home Assistant reauthorization. |
 
 ---
 
@@ -44,23 +44,26 @@ Coordinator polling cadence is user-configurable via `CONF_POLL_INTERVAL` (defau
 
 ### Bounded Retry Policy (`BoundedRetryPolicy`)
 
-Located in [`custom_components/ebay/clients/resilience.py`](../custom_components/ebay/clients/resilience.py):
-- **Max Retries**: 2 retries (up to 3 attempts total) on confirmed read-only production REST and Trading requests.
+Located in [`custom_components/ebay/clients/resilience.py`](../custom_components/ebay/clients/resilience.py) and enforced by the outer logical request methods `RestClientMixin._async_rest_get` and `TradingClientMixin.async_call_trading_api`:
+- **Unified Attempt Ceiling**: Default max 2 retries (up to 3 total endpoint attempts), encompassing both transient 5xx/network retries and at most one 401 token-refresh replay. A 401 replay never restarts a fresh 3-attempt allowance.
 - **Deterministic Backoff**: Exponential progression ($0.5 \times 2^{\text{attempt}}$: 0.5s, 1.0s, 2.0s, capped at 10.0s).
 - **Transient Retry Eligibility**: Only transient HTTP 500, 502, 503, 504 and transient transport errors (`TimeoutError`, `ClientConnectorError`, `ServerDisconnectedError`, `ClientPayloadError`, `ClientOSError`) are retried.
 - **No Immediate Retry on 429**: HTTP 429 rate limits are never retried in an immediate loop; they are recorded in `RateLimitTracker` and fail fast as partial failures to prevent quota exhaustion and request amplification.
-- **No Auth Retry Multipliers**: HTTP 401 raises `EbayAuthError` immediately without retrying, allowing the outer client caller to perform a single token refresh under lock.
-- **Permanent Errors Not Retried**: Permanent 4xx errors (400, 403, 404) fail immediately without retry.
+- **Strict 401 vs 403 Separation**:
+  - HTTP 401 raises `EbayAuthError` and permits at most one authorized token-refresh and replay sequence, provided total endpoint attempts remain within the 3-attempt ceiling and time budget.
+  - HTTP 403 indicates permission or entitlement denial and **fails immediately** (as `EbayApiError(status=403)` on Trading or `EbayPartialFailure` on REST) with zero retries and zero token refreshes.
+  - HTTP 400 and 404 fail immediately without retries or refreshes.
 - **Bounded Request Timeout Budget**: All requests enforce an overall total timeout budget (`total_timeout = 35.0s`), capping per-attempt timeouts to remaining budget time.
-- **Non-blocking Waits**: All delays use cancellation-aware asynchronous sleeping (`await asyncio.sleep(delay)`).
+- **Accurate Retry Counting**: The diagnostic counter `_last_retry_count` increments strictly when an additional network attempt is actually dispatched. If the timeout budget expires before a proposed backoff delay completes, or if the wait is cancelled, no phantom retry is counted.
+- **Non-blocking Waits**: All delays use cancellation-aware asynchronous sleeping (`await policy.async_wait(delay)`).
 
 ### Shared-Keyset Rate-Limit Tracker Registry (`RateLimitTracker`)
 
 Tracks observed provider throttling without assuming theoretical usage:
 - **Thread/Async-Safe**: In-memory monotonic timestamps.
-- **HA-Instance Shared Keyset Registry**: Managed in `hass.data[DOMAIN]["rate_limit_trackers"]`, keyed by safe hash `f"{environment}:{sha256(client_id)[:12]}"`. Multiple Home Assistant config entries sharing the same developer application keyset share the cooldown state, preventing cascading 429s across accounts.
+- **HA-Instance Shared Keyset Registry**: Managed in `hass.data[DOMAIN]["rate_limit_trackers"]`, keyed by safe hash `f"{environment}:{sha256(client_id)[:12]}"`. Multiple Home Assistant config entries sharing the same developer application keyset share cooldown state, preventing cascading 429s across accounts.
 - **Strict Keyset & Environment Isolation**: Production and Sandbox environments never share cooldowns. Different developer application keysets maintain distinct trackers. No OAuth tokens, credentials, or response data are ever shared across accounts.
-- **Reference-Counted Lifecycle**: Trackers are ref-counted per configured entry and cleanly purged when the last entry using that keyset unloads.
+- **Failure-Safe Reference Lifecycle**: Trackers track holding `entry_id` references. If setup fails after tracker acquisition (during coordinator first-refresh or platform forwarding), a `finally` block safely releases the acquired reference. Clean unload and entry removal safely remove entries and purge the tracker when the final entry using that keyset unloads.
 - **Fast-Fail on Active Cooldown**: If an endpoint family has an active cooldown > 2.0s, outgoing requests fast-fail immediately with `EbayPartialFailure` (REST) or `EbayApiError` (Trading) without hitting the network, preventing request amplification. If cooldown $\le 2.0$s, the client waits the remaining time before proceeding.
 
 ### `Retry-After` Header Parsing & Dual-Horizon Semantics
@@ -121,7 +124,7 @@ Diagnostic data exported via `async_get_config_entry_diagnostics()` includes non
   - `throttled`: Boolean indicating if REST or Trading cooldowns are active.
   - `rest_cooldown_remaining_seconds`: Remaining REST cooldown in seconds.
   - `trading_cooldown_remaining_seconds`: Remaining Trading API cooldown in seconds.
-  - `last_retry_count`: Total bounded retries executed.
+  - `last_retry_count`: Number of additional endpoint attempts dispatched during the most recent tracked logical request or polling cycle.
 - **Strict Privacy**:
   - No access tokens, refresh tokens, client secrets, authorization codes, or user passwords are ever included.
   - Sensitive identifiers (`account_id`, `client_id`, `runame`) are redacted.

@@ -31,7 +31,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | [#103](https://github.com/andrewtryder/ha-ebay/pull/103) | **Merged** (`ee7b769`): Same-app multi-account onboarding, canonical AccountIdentity, duplicate matrix, reauth protection, zero cutover |
 | **Milestone 10** | Guided BYO eBay OAuth Architecture & Onboarding Specification | `docs/ebay-one-click-oauth-architecture` | [#104](https://github.com/andrewtryder/ha-ebay/pull/104) | **Merged** (`856f213`): Architecture decision record, threat model, feasibility analysis, guided BYO onboarding wizard specification, zero managed credentials |
 | **Milestone 10.1** | Guided BYO eBay OAuth Onboarding Implementation | `feat/ebay-guided-oauth-onboarding` | [#105](https://github.com/andrewtryder/ha-ebay/pull/105) | **Merged** (`49ad7f8`): Guided BYO onboarding wizard, RuName callback verification, keyset shortcut, manual fallback, zero secret redisclosure |
-| **Milestone 11** | Reliability, Rate Limits & Home Assistant Compatibility Hardening | `feat/ebay-reliability-hardening` | PR | **Completed (Current PR)**: Bounded retry policy, Retry-After delta & HTTP-date parsing, RateLimitTracker, last-good-data preservation, event churn suppression, OAuth timeout & lifecycle shutdown |
+| **Milestone 11** | Reliability, Rate Limits & Home Assistant Compatibility Hardening | `feat/ebay-reliability-hardening` | [#106](https://github.com/andrewtryder/ha-ebay/pull/106) | **Completed (Current PR)**: Bounded retries (unified 3-attempt ceiling), strict 401/403 separation, Retry-After delta & HTTP-date parsing, shared keyset RateLimitTracker with failure-safe lifecycle, last-good-data preservation, event churn suppression |
 | **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
 
 ---
@@ -187,4 +187,24 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Maintained 100% of Milestone 9 multi-account identity guarantees: durable `EIASToken` verification, 3-state account equivalence (`SAME`, `DIFFERENT`, `UNKNOWN`), duplicate prevention (`already_configured`), and ambiguous identity protection (`account_ambiguous`).
   - Preserved validly entered credentials upon form validation failures.
   - Automatic token management: 2-hour access token renewal and 18-month refresh token cycles; users never copy or paste legacy Auth'n'Auth tokens.
-  - Milestone status: **Implementation completed with extensive tests and documentation on branch `feat/ebay-guided-oauth-onboarding`.** Next planned workstream: **Milestone 11 (Reliability, Quotas, & Compatibility Hardening)**.
+  - Milestone status: **Implementation completed with extensive tests and documentation on branch `feat/ebay-guided-oauth-onboarding`.** Merged in PR #105 (`49ad7f8`).
+
+### 13. Reliability, Rate Limits & Home Assistant Compatibility Hardening (Milestone 11)
+- **Bounded Retries & Unified Attempt Budget**:
+  - Implemented `BoundedRetryPolicy` enforced at the outer logical request layer (`_async_rest_get` and `async_call_trading_api`).
+  - Unified 3-attempt ceiling: Initial attempt + transient 5xx retries + 401 token refresh $\le 3$ total endpoint requests.
+  - Strict 401 vs 403 separation: 401 triggers at most one authorized token refresh under lock; 403 fails immediately as permanent permission denial with zero retries and zero token refreshes. 400 and 404 fail immediately.
+  - Accurate retry counting: `last_retry_count` diagnostic increments strictly when an additional network attempt is dispatched; no phantom retries on budget expiration or cancellation.
+- **Shared-Keyset Rate-Limit Tracker Registry (`RateLimitTracker`)**:
+  - HA-instance scoped registry in `hass.data[DOMAIN]["rate_limit_trackers"]`, keyed by safe hash `f"{environment}:{sha256(client_id)[:12]}"`.
+  - Multiple config entries sharing the same developer application keyset share cooldown state to prevent cascading 429s.
+  - Complete isolation between Production and Sandbox environments, and between unrelated developer keysets.
+  - Failure-safe lifecycle: Trackers track holding `entry_id` sets; `try...finally` in `async_setup_entry` guarantees cleanup if coordinator first-refresh or platform forwarding fails. Clean unload and entry removal safely remove entries and purge the tracker when the final entry using that keyset unloads.
+- **Data Preservation & Event Suppression**:
+  - Truncated pagination merges with prior confirmed items; collections never drop to 0 or drop items due to partial fetches.
+  - `section_last_success` is stamped only on complete untruncated success; `section_last_attempt` updates on every attempt.
+  - False item disappearance, sale, outbid, or price-drop events are suppressed during incomplete or truncated polling cycles.
+- **Documentation Alignment**:
+  - Clarified that validation-only GraphQL queries use independent bounded retries (`MAX_GRAPHQL_RETRIES = 2`) without the shared `RateLimitTracker`.
+  - Clarified that OAuth token requests enforce a 30s timeout and concurrency lock without `BoundedRetryPolicy`.
+- Milestone status: **Implementation completed and verified on branch `feat/ebay-reliability-hardening` (PR #106).** Next planned workstream: **Milestone 12 (End-to-End Home Assistant Testing & Release)**.

@@ -350,8 +350,30 @@ class RestClientMixin:
         operation: str | None = None,
         accept_language: str | None = None,
     ) -> dict[str, Any]:
-        """GET a JSON REST resource with auth retry."""
-        for attempt in range(2):
+        """GET a JSON REST resource with auth retry and bounded retries."""
+        op = operation or f"{partial_category}.get"
+        policy = getattr(self, "retry_policy", None) or BoundedRetryPolicy()
+        max_attempts = policy.max_retries + 1
+        deadline = time.monotonic() + policy.total_timeout
+        auth_refreshed = False
+        self._last_retry_count = 0
+
+        for attempt in range(max_attempts):
+            remaining_budget = deadline - time.monotonic()
+            if remaining_budget <= 0.0:
+                failure = build_api_failure(
+                    op,
+                    url,
+                    504,
+                    {"error": "request_timeout_budget_exhausted"},
+                    partial_category,
+                    "transient",
+                )
+                self._raise_partial_failure(partial_category, failure=failure)
+
+            if attempt > 0:
+                self._last_retry_count = getattr(self, "_last_retry_count", 0) + 1
+
             try:
                 return await self._async_rest_get_once(
                     url,
@@ -360,13 +382,79 @@ class RestClientMixin:
                     allow_404=allow_404,
                     operation=operation,
                     accept_language=accept_language,
+                    deadline=deadline,
                 )
             except EbayAuthError:
-                self._clear_access_token()
-                if attempt == 0:
-                    continue
+                if not auth_refreshed and (attempt + 1 < max_attempts):
+                    auth_refreshed = True
+                    self._clear_access_token()
+                    if time.monotonic() < deadline:
+                        continue
                 raise
-        raise EbayAuthError(f"eBay REST auth failed for {partial_category}")
+            except EbayPartialFailure as exc:
+                status = exc.failure.http_status if exc.failure else None
+                is_transient_5xx = status in {500, 502, 503, 504}
+                is_transient_transport = (
+                    status is None
+                    and exc.failure is not None
+                    and exc.failure.classification == "transient"
+                )
+                if (
+                    (is_transient_5xx or is_transient_transport)
+                    and (attempt + 1 < max_attempts)
+                    and (time.monotonic() < deadline)
+                ):
+                    delay = policy.compute_backoff(attempt)
+                    if time.monotonic() + delay < deadline:
+                        _LOGGER.debug(
+                            "REST GET transient error category=%s status=%s attempt=%d retrying in %.2fs",
+                            partial_category,
+                            status,
+                            attempt + 1,
+                            delay,
+                        )
+                        await policy.async_wait(delay)
+                        continue
+                raise
+            except (asyncio.CancelledError, EbayParseError):
+                raise
+            except Exception as exc:
+                if policy.is_transient_exception(exc):
+                    if (attempt + 1 < max_attempts) and (time.monotonic() < deadline):
+                        delay = policy.compute_backoff(attempt)
+                        if time.monotonic() + delay < deadline:
+                            _LOGGER.debug(
+                                "REST GET transient transport error category=%s exc=%s attempt=%d retrying in %.2fs",
+                                partial_category,
+                                type(exc).__name__,
+                                attempt + 1,
+                                delay,
+                            )
+                            await policy.async_wait(delay)
+                            continue
+                failure = build_api_failure(
+                    op,
+                    url,
+                    None,
+                    {"error": type(exc).__name__},
+                    partial_category,
+                    (
+                        "transient"
+                        if policy.is_transient_exception(exc)
+                        else "unexpected_error"
+                    ),
+                )
+                self._raise_partial_failure(partial_category, failure=failure)
+
+        failure = build_api_failure(
+            op,
+            url,
+            504,
+            {"error": "retry_budget_exhausted"},
+            partial_category,
+            "transient",
+        )
+        self._raise_partial_failure(partial_category, failure=failure)
 
     async def _async_rest_get_once(
         self,
@@ -377,8 +465,9 @@ class RestClientMixin:
         allow_404: bool = False,
         operation: str | None = None,
         accept_language: str | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        """GET a JSON REST resource without auth retry."""
+        """GET a JSON REST resource once without retrying."""
         op = operation or f"{partial_category}.get"
         language = (
             accept_language if accept_language is not None else self._accept_language
@@ -407,266 +496,185 @@ class RestClientMixin:
         elif cooldown > 0.0:
             await asyncio.sleep(cooldown)
 
-        policy = self.retry_policy
-        deadline = time.monotonic() + policy.total_timeout
-        max_retries = policy.max_retries
+        policy = getattr(self, "retry_policy", None) or BoundedRetryPolicy()
         request_start = time.monotonic()
-
-        for attempt in range(max_retries + 1):
-            remaining_budget = deadline - time.monotonic()
-            if remaining_budget <= 0.0:
-                failure = build_api_failure(
-                    op,
-                    url,
-                    504,
-                    {"error": "request_timeout_budget_exhausted"},
-                    partial_category,
-                    "transient",
-                )
-                self._raise_partial_failure(partial_category, failure=failure)
-
-            attempt_timeout = aiohttp.ClientTimeout(
-                total=max(0.1, min(30.0, remaining_budget))
+        remaining_budget = (
+            (deadline - time.monotonic()) if deadline is not None else 30.0
+        )
+        if remaining_budget <= 0.0:
+            failure = build_api_failure(
+                op,
+                url,
+                504,
+                {"error": "request_timeout_budget_exhausted"},
+                partial_category,
+                "transient",
             )
-            access_token = await self.async_get_access_token()
-            headers = {
-                "Authorization": f"Bearer {access_token}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
-            if language:
-                headers["Accept-Language"] = language
+            self._raise_partial_failure(partial_category, failure=failure)
 
-            try:
-                async with self._session.get(
-                    url,
-                    headers=headers,
-                    params=params or {},
-                    timeout=attempt_timeout,
-                ) as response:
-                    if response.status == 401:
-                        # 401 MUST raise EbayAuthError immediately to allow outer auth refresh.
-                        # Never multiply retries here.
-                        raise EbayAuthError(
-                            f"eBay REST auth failed with HTTP {response.status}"
-                        )
-                    if response.status == 204:
-                        return {}
-                    if allow_404 and response.status == 404:
-                        return {}
+        attempt_timeout = aiohttp.ClientTimeout(
+            total=max(0.1, min(30.0, remaining_budget))
+        )
+        access_token = await self.async_get_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if language:
+            headers["Accept-Language"] = language
 
-                    if response.status == 429:
-                        retry_after_hdr = response.headers.get("Retry-After")
-                        retry_after_s = parse_retry_after(
-                            retry_after_hdr, default_delay=60.0
-                        )
-                        tracker.record_throttled(
-                            EndpointFamily.REST,
-                            retry_after_s,
-                            client_id,
-                        )
-                        error_payload = None
-                        try:
-                            error_payload = _safe_ebay_error_payload(
-                                await response.json(content_type=None)
-                            )
-                        except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                            error_payload = None
+        try:
+            async with self._session.get(
+                url,
+                headers=headers,
+                params=params or {},
+                timeout=attempt_timeout,
+            ) as response:
+                if response.status == 401:
+                    # 401 MUST raise EbayAuthError immediately to allow outer auth refresh.
+                    # Never multiply retries here.
+                    raise EbayAuthError(
+                        f"eBay REST auth failed with HTTP {response.status}"
+                    )
+                if response.status == 204:
+                    return {}
+                if allow_404 and response.status == 404:
+                    return {}
 
-                        classification = classify_rest_status(
-                            response.status, error_payload, partial_category
-                        )
-                        mapped = map_rest_failure_category(
-                            partial_category,
-                            response.status,
-                            error_payload,
-                            classification=classification,
-                        )
-                        failure = build_api_failure(
-                            op,
-                            url,
-                            response.status,
-                            error_payload,
-                            mapped,
-                            classification,
-                        )
-                        _LOGGER.debug(
-                            "REST GET throttled category=%s mapped=%s status=429 retry_after=%.1fs duration_ms=%.1f",
-                            partial_category,
-                            mapped,
-                            retry_after_s,
-                            _duration_ms(request_start),
-                        )
-                        self._raise_partial_failure(mapped, failure=failure)
-
-                    if response.status in {500, 502, 503, 504}:
-                        if attempt < max_retries and (time.monotonic() < deadline):
-                            self._last_retry_count = (
-                                getattr(self, "_last_retry_count", 0) + 1
-                            )
-                            delay = policy.compute_backoff(attempt)
-                            if time.monotonic() + delay < deadline:
-                                _LOGGER.debug(
-                                    "REST GET transient 5xx category=%s status=%d attempt=%d retrying in %.2fs",
-                                    partial_category,
-                                    response.status,
-                                    attempt + 1,
-                                    delay,
-                                )
-                                await policy.async_wait(delay)
-                                continue
-
-                        error_payload = None
-                        try:
-                            error_payload = _safe_ebay_error_payload(
-                                await response.json(content_type=None)
-                            )
-                        except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                            error_payload = None
-
-                        classification = classify_rest_status(
-                            response.status, error_payload, partial_category
-                        )
-                        mapped = map_rest_failure_category(
-                            partial_category,
-                            response.status,
-                            error_payload,
-                            classification=classification,
-                        )
-                        failure = build_api_failure(
-                            op,
-                            url,
-                            response.status,
-                            error_payload,
-                            mapped,
-                            classification,
-                        )
-                        _LOGGER.debug(
-                            "REST GET 5xx exhausted category=%s mapped=%s status=%s classification=%s duration_ms=%.1f",
-                            partial_category,
-                            mapped,
-                            response.status,
-                            classification,
-                            _duration_ms(request_start),
-                        )
-                        self._raise_partial_failure(mapped, failure=failure)
-
-                    if response.status >= 400:
-                        error_payload = None
-                        try:
-                            error_payload = _safe_ebay_error_payload(
-                                await response.json(content_type=None)
-                            )
-                        except (aiohttp.ContentTypeError, json.JSONDecodeError):
-                            error_payload = None
-
-                        classification = classify_rest_status(
-                            response.status, error_payload, partial_category
-                        )
-                        mapped = map_rest_failure_category(
-                            partial_category,
-                            response.status,
-                            error_payload,
-                            classification=classification,
-                        )
-                        failure = build_api_failure(
-                            op,
-                            url,
-                            response.status,
-                            error_payload,
-                            mapped,
-                            classification,
-                        )
-                        _LOGGER.debug(
-                            "REST GET soft-failed category=%s mapped=%s status=%s classification=%s duration_ms=%.1f",
-                            partial_category,
-                            mapped,
-                            response.status,
-                            classification,
-                            _duration_ms(request_start),
-                        )
-                        self._raise_partial_failure(mapped, failure=failure)
-
+                if response.status == 429:
+                    retry_after_hdr = response.headers.get("Retry-After")
+                    retry_after_s = parse_retry_after(
+                        retry_after_hdr, default_delay=60.0
+                    )
+                    tracker.record_throttled(
+                        EndpointFamily.REST,
+                        retry_after_s,
+                        client_id,
+                    )
+                    error_payload = None
                     try:
-                        text = await response.text()
-                    except (aiohttp.ClientError, UnicodeDecodeError) as exc:
-                        raise EbayParseError(
-                            f"Could not read eBay REST body for {partial_category}"
-                        ) from exc
-
-                    if not text.strip():
-                        _LOGGER.debug(
-                            "REST GET completed category=%s status=%s empty_body=true duration_ms=%.1f",
-                            partial_category,
-                            response.status,
-                            _duration_ms(request_start),
+                        error_payload = _safe_ebay_error_payload(
+                            await response.json(content_type=None)
                         )
-                        return {}
-                    try:
-                        payload = json.loads(text)
-                    except json.JSONDecodeError as exc:
-                        raise EbayParseError(
-                            f"Could not parse eBay REST JSON for {partial_category}"
-                        ) from exc
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                        error_payload = None
+
+                    classification = classify_rest_status(
+                        response.status, error_payload, partial_category
+                    )
+                    mapped = map_rest_failure_category(
+                        partial_category,
+                        response.status,
+                        error_payload,
+                        classification=classification,
+                    )
+                    failure = build_api_failure(
+                        op,
+                        url,
+                        response.status,
+                        error_payload,
+                        mapped,
+                        classification,
+                    )
                     _LOGGER.debug(
-                        "REST GET completed category=%s status=%s duration_ms=%.1f",
+                        "REST GET throttled category=%s mapped=%s status=429 retry_after=%.1fs duration_ms=%.1f",
+                        partial_category,
+                        mapped,
+                        retry_after_s,
+                        _duration_ms(request_start),
+                    )
+                    self._raise_partial_failure(mapped, failure=failure)
+
+                if response.status >= 400:
+                    error_payload = None
+                    try:
+                        error_payload = _safe_ebay_error_payload(
+                            await response.json(content_type=None)
+                        )
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError):
+                        error_payload = None
+
+                    classification = classify_rest_status(
+                        response.status, error_payload, partial_category
+                    )
+                    mapped = map_rest_failure_category(
+                        partial_category,
+                        response.status,
+                        error_payload,
+                        classification=classification,
+                    )
+                    failure = build_api_failure(
+                        op,
+                        url,
+                        response.status,
+                        error_payload,
+                        mapped,
+                        classification,
+                    )
+                    _LOGGER.debug(
+                        "REST GET failed category=%s mapped=%s status=%s classification=%s duration_ms=%.1f",
+                        partial_category,
+                        mapped,
+                        response.status,
+                        classification,
+                        _duration_ms(request_start),
+                    )
+                    self._raise_partial_failure(mapped, failure=failure)
+
+                try:
+                    text = await response.text()
+                except (aiohttp.ClientError, UnicodeDecodeError) as exc:
+                    raise EbayParseError(
+                        f"Could not read eBay REST body for {partial_category}"
+                    ) from exc
+
+                if not text.strip():
+                    _LOGGER.debug(
+                        "REST GET completed category=%s status=%s empty_body=true duration_ms=%.1f",
                         partial_category,
                         response.status,
                         _duration_ms(request_start),
                     )
-                    return payload if isinstance(payload, dict) else {}
-            except (
-                EbayAuthError,
-                EbayPartialFailure,
-                EbayParseError,
-                asyncio.CancelledError,
-            ):
-                raise
-            except Exception as exc:
-                if policy.is_transient_exception(exc):
-                    if attempt < max_retries and (time.monotonic() < deadline):
-                        self._last_retry_count = (
-                            getattr(self, "_last_retry_count", 0) + 1
-                        )
-                        delay = policy.compute_backoff(attempt)
-                        if time.monotonic() + delay < deadline:
-                            _LOGGER.debug(
-                                "REST GET transient transport error category=%s exc=%s attempt=%d retrying in %.2fs",
-                                partial_category,
-                                type(exc).__name__,
-                                attempt + 1,
-                                delay,
-                            )
-                            await policy.async_wait(delay)
-                            continue
-
-                failure = build_api_failure(
-                    op,
-                    url,
-                    None,
-                    {"error": type(exc).__name__},
-                    partial_category,
-                    (
-                        "transient"
-                        if policy.is_transient_exception(exc)
-                        else "unexpected_error"
-                    ),
-                )
+                    return {}
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise EbayParseError(
+                        f"Could not parse eBay REST JSON for {partial_category}"
+                    ) from exc
                 _LOGGER.debug(
-                    "REST GET transport soft-failed category=%s operation=%s error=%s duration_ms=%.1f",
+                    "REST GET completed category=%s status=%s duration_ms=%.1f",
                     partial_category,
-                    op,
-                    type(exc).__name__,
+                    response.status,
                     _duration_ms(request_start),
                 )
-                self._raise_partial_failure(partial_category, failure=failure)
-
-        failure = build_api_failure(
-            op,
-            url,
-            504,
-            {"error": "retry_budget_exhausted"},
-            partial_category,
-            "transient",
-        )
-        self._raise_partial_failure(partial_category, failure=failure)
+                return payload if isinstance(payload, dict) else {}
+        except (
+            EbayAuthError,
+            EbayPartialFailure,
+            EbayParseError,
+            asyncio.CancelledError,
+        ):
+            raise
+        except Exception as exc:
+            failure = build_api_failure(
+                op,
+                url,
+                None,
+                {"error": type(exc).__name__},
+                partial_category,
+                (
+                    "transient"
+                    if policy.is_transient_exception(exc)
+                    else "unexpected_error"
+                ),
+            )
+            _LOGGER.debug(
+                "REST GET transport soft-failed category=%s operation=%s error=%s duration_ms=%.1f",
+                partial_category,
+                op,
+                type(exc).__name__,
+                _duration_ms(request_start),
+            )
+            self._raise_partial_failure(partial_category, failure=failure)

@@ -24,6 +24,7 @@ from .const import (
     CONF_SITE_ID,
     DEFAULT_OPTIONS,
     DOMAIN,
+    ENV_PRODUCTION,
     PLATFORMS,
 )
 from .oauth2 import (
@@ -40,7 +41,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def async_get_rate_limit_tracker(
-    hass: HomeAssistant, environment: str, client_id: str
+    hass: HomeAssistant,
+    environment: str,
+    client_id: str,
+    entry_id: str | None = None,
 ) -> Any:
     """Return the shared RateLimitTracker for the developer keyset in this HA instance."""
     from .clients.resilience import RateLimitTracker
@@ -61,15 +65,22 @@ def async_get_rate_limit_tracker(
     if key not in trackers:
         trackers[key] = {
             "tracker": RateLimitTracker(),
-            "ref_count": 1,
+            "entries": set(),
+            "ref_count": 0,
         }
+    if entry_id:
+        trackers[key]["entries"].add(entry_id)
+        trackers[key]["ref_count"] = len(trackers[key]["entries"])
     else:
         trackers[key]["ref_count"] += 1
     return trackers[key]["tracker"]
 
 
 def async_release_rate_limit_tracker(
-    hass: HomeAssistant, environment: str, client_id: str
+    hass: HomeAssistant,
+    environment: str,
+    client_id: str,
+    entry_id: str | None = None,
 ) -> None:
     """Release a reference to the keyset tracker; clean up when ref_count reaches 0."""
     if not hasattr(hass, "data") or not isinstance(getattr(hass, "data", None), dict):
@@ -83,9 +94,16 @@ def async_release_rate_limit_tracker(
     safe_hash = hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:12]
     key = f"{environment}:{safe_hash}"
     if key in trackers:
-        trackers[key]["ref_count"] -= 1
-        if trackers[key]["ref_count"] <= 0:
-            trackers.pop(key, None)
+        info = trackers[key]
+        if entry_id:
+            info["entries"].discard(entry_id)
+            info["ref_count"] = len(info["entries"])
+            if not info["entries"]:
+                trackers.pop(key, None)
+        else:
+            info["ref_count"] -= 1
+            if info["ref_count"] <= 0:
+                trackers.pop(key, None)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -119,35 +137,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass,
         entry.data[CONF_ENVIRONMENT],
         entry.data[CONF_CLIENT_ID],
+        entry_id=entry.entry_id,
     )
-    client = EbayApiClient(
-        async_get_clientsession(hass),
-        environment=entry.data[CONF_ENVIRONMENT],
-        client_id=entry.data[CONF_CLIENT_ID],
-        client_secret=entry.data[CONF_CLIENT_SECRET],
-        runame=entry.data[CONF_RUNAME],
-        refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
-        site_id=entry.data[CONF_SITE_ID],
-        oauth_session=oauth_session,
-        rate_limit_tracker=tracker,
-    )
-    coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
-    coordinator._loaded_config = _loaded_config_snapshot(entry, options)
-    coordinator._repair_streaks = await async_load_repair_streaks(hass, entry.entry_id)
-    coordinator._fired_ending_soon = await async_load_ending_soon_fired(
-        hass, entry.entry_id
-    )
-    coordinator.inactive_item_sensors = await async_load_inactive_item_sensors(
-        hass, entry.entry_id
-    )
-    await coordinator.async_config_entry_first_refresh()
-    coordinator._loaded_config = _loaded_config_snapshot(entry, options)
-    entry.runtime_data = coordinator
-    await hass.config_entries.async_forward_entry_setups(
-        entry, [Platform(platform) for platform in PLATFORMS]
-    )
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    return True
+    setup_ok = False
+    try:
+        client = EbayApiClient(
+            async_get_clientsession(hass),
+            environment=entry.data[CONF_ENVIRONMENT],
+            client_id=entry.data[CONF_CLIENT_ID],
+            client_secret=entry.data[CONF_CLIENT_SECRET],
+            runame=entry.data[CONF_RUNAME],
+            refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+            site_id=entry.data[CONF_SITE_ID],
+            oauth_session=oauth_session,
+            rate_limit_tracker=tracker,
+        )
+        coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
+        coordinator._loaded_config = _loaded_config_snapshot(entry, options)
+        coordinator._repair_streaks = await async_load_repair_streaks(
+            hass, entry.entry_id
+        )
+        coordinator._fired_ending_soon = await async_load_ending_soon_fired(
+            hass, entry.entry_id
+        )
+        coordinator.inactive_item_sensors = await async_load_inactive_item_sensors(
+            hass, entry.entry_id
+        )
+        await coordinator.async_config_entry_first_refresh()
+        coordinator._loaded_config = _loaded_config_snapshot(entry, options)
+        entry.runtime_data = coordinator
+        await hass.config_entries.async_forward_entry_setups(
+            entry, [Platform(platform) for platform in PLATFORMS]
+        )
+        entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+        setup_ok = True
+        return True
+    finally:
+        if not setup_ok:
+            async_release_rate_limit_tracker(
+                hass,
+                entry.data[CONF_ENVIRONMENT],
+                entry.data[CONF_CLIENT_ID],
+                entry_id=entry.entry_id,
+            )
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -187,6 +219,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             entry.data[CONF_ENVIRONMENT],
             entry.data[CONF_CLIENT_ID],
+            entry_id=entry.entry_id,
         )
     return unload_ok
 
@@ -201,6 +234,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await async_remove_repair_streaks(hass, entry.entry_id)
     await async_remove_ending_soon_fired(hass, entry.entry_id)
     await async_remove_inactive_item_sensors(hass, entry.entry_id)
+    async_release_rate_limit_tracker(
+        hass,
+        entry.data.get(CONF_ENVIRONMENT, ENV_PRODUCTION),
+        entry.data.get(CONF_CLIENT_ID, ""),
+        entry_id=entry.entry_id,
+    )
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

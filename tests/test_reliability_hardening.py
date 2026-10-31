@@ -219,7 +219,7 @@ async def test_rest_fast_fail_during_cooldown() -> None:
     client.rate_limit_tracker.record_throttled(EndpointFamily.REST, 15.0, "test_client")
 
     with pytest.raises(EbayPartialFailure) as exc_info:
-        await client._async_rest_get_once(
+        await client._async_rest_get(
             "https://api.ebay.com/test",
             partial_category="orders",
         )
@@ -650,7 +650,7 @@ async def test_trading_short_cooldown_waits_and_proceeds() -> None:
     with patch(
         "custom_components.ebay.clients.trading.asyncio.sleep", new_callable=AsyncMock
     ) as mock_sleep:
-        root = await client._async_call_trading_api_once("GetMyeBaySelling", "<xml/>")
+        root = await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
         mock_sleep.assert_awaited_once()
         assert root is not None
 
@@ -719,7 +719,7 @@ async def test_rest_bounded_retry_500_then_success() -> None:
     )
     client.async_get_access_token = AsyncMock(return_value="valid_token")
 
-    data = await client._async_rest_get_once(
+    data = await client._async_rest_get(
         "https://api.ebay.com/sell/fulfillment/v1/order",
         partial_category="orders",
     )
@@ -749,7 +749,7 @@ async def test_rest_bounded_retry_timeout_then_success() -> None:
     )
     client.async_get_access_token = AsyncMock(return_value="valid_token")
 
-    data = await client._async_rest_get_once(
+    data = await client._async_rest_get(
         "https://api.ebay.com/test",
         partial_category="test",
     )
@@ -784,7 +784,7 @@ async def test_rest_bounded_retry_repeated_503_exhausts_and_fails() -> None:
     client.async_get_access_token = AsyncMock(return_value="valid_token")
 
     with pytest.raises(EbayPartialFailure) as exc_info:
-        await client._async_rest_get_once(
+        await client._async_rest_get(
             "https://api.ebay.com/test",
             partial_category="orders",
         )
@@ -874,7 +874,7 @@ async def test_trading_bounded_retry_502_then_success() -> None:
     )
     client.async_get_access_token = AsyncMock(return_value="valid_token")
 
-    root = await client._async_call_trading_api_once("GetMyeBaySelling", "<xml/>")
+    root = await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
     assert root is not None
     assert client._last_retry_count == 1
     assert session.post.call_count == 2
@@ -1038,3 +1038,698 @@ async def test_truncated_pagination_preserves_confirmed_items_and_separates_succ
     assert p3["summary"]["watched_items"] == 0
     assert "buying_truncated" not in p3["partial_failures"]
     assert p3["section_last_success"][SECTION_BUYING] > success_stamp_1
+
+
+# ==============================================================================
+# Additional Tests: 401/403/400/404 Semantics, Retry Budget, and Tracker Lifecycle
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_trading_401_refreshes_token_and_succeeds() -> None:
+    """Trading 401 refreshes token once and succeeds on second request."""
+    session = Mock()
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    resp_200 = _FakeResponse(
+        status=200,
+        text="""<GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+            <Ack>Success</Ack>
+        </GetMyeBaySellingResponse>""",
+    )
+    session.post = Mock(side_effect=[_FakeContext(resp_401), _FakeContext(resp_200)])
+
+    tokens = ["expired_token", "fresh_token"]
+
+    async def _mock_get_token() -> str:
+        return tokens.pop(0) if len(tokens) > 1 else tokens[0]
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(side_effect=_mock_get_token)
+
+    root = await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
+    assert root is not None
+    assert session.post.call_count == 2
+    assert client._last_retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trading_401_refresh_fails_bounded_error() -> None:
+    """Trading 401 refresh failure raises bounded EbayAuthError without infinite loop."""
+    session = Mock()
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    session.post = Mock(return_value=_FakeContext(resp_401))
+
+    call_count = 0
+
+    async def _mock_get_token() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count > 1:
+            raise EbayAuthError("OAuth refresh failed")
+        return "expired_token"
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(side_effect=_mock_get_token)
+
+    with pytest.raises(EbayAuthError, match="OAuth refresh failed"):
+        await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
+    assert session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trading_403_fails_immediately_no_refresh_no_retry() -> None:
+    """Trading HTTP 403 fails immediately with status=403, zero refreshes and zero retries."""
+    session = Mock()
+    resp_403 = _FakeResponse(status=403, text="Forbidden")
+    session.post = Mock(return_value=_FakeContext(resp_403))
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayApiError) as exc_info:
+        await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
+
+    assert exc_info.value.status == 403
+    assert session.post.call_count == 1
+    assert client._last_retry_count == 0
+    assert client.async_get_access_token.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trading_400_and_404_fail_immediately() -> None:
+    """Trading HTTP 400 and 404 fail immediately with zero retries."""
+    session = Mock()
+    resp_400 = _FakeResponse(status=400, text="Bad Request")
+    session.post = Mock(return_value=_FakeContext(resp_400))
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayApiError) as exc_400:
+        await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
+    assert exc_400.value.status == 400
+    assert session.post.call_count == 1
+
+    resp_404 = _FakeResponse(status=404, text="Not Found")
+    session.post = Mock(return_value=_FakeContext(resp_404))
+    with pytest.raises(EbayApiError) as exc_404:
+        await client.async_call_trading_api("GetMyeBaySelling", "<xml/>")
+    assert exc_404.value.status == 404
+    assert session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_403_fails_immediately_no_refresh_no_retry() -> None:
+    """REST HTTP 403 fails immediately with zero retries and zero refreshes."""
+    session = Mock()
+    resp_403 = _FakeResponse(status=403, json_payload={"error": "forbidden"})
+    session.get = Mock(return_value=_FakeContext(resp_403))
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayPartialFailure) as exc_info:
+        await client._async_rest_get(
+            "https://api.ebay.com/sell/fulfillment/v1/order",
+            partial_category="orders",
+        )
+
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.http_status == 403
+    assert session.get.call_count == 1
+    assert client._last_retry_count == 0
+    assert client.async_get_access_token.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_scenario_500_401_200_capped_at_three_attempts() -> None:
+    """Scenario 500 -> 401 -> 200 executes 3 total endpoint requests, 1 refresh, and succeeds."""
+    session = Mock()
+    resp_500 = _FakeResponse(status=500, json_payload={"error": "server error"})
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    resp_200 = _FakeResponse(status=200, json_payload={"data": "ok"})
+    session.get = Mock(
+        side_effect=[
+            _FakeContext(resp_500),
+            _FakeContext(resp_401),
+            _FakeContext(resp_200),
+        ]
+    )
+
+    tokens = ["token_1", "token_2"]
+
+    async def _mock_get_token() -> str:
+        return tokens.pop(0) if len(tokens) > 1 else tokens[0]
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(side_effect=_mock_get_token)
+
+    data = await client._async_rest_get(
+        "https://api.ebay.com/test",
+        partial_category="test",
+    )
+    assert data == {"data": "ok"}
+    assert session.get.call_count == 3
+    assert client._last_retry_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rest_scenario_500_503_401_no_fourth_attempt() -> None:
+    """Scenario 500 -> 503 -> 401 hits 3 total endpoint attempts and halts without 4th attempt."""
+    session = Mock()
+    resp_500 = _FakeResponse(status=500, json_payload={"error": "server error 1"})
+    resp_503 = _FakeResponse(status=503, json_payload={"error": "server error 2"})
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    session.get = Mock(
+        side_effect=[
+            _FakeContext(resp_500),
+            _FakeContext(resp_503),
+            _FakeContext(resp_401),
+        ]
+    )
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayAuthError):
+        await client._async_rest_get(
+            "https://api.ebay.com/test",
+            partial_category="test",
+        )
+    assert session.get.call_count == 3
+    assert client._last_retry_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rest_scenario_budget_expires_before_backoff_no_phantom_retry() -> None:
+    """Budget expiring before backoff completes raises bounded error and records 0 retries."""
+    session = Mock()
+    resp_500 = _FakeResponse(status=500, json_payload={"error": "server error"})
+    session.get = Mock(return_value=_FakeContext(resp_500))
+
+    # Total timeout 0.1s, base delay 1.0s -> backoff will exceed deadline
+    policy = BoundedRetryPolicy(base_delay=1.0, total_timeout=0.1)
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayPartialFailure) as exc_info:
+        await client._async_rest_get(
+            "https://api.ebay.com/test",
+            partial_category="orders",
+        )
+    assert exc_info.value.failure is not None
+    assert session.get.call_count == 1
+    # Crucial: _last_retry_count must NOT be incremented because attempt 1 was never dispatched!
+    assert client._last_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_scenario_cancellation_during_backoff() -> None:
+    """Cancellation during backoff sleep cleanly halts without dispatching another request."""
+    session = Mock()
+    resp_500 = _FakeResponse(status=500, json_payload={"error": "server error"})
+    session.get = Mock(return_value=_FakeContext(resp_500))
+
+    async def _cancel_sleep(delay: float) -> None:
+        raise asyncio.CancelledError()
+
+    policy = BoundedRetryPolicy(base_delay=0.5, sleep_func=_cancel_sleep)
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(asyncio.CancelledError):
+        await client._async_rest_get(
+            "https://api.ebay.com/test",
+            partial_category="orders",
+        )
+    assert session.get.call_count == 1
+    assert client._last_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_scenario_budget_exhausted_during_request() -> None:
+    """Request timeout when budget is zero raises 504 bounded failure."""
+    session = Mock()
+    policy = BoundedRetryPolicy(total_timeout=-1.0)
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+
+    with pytest.raises(EbayPartialFailure) as exc_info:
+        await client._async_rest_get(
+            "https://api.ebay.com/test",
+            partial_category="orders",
+        )
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.http_status == 504
+    assert exc_info.value.failure.classification == "transient"
+    assert session.get.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_concurrent_requests_share_token_refresh() -> None:
+    """Multiple concurrent requests encountering 401 coordinate under token refresh lock."""
+    session = Mock()
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    resp_200 = _FakeResponse(status=200, json_payload={"result": "ok"})
+
+    session.get = Mock(
+        side_effect=[
+            _FakeContext(resp_401),
+            _FakeContext(resp_200),
+            _FakeContext(resp_200),
+            _FakeContext(resp_200),
+        ]
+    )
+
+    refresh_count = 0
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+
+    async def _mock_refresh(failed_token: str | None = None) -> str:
+        nonlocal refresh_count
+        refresh_count += 1
+        await asyncio.sleep(0.01)
+        return f"refreshed_token_{refresh_count}"
+
+    client.async_refresh_access_token = AsyncMock(side_effect=_mock_refresh)  # type: ignore[method-assign]
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    res1, res2 = await asyncio.gather(
+        client._async_rest_get("https://api.ebay.com/test1", partial_category="test"),
+        client._async_rest_get("https://api.ebay.com/test2", partial_category="test"),
+    )
+    assert res1 == {"result": "ok"}
+    assert res2 == {"result": "ok"}
+
+
+# ==============================================================================
+# Lifecycle Tests: RateLimitTracker Registry Failure-Safety and Cleanup
+# ==============================================================================
+
+
+@pytest.mark.asyncio
+async def test_tracker_lifecycle_first_refresh_failure_cleans_up() -> None:
+    """Coordinator first-refresh failure during async_setup_entry releases tracker cleanly."""
+    from custom_components.ebay import async_setup_entry
+    from custom_components.ebay.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_ENVIRONMENT,
+        CONF_OAUTH_SCOPES,
+        CONF_REFRESH_TOKEN,
+        CONF_RUNAME,
+        CONF_SITE_ID,
+        DOMAIN,
+    )
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    hass = Mock()
+    hass.data = {}
+    entry = Mock()
+    entry.entry_id = "test_entry_fail_1"
+    entry.data = {
+        CONF_CLIENT_ID: "app_id_fail",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_ENVIRONMENT: "production",
+        CONF_RUNAME: "runame",
+        CONF_REFRESH_TOKEN: "refresh",
+        CONF_SITE_ID: "0",
+        CONF_OAUTH_SCOPES: "https://api.ebay.com/oauth/api_scope",
+    }
+    entry.options = {}
+
+    with (
+        patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
+        patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.coordinator.EbayDataUpdateCoordinator.async_config_entry_first_refresh",
+            side_effect=ConfigEntryNotReady("API down"),
+        ),
+    ):
+        with pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry)
+
+    trackers = hass.data.get(DOMAIN, {}).get("rate_limit_trackers", {})
+    assert len(trackers) == 0, "Tracker was not released after first_refresh failure!"
+
+
+@pytest.mark.asyncio
+async def test_tracker_lifecycle_platform_setup_failure_cleans_up() -> None:
+    """Platform forwarding failure during async_setup_entry releases tracker cleanly."""
+    from custom_components.ebay import async_setup_entry
+    from custom_components.ebay.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_ENVIRONMENT,
+        CONF_OAUTH_SCOPES,
+        CONF_REFRESH_TOKEN,
+        CONF_RUNAME,
+        CONF_SITE_ID,
+        DOMAIN,
+    )
+
+    hass = Mock()
+    hass.data = {}
+    entry = Mock()
+    entry.entry_id = "test_entry_fail_2"
+    entry.data = {
+        CONF_CLIENT_ID: "app_id_platform_fail",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_ENVIRONMENT: "production",
+        CONF_RUNAME: "runame",
+        CONF_REFRESH_TOKEN: "refresh",
+        CONF_SITE_ID: "0",
+        CONF_OAUTH_SCOPES: "https://api.ebay.com/oauth/api_scope",
+    }
+    entry.options = {}
+
+    with (
+        patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
+        patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.coordinator.EbayDataUpdateCoordinator.async_config_entry_first_refresh",
+            new_callable=AsyncMock,
+        ),
+        patch.object(
+            hass.config_entries,
+            "async_forward_entry_setups",
+            side_effect=RuntimeError("Platform error"),
+        ),
+    ):
+        with pytest.raises(RuntimeError):
+            await async_setup_entry(hass, entry)
+
+    trackers = hass.data.get(DOMAIN, {}).get("rate_limit_trackers", {})
+    assert len(trackers) == 0, "Tracker was not released after platform setup failure!"
+
+
+@pytest.mark.asyncio
+async def test_tracker_lifecycle_two_entries_same_keyset_one_fails_setup() -> None:
+    """Entry 1 succeeds while Entry 2 sharing same keyset fails setup; Entry 1 stays active."""
+    from custom_components.ebay import async_setup_entry, async_unload_entry
+    from custom_components.ebay.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_ENVIRONMENT,
+        CONF_OAUTH_SCOPES,
+        CONF_REFRESH_TOKEN,
+        CONF_RUNAME,
+        CONF_SITE_ID,
+        DOMAIN,
+    )
+    from homeassistant.exceptions import ConfigEntryNotReady
+
+    hass = Mock()
+    hass.data = {}
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+
+    entry1 = Mock()
+    entry1.entry_id = "entry_1_shared"
+    entry1.data = {
+        CONF_CLIENT_ID: "shared_keyset_app",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_ENVIRONMENT: "production",
+        CONF_RUNAME: "runame",
+        CONF_REFRESH_TOKEN: "refresh",
+        CONF_SITE_ID: "0",
+        CONF_OAUTH_SCOPES: "https://api.ebay.com/oauth/api_scope",
+    }
+    entry1.options = {}
+    entry1.add_update_listener = Mock()
+    entry1.async_on_unload = Mock()
+
+    entry2 = Mock()
+    entry2.entry_id = "entry_2_shared"
+    entry2.data = dict(entry1.data)
+    entry2.options = {}
+
+    with (
+        patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
+        patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.coordinator.EbayDataUpdateCoordinator.async_config_entry_first_refresh",
+            new_callable=AsyncMock,
+        ),
+    ):
+        res1 = await async_setup_entry(hass, entry1)
+        assert res1 is True
+
+    trackers = hass.data[DOMAIN]["rate_limit_trackers"]
+    key = list(trackers.keys())[0]
+    assert trackers[key]["ref_count"] == 1
+    assert "entry_1_shared" in trackers[key]["entries"]
+
+    # Now Entry 2 attempts setup and fails during first_refresh
+    with (
+        patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
+        patch(
+            "custom_components.ebay.repairs.async_load_repair_streaks",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            new=AsyncMock(return_value=set()),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "custom_components.ebay.coordinator.EbayDataUpdateCoordinator.async_config_entry_first_refresh",
+            side_effect=ConfigEntryNotReady("Rate limit"),
+        ),
+    ):
+        with pytest.raises(ConfigEntryNotReady):
+            await async_setup_entry(hass, entry2)
+
+    # Key still exists with ref_count == 1 and entry_1_shared still registered!
+    assert key in trackers
+    assert trackers[key]["ref_count"] == 1
+    assert trackers[key]["entries"] == {"entry_1_shared"}
+
+    # Unload entry1
+    with (
+        patch(
+            "custom_components.ebay.repairs.async_save_repair_streaks",
+            new=AsyncMock(),
+        ),
+        patch(
+            "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+            new=AsyncMock(),
+        ),
+        patch(
+            "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+            new=AsyncMock(),
+        ),
+    ):
+        unload_res = await async_unload_entry(hass, entry1)
+    assert unload_res is True
+    assert len(trackers) == 0
+
+
+@pytest.mark.asyncio
+async def test_tracker_lifecycle_repeated_reloads_no_leaks() -> None:
+    """Repeated reload cycles for a config entry preserve exactly 1 tracker ref count."""
+    from custom_components.ebay import async_setup_entry, async_unload_entry
+    from custom_components.ebay.const import (
+        CONF_CLIENT_ID,
+        CONF_CLIENT_SECRET,
+        CONF_ENVIRONMENT,
+        CONF_OAUTH_SCOPES,
+        CONF_REFRESH_TOKEN,
+        CONF_RUNAME,
+        CONF_SITE_ID,
+        DOMAIN,
+    )
+
+    hass = Mock()
+    hass.data = {}
+    hass.config_entries.async_forward_entry_setups = AsyncMock(return_value=True)
+    hass.config_entries.async_unload_platforms = AsyncMock(return_value=True)
+
+    entry = Mock()
+    entry.entry_id = "entry_reload_test"
+    entry.data = {
+        CONF_CLIENT_ID: "reload_keyset_app",
+        CONF_CLIENT_SECRET: "secret",
+        CONF_ENVIRONMENT: "production",
+        CONF_RUNAME: "runame",
+        CONF_REFRESH_TOKEN: "refresh",
+        CONF_SITE_ID: "0",
+        CONF_OAUTH_SCOPES: "https://api.ebay.com/oauth/api_scope",
+    }
+    entry.options = {}
+    entry.add_update_listener = Mock()
+    entry.async_on_unload = Mock()
+
+    for _ in range(5):
+        with (
+            patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
+            patch(
+                "custom_components.ebay.repairs.async_load_repair_streaks",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+                new=AsyncMock(return_value=set()),
+            ),
+            patch(
+                "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "custom_components.ebay.coordinator.EbayDataUpdateCoordinator.async_config_entry_first_refresh",
+                new_callable=AsyncMock,
+            ),
+        ):
+            assert await async_setup_entry(hass, entry) is True
+
+        trackers = hass.data[DOMAIN]["rate_limit_trackers"]
+        key = list(trackers.keys())[0]
+        assert trackers[key]["ref_count"] == 1
+        assert trackers[key]["entries"] == {"entry_reload_test"}
+
+        with (
+            patch(
+                "custom_components.ebay.repairs.async_save_repair_streaks",
+                new=AsyncMock(),
+            ),
+            patch(
+                "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+                new=AsyncMock(),
+            ),
+            patch(
+                "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+                new=AsyncMock(),
+            ),
+        ):
+            assert await async_unload_entry(hass, entry) is True
+        assert len(trackers) == 0
