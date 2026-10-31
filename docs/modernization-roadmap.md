@@ -31,8 +31,8 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 | **Milestone 9** | Account Identity & Multiple eBay Accounts | `feat/ebay-multiple-accounts` | [#103](https://github.com/andrewtryder/ha-ebay/pull/103) | **Merged** (`ee7b769`): Same-app multi-account onboarding, canonical AccountIdentity, duplicate matrix, reauth protection, zero cutover |
 | **Milestone 10** | Guided BYO eBay OAuth Architecture & Onboarding Specification | `docs/ebay-one-click-oauth-architecture` | [#104](https://github.com/andrewtryder/ha-ebay/pull/104) | **Merged** (`856f213`): Architecture decision record, threat model, feasibility analysis, guided BYO onboarding wizard specification, zero managed credentials |
 | **Milestone 10.1** | Guided BYO eBay OAuth Onboarding Implementation | `feat/ebay-guided-oauth-onboarding` | [#105](https://github.com/andrewtryder/ha-ebay/pull/105) | **Merged** (`49ad7f8`): Guided BYO onboarding wizard, RuName callback verification, keyset shortcut, manual fallback, zero secret redisclosure |
-| **Milestone 11** | Reliability, Rate Limits & Home Assistant Compatibility Hardening | `feat/ebay-reliability-hardening` | [#106](https://github.com/andrewtryder/ha-ebay/pull/106) | **Completed (Current PR)**: Bounded retries (unified 3-attempt ceiling), strict 401/403 separation, Retry-After delta & HTTP-date parsing, shared keyset RateLimitTracker with failure-safe lifecycle, last-good-data preservation, event churn suppression |
-| **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | Planned |
+| **Milestone 11** | Reliability, Rate Limits & Home Assistant Compatibility Hardening | `feat/ebay-reliability-hardening` | [#106](https://github.com/andrewtryder/ha-ebay/pull/106) | **Merged** (`2fa1985`): Bounded retries (unified 3-attempt ceiling), strict 401/403 separation, Retry-After delta & HTTP-date parsing, shared keyset RateLimitTracker with failure-safe lifecycle, last-good-data preservation, event churn suppression |
+| **Milestone 12** | End-to-End Home Assistant Testing & Release | `test/ebay-end-to-end-release` | TBD | **Completed (PR Open)**: Comprehensive 6-suite end-to-end integration tests, 5-platform lifecycle, v1-v5 schema migration, multi-account isolation, 10→2→0 pagination regression verification, diagnostics privacy audit, migration policy safety, maintainer live validation checklist |
 
 ---
 
@@ -207,4 +207,32 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 - **Documentation Alignment**:
   - Clarified that validation-only GraphQL queries use independent bounded retries (`MAX_GRAPHQL_RETRIES = 2`) without the shared `RateLimitTracker`.
   - Clarified that OAuth token requests enforce a 30s timeout and concurrency lock without `BoundedRetryPolicy`.
-- Milestone status: **Implementation completed and verified on branch `feat/ebay-reliability-hardening` (PR #106).** Next planned workstream: **Milestone 12 (End-to-End Home Assistant Testing & Release)**.
+- Milestone status: **Implementation completed and merged in PR #106 (`2fa1985ececcac07e42a9bc3afb627bbef87b741`).** Next planned workstream: **Milestone 12 (End-to-End Home Assistant Testing & Release)**.
+
+### 14. End-to-End Home Assistant Testing & Release Verification (Milestone 12)
+- **Comprehensive End-to-End Testing Across All Platforms**:
+  - Implemented 15 comprehensive tests in [`tests/test_end_to_end_integration.py`](../tests/test_end_to_end_integration.py) covering all 5 Home Assistant entity platforms (`sensor`, `binary_sensor`, `button`, `calendar`, `event`).
+  - Proved full lifecycle integrity: setup, options reload, token-rotation reload suppression, clean unload, and entry removal with tracker purging.
+  - Verified that missing scopes trigger proper setup failure and diagnostic reporting without crashing Home Assistant.
+  - Verified failure-safe coordinator first-refresh error handling and automatic rate-limit tracker cleanup.
+- **Durable Legacy Schema Migration (v1 through v4 to v5)**:
+  - Verified step-by-step schema migration up to v5: default options insertion, username fallback, EIASToken identity backfill, and scope preservation.
+  - Proved that future unsupported schema versions fail closed (`return False`) without corrupting entry data.
+- **Multi-Account & Shared-Keyset Isolation**:
+  - Proved that two distinct eBay accounts sharing a single developer keyset safely share rate-limit cooldown state without colliding on entry data, entity unique IDs, or coordinator state.
+  - Proved that independent keysets maintain completely isolated rate-limit trackers.
+  - Proved strict environment isolation between Production and Sandbox entries.
+- **Pagination & Data Integrity Regression Verification**:
+  - Implemented mandatory regression scenario: complete 10-item refresh $\to$ truncated 2-item refresh $\to$ genuine complete empty refresh.
+  - Proved that truncated refreshes preserve prior confirmed items, retain summary item counts, update `section_last_attempt` while preserving `section_last_success`, and suppress false removal/disappearance events.
+  - Proved that genuine complete empty responses cleanly transition item sets without stale ghosts.
+- **Security & Diagnostics Privacy Audit**:
+  - Verified that client secrets, access tokens, refresh tokens, and raw RuNames are excluded or redacted from exported diagnostics.
+  - Verified that `EbayAuthError` string representation and repr never leak OAuth access or refresh tokens.
+- **Migration Policy Safety & Default Invariants**:
+  - Audited all 8 readiness gates in [`custom_components/ebay/migration_policy.py`](../custom_components/ebay/migration_policy.py).
+  - Confirmed default production routing invariants: Trading XML authoritative for buying and selling listings, REST for orders and seller standards, and GraphQL Watchlist strictly blocked on `FORBIDDEN`.
+- **Maintainer Manual Live Validation Checklist**:
+  - Created [`docs/manual-live-validation.md`](manual-live-validation.md) documenting an explicit 10-part manual validation procedure for maintainers with real eBay accounts.
+  - Every step is cleanly documented and explicitly marked `[UNVERIFIED - PENDING MAINTAINER LIVE RUN]`.
+- Milestone status: **Implementation, end-to-end verification, and release documentation completed on branch `test/ebay-end-to-end-release`.**

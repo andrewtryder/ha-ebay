@@ -50,7 +50,7 @@ on the setup screen, and register that URL in the matching eBay application keys
 See the illustrated **[eBay OAuth setup guide](docs/ebay-oauth-setup.md)** for the complete walkthrough.
 
 Production credentials must be used with Production, and Sandbox credentials with Sandbox.
-The integration currently supports one eBay account per developer-app credential set.
+Multiple distinct eBay user accounts can share the same developer application keyset, but a single eBay user account cannot be added multiple times under the same environment.
 
 Existing installations keep previously granted OAuth scopes. New installs
 authorize with the core buying/selling scope only; enable optional seller-operation
@@ -155,7 +155,7 @@ Import-ready blueprints cover several of these flows; see
 
 ## Known limitations
 
-- One eBay account per developer-app credential set
+- Multiple distinct eBay user accounts can share the same developer application keyset; duplicate setups for the same eBay account in the same environment are prevented
 - Read-only: no bids, purchases, listing changes, messages, or shipping actions
 - Marketplace capabilities differ (for example analytics/traffic report); unsupported
   markets soft-fail without breaking the rest of the integration
@@ -223,6 +223,8 @@ Do not include client secrets, OAuth codes, access tokens, or refresh tokens.
 
 See **[docs/development.md](docs/development.md)** for the development environment, test commands,
 Home Assistant source-mount workflow, and HACS testing process.
+
+For end-to-end maintainer testing against live eBay accounts prior to production releases, see the **[Manual Live Validation Checklist](docs/manual-live-validation.md)**.
 
 ## Trademark
 
