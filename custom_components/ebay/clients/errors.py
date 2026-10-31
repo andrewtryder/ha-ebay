@@ -37,6 +37,10 @@ class EbayAuthError(EbayError):
         self.errors = list(errors) if errors else []
         self.status = status
 
+    def __repr__(self) -> str:
+        """Return a string representation without exposing failed_token."""
+        return f"{self.__class__.__name__}({str(self)!r})"
+
 
 class EbayAuthTransientError(EbayError):
     """Authentication refresh failed temporarily."""

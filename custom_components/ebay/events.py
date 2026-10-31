@@ -215,6 +215,25 @@ class EbayEventMixin:
         if previous is None:
             return
         previous_sold_ids_raw = previous.get("sold_item_ids")
+        partial_failures = current.get("partial_failures") or []
+        selling_partial = (
+            _collection_truncated(previous, current, "selling")
+            or "selling" in partial_failures
+            or "selling_truncated" in partial_failures
+        )
+        buying_partial = (
+            "buying_truncated" in partial_failures or "buying" in partial_failures
+        )
+        watched_partial = (
+            _collection_truncated(previous, current, "watched")
+            or buying_partial
+            or "watched" in partial_failures
+        )
+        bidding_partial = (
+            _collection_truncated(previous, current, "bidding")
+            or buying_partial
+            or "bidding" in partial_failures
+        )
         self._detect_selling_events(
             previous["selling"],
             current["selling"],
@@ -226,18 +245,18 @@ class EbayEventMixin:
             classification_incomplete=_collection_truncated(
                 previous, current, "sold_unsold"
             )
-            or "sold_unsold_classification" in (current.get("partial_failures") or []),
-            suppress_incomplete=_collection_truncated(previous, current, "selling"),
+            or "sold_unsold_classification" in partial_failures,
+            suppress_incomplete=selling_partial,
         )
         self._detect_watching_events(
             previous["watched"],
             current["watched"],
-            suppress_incomplete=_collection_truncated(previous, current, "watched"),
+            suppress_incomplete=watched_partial,
         )
         self._detect_bidding_events(
             previous["bidding"],
             current["bidding"],
-            suppress_incomplete=_collection_truncated(previous, current, "bidding"),
+            suppress_incomplete=bidding_partial,
         )
         self._detect_seller_ops_events(
             previous.get("seller_ops") or {},

@@ -130,13 +130,15 @@ flowchart TD
     I -- Yes --> E
 ```
 
-### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5, M6, M7, M8, M9)
+### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5, M6, M7, M8, M9, M10, M10.1, M11)
 - Define modern queries, data models, and fail-closed normalization parsers.
 - Build private, opt-in CLI parity test tools (`scripts/validate_*_parity.py`).
 - Implement exhaustive offline test suites covering partial errors, duplicate IDs, and contradictory pagination.
 - **Milestone 8 Completed**: Audited all residual Trading XML operations across the codebase. Built canonical identity model (`custom_components/ebay/parsers/identity_parity.py`) and master dependency matrix CLI (`scripts/validate_legacy_fields_parity.py`). Validated that existing user OAuth grants remain strictly on core `https://api.ebay.com/oauth/api_scope` with zero forced re-authentication and zero runtime cutover.
 - **Milestone 9 Completed**: Established canonical account identity bindings and enabled safe multi-account onboarding. Upgraded config entry schema to version 5 in `async_migrate_entry()`, safely associating `AccountIdentity` with `binding_state="legacy_compatible"` without altering legacy entry unique IDs (`environment:client_id`) or entity registry unique IDs (`f"{entry.entry_id}_{key}"`). Added strict reauthorization protections preventing account switching. Zero cutover to modern providers.
 - **Milestone 10 Completed**: Delivered Architecture Decision Record and onboarding specification (`docs/one-click-oauth-architecture.md`). Adopted GO for Guided Bring-Your-Own (BYO) OAuth Setup, keeping user-owned developer applications as the permanent model while designing an in-flow guided setup wizard to eliminate user friction. Reaffirmed that OAuth tokens cannot be transferred across developer keysets, and preserved 100% of M9 multi-account safeguards.
+- **Milestone 10.1 Completed**: Implemented the Guided BYO OAuth setup flow in `custom_components/ebay/config_flow.py`, providing in-flow RuName callback copying, credential validation, reusable keysets for multiple accounts, and manual troubleshooting fallback with zero Client Secret redisclosure in frontend forms.
+- **Milestone 11 Completed**: Implemented production reliability, rate limiting, and Home Assistant compatibility hardening (`docs/reliability-and-rate-limits.md`). Built bounded retry policy and `RateLimitTracker`, parsed `Retry-After` (delta-seconds and HTTP-dates), preserved last-good data on partial API failures (classification, views, offers, analytics), suppressed event churn on incomplete polls, added 30s OAuth request timeouts, and implemented clean entry unloading via `async_shutdown()`.
 
 ### Phase 2: Live Entitlement Verification
 - Confirm exact required OAuth scopes and developer entitlements via eBay GraphQL Explorer.

@@ -100,6 +100,28 @@ def _auth_like_error(root: ET.Element) -> bool:
     return False
 
 
+def _rate_limit_error(root: ET.Element) -> bool:
+    """Return whether a Trading API XML failure looks like quota / rate-limiting."""
+    for error in root.findall("e:Errors", namespaces=NS):
+        code = _text(error, "e:ErrorCode")
+        if code in {"518", "17", "21916984"}:
+            return True
+        fields = [
+            code,
+            _text(error, "e:ShortMessage"),
+            _text(error, "e:LongMessage"),
+        ]
+        haystack = " ".join(value for value in fields if value).lower()
+        if (
+            "limit exceeded" in haystack
+            or "usage limit" in haystack
+            or "too many requests" in haystack
+            or "rate limit" in haystack
+        ):
+            return True
+    return False
+
+
 def _sanitize_warning_text(value: str | None) -> str | None:
     """Truncate and redact credential-like substrings from Trading API warnings."""
     if not value:

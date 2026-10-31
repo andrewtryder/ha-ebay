@@ -330,6 +330,8 @@ class EbayApiClient(
         refresh_token: str | None,
         site_id: str,
         oauth_session: Any | None = None,
+        rate_limit_tracker: Any | None = None,
+        retry_policy: Any | None = None,
     ) -> None:
         self._session = session
         self._oauth_session = oauth_session
@@ -349,6 +351,9 @@ class EbayApiClient(
         self._last_api_failure: ApiFailure | None = None
         self._accept_language = accept_language_for_site(site_id)
         self._token_refresh_lock: asyncio.Lock | None = None
+        self._rate_limit_tracker = rate_limit_tracker
+        self._retry_policy = retry_policy
+        self._last_retry_count = 0
 
     async def async_fetch_data(
         self,
