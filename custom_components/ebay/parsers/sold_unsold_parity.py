@@ -178,6 +178,7 @@ _VARIABLE_DECL_RE = re.compile(
 ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
     {
         "ACCESS_DENIED",
+        "ACCOUNT_MISMATCH",
         "BAD_GATEWAY",
         "BAD_USER_INPUT",
         "CONTRADICTORY_PAGINATION_TOTALS",
@@ -186,6 +187,7 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "DOWNSTREAM_SERVICE_ERROR",
         "DUPLICATE_ITEM_ID",
         "DUPLICATE_ITEM_ID_ACROSS_PAGES",
+        "DUPLICATE_ORDER_ID",
         "EMPTY_XML_PAYLOAD",
         "FIELD_UNDEFINED",
         "FORBIDDEN",
@@ -204,6 +206,7 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "INVALID_XML_ROOT",
         "ITEM_NOT_FOUND",
         "MALFORMED_ERROR",
+        "MALFORMED_ORDER",
         "MALFORMED_PAGE",
         "MALFORMED_PAGE_INFO",
         "MAX_PAGES_EXCEEDED",
@@ -215,6 +218,7 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "NO_ITEMS_CONTAINER",
         "NO_PAGES_PROVIDED",
         "NOT_AUTHORIZED",
+        "NOT_IMPLEMENTED",
         "OPERATION_RESOLUTION_FAILURE",
         "PAGES_AFTER_END_DECLARED",
         "PAGINATION_CYCLE_DETECTED",
@@ -235,6 +239,7 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
         "UNKNOWN_ERROR",
         "UNVERIFIED_COLLECTION_CENSUS",
         "VALIDATION_ERROR",
+        "WINDOW_MISMATCH",
         "XML_ACK_FAILURE",
         "XML_ACK_MISSING",
         "XML_ACK_PARTIAL_FAILURE",
@@ -245,6 +250,7 @@ ALLOWED_SYMBOLIC_ERROR_CODES: frozenset[str] = frozenset(
 
 GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
     "ACCESS_DENIED": "Access denied; authorization check failed",
+    "ACCOUNT_MISMATCH": "Account identifier mismatch between candidate sources",
     "BAD_GATEWAY": "Bad gateway encountered communicating with remote service",
     "BAD_USER_INPUT": "Invalid argument or input parameter provided",
     "CONTRADICTORY_PAGINATION_TOTALS": "Declared pagination totals changed across pages",
@@ -253,6 +259,7 @@ GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
     "DOWNSTREAM_SERVICE_ERROR": "Downstream service error encountered",
     "DUPLICATE_ITEM_ID": "Duplicate item identifier encountered within page",
     "DUPLICATE_ITEM_ID_ACROSS_PAGES": "Duplicate item identifier encountered across pages",
+    "DUPLICATE_ORDER_ID": "Duplicate order identifier encountered in response",
     "EMPTY_XML_PAYLOAD": "Trading XML payload is empty or whitespace",
     "FIELD_UNDEFINED": "Field undefined in GraphQL schema",
     "FORBIDDEN": "Access forbidden; insufficient permissions or scope",
@@ -271,6 +278,7 @@ GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
     "INVALID_XML_ROOT": "Trading XML root element does not match expected operation",
     "ITEM_NOT_FOUND": "Item identifier was not found",
     "MALFORMED_ERROR": "Malformed error object encountered in response",
+    "MALFORMED_ORDER": "Malformed order or line item encountered in response",
     "MALFORMED_PAGE": "Response page is not a valid structured payload",
     "MALFORMED_PAGE_INFO": "Pagination pageInfo is malformed or non-boolean",
     "MAX_PAGES_EXCEEDED": "Total pages exceeded maximum allowed limit of 25",
@@ -282,6 +290,7 @@ GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
     "NO_ITEMS_CONTAINER": "No listings or orders container found in payload",
     "NO_PAGES_PROVIDED": "No response pages provided for collection",
     "NOT_AUTHORIZED": "Not authorized to access requested resource",
+    "NOT_IMPLEMENTED": "Live validation is not implemented because GraphQL sellerListingSearch schema entitlement is unverified. Use offline fixtures (--xml-fixture, --graphql-fixture, --orders-fixture) or --synthetic-demo.",
     "OPERATION_RESOLUTION_FAILURE": "Unable to resolve GraphQL operation",
     "PAGES_AFTER_END_DECLARED": "Extra page received after final page was declared",
     "PAGINATION_CYCLE_DETECTED": "Duplicate page payload detected during pagination",
@@ -302,6 +311,7 @@ GENERIC_DIAGNOSTIC_MESSAGES: dict[str, str] = {
     "UNKNOWN_ERROR": "An unclassified or unverified error occurred",
     "UNVERIFIED_COLLECTION_CENSUS": "No declared total count available to verify census completeness",
     "VALIDATION_ERROR": "GraphQL query validation failed against schema",
+    "WINDOW_MISMATCH": "Time window mismatch between baseline and candidate sources",
     "XML_ACK_FAILURE": "Trading XML returned failure response",
     "XML_ACK_MISSING": "Trading XML returned missing or unrecognized Ack value",
     "XML_ACK_PARTIAL_FAILURE": "Trading XML returned partial failure response",
@@ -322,6 +332,8 @@ SAFE_FIELD_NOTE_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "Snapshot is incomplete, truncated, or contains errors; fail-closed",
         "Verified empty collection; no records available to evaluate record-level field",
+        "Field not provided in baseline Trading XML",
+        "Field absent in both baseline and candidate",
     }
 )
 
@@ -491,9 +503,10 @@ class SoldUnsoldCollectionResult:
     selling_classification: dict[str, str] = field(default_factory=dict)
     sold_items_count: int = 0
     unsold_items_count: int = 0
-    is_complete: bool = True
+    is_complete: bool = False  # Fail-closed: default incomplete without positive proof
     is_truncated: bool = False
     total_count: int | None = None
+    account_id: str | None = None
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS
     errors: tuple[dict[str, Any], ...] = ()
     diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -585,6 +598,7 @@ def validate_all_sold_unsold_contract_probes() -> None:
 def normalize_trading_xml_sold_unsold(
     root_or_xml: str | bytes | ET.Element,
     *,
+    requested_list: str = "both",
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
 ) -> SoldUnsoldCollectionResult:
     """Normalize a single-page Trading XML GetMyeBaySelling (SoldList/UnsoldList) response."""
@@ -700,14 +714,46 @@ def normalize_trading_xml_sold_unsold(
                 }
             )
 
+    req_target = (
+        "SoldList"
+        if str(requested_list).lower().strip() in ("sold", "soldlist")
+        else (
+            "UnsoldList"
+            if str(requested_list).lower().strip() in ("unsold", "unsoldlist")
+            else "both"
+        )
+    )
+
     sold_container = root.find("e:SoldList", namespaces=NS)
     unsold_container = root.find("e:UnsoldList", namespaces=NS)
 
-    if sold_container is None and unsold_container is None:
+    if req_target == "both":
+        if sold_container is None:
+            errors.append(
+                {
+                    "code": "MISSING_REQUIRED_CONTAINER",
+                    "diagnostic": "Missing SoldList container in combined Trading XML response",
+                }
+            )
+        if unsold_container is None:
+            errors.append(
+                {
+                    "code": "MISSING_REQUIRED_CONTAINER",
+                    "diagnostic": "Missing UnsoldList container in combined Trading XML response",
+                }
+            )
+    elif req_target == "SoldList" and sold_container is None:
         errors.append(
             {
                 "code": "MISSING_REQUIRED_CONTAINER",
-                "diagnostic": "Missing SoldList and UnsoldList containers in Trading XML response",
+                "diagnostic": "Missing SoldList container in Trading XML response",
+            }
+        )
+    elif req_target == "UnsoldList" and unsold_container is None:
+        errors.append(
+            {
+                "code": "MISSING_REQUIRED_CONTAINER",
+                "diagnostic": "Missing UnsoldList container in Trading XML response",
             }
         )
 
@@ -718,37 +764,85 @@ def normalize_trading_xml_sold_unsold(
 
     # Diagnostics metadata for pagination reconciliation
     diag_info: dict[str, Any] = {}
+    is_truncated = False
 
-    for container, target_list, seen_set, c_name in (
-        (sold_container, sold_ids_list, seen_sold, "SoldList"),
-        (unsold_container, unsold_ids_list, seen_unsold, "UnsoldList"),
-    ):
-        if container is not None:
-            pag = container.find("e:PaginationResult", namespaces=NS)
-            if pag is not None:
-                total_p = _to_int(_text(pag, "e:TotalNumberOfPages"))
-                total_e = _to_int(_text(pag, "e:TotalNumberOfEntries"))
-                diag_info[f"{c_name}_total_pages"] = total_p
-                diag_info[f"{c_name}_total_entries"] = total_e
-            for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
-                i_id = _text(item, "e:ItemID")
-                if not i_id:
-                    errors.append(
-                        {
-                            "code": "MISSING_ITEM_ID",
-                            "diagnostic": f"Item in {c_name} missing required identifier",
-                        }
-                    )
-                elif i_id in seen_set:
-                    errors.append(
-                        {
-                            "code": "DUPLICATE_ITEM_ID",
-                            "diagnostic": f"Duplicate item ID in {c_name}: {i_id}",
-                        }
-                    )
-                if i_id:
-                    seen_set.add(i_id)
-                    target_list.append(i_id)
+    containers_to_check = []
+    if req_target in ("both", "SoldList") and sold_container is not None:
+        containers_to_check.append(
+            (sold_container, sold_ids_list, seen_sold, "SoldList")
+        )
+    if req_target in ("both", "UnsoldList") and unsold_container is not None:
+        containers_to_check.append(
+            (unsold_container, unsold_ids_list, seen_unsold, "UnsoldList")
+        )
+
+    for container, target_list, seen_set, c_name in containers_to_check:
+        pag = container.find("e:PaginationResult", namespaces=NS)
+        total_p = None
+        total_e = None
+        if pag is None:
+            errors.append(
+                {
+                    "code": "MISSING_PAGINATION_METADATA",
+                    "diagnostic": f"Container {c_name} missing required PaginationResult metadata",
+                }
+            )
+        else:
+            total_p = _to_int(_text(pag, "e:TotalNumberOfPages"))
+            total_e = _to_int(_text(pag, "e:TotalNumberOfEntries"))
+            diag_info[f"{c_name}_total_pages"] = total_p
+            diag_info[f"{c_name}_total_entries"] = total_e
+            if total_p is None or total_e is None:
+                errors.append(
+                    {
+                        "code": "MISSING_PAGINATION_METADATA",
+                        "diagnostic": f"Container {c_name} PaginationResult missing page or entry counts",
+                    }
+                )
+            elif total_p < 1 or total_e < 0:
+                errors.append(
+                    {
+                        "code": "MALFORMED_PAGE",
+                        "diagnostic": f"Container {c_name} invalid total pages {total_p} or entries {total_e}",
+                    }
+                )
+            elif total_p > 1:
+                is_truncated = True
+                errors.append(
+                    {
+                        "code": "PENDING_CONTINUATION",
+                        "diagnostic": f"Single page provided but container {c_name} reports {total_p} total pages",
+                    }
+                )
+
+        for item in container.findall("e:ItemArray/e:Item", namespaces=NS):
+            i_id = _text(item, "e:ItemID")
+            if not i_id:
+                errors.append(
+                    {
+                        "code": "MISSING_ITEM_ID",
+                        "diagnostic": f"Item in {c_name} missing required identifier",
+                    }
+                )
+            elif i_id in seen_set:
+                errors.append(
+                    {
+                        "code": "DUPLICATE_ITEM_ID",
+                        "diagnostic": f"Duplicate item ID in {c_name}: {i_id}",
+                    }
+                )
+            if i_id:
+                seen_set.add(i_id)
+                target_list.append(i_id)
+
+        if total_p == 1 and total_e is not None:
+            if len(target_list) != total_e:
+                errors.append(
+                    {
+                        "code": "TOTAL_RECORDS_MISMATCH",
+                        "diagnostic": f"Container {c_name} collected {len(target_list)} items but declared total is {total_e}",
+                    }
+                )
 
     # Apply established production precedence:
     # Unsold IDs first, then Sold IDs overwrite ("sold" precedence)
@@ -775,6 +869,17 @@ def normalize_trading_xml_sold_unsold(
         )
 
     has_errors = len(errors) > 0
+    has_expected_containers = (
+        (sold_container is not None and unsold_container is not None)
+        if req_target == "both"
+        else (
+            sold_container is not None
+            if req_target == "SoldList"
+            else unsold_container is not None
+        )
+    )
+    is_complete = not has_errors and not is_truncated and has_expected_containers
+
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
         sold_item_ids=frozenset(sold_ids_list),
@@ -782,8 +887,8 @@ def normalize_trading_xml_sold_unsold(
         selling_classification=classified,
         sold_items_count=len(set(sold_ids_list)),
         unsold_items_count=len(set(unsold_ids_list)),
-        is_complete=not has_errors,
-        is_truncated=False,
+        is_complete=is_complete,
+        is_truncated=is_truncated,
         total_count=len(all_ids),
         window_days=window_days,
         errors=tuple(errors),
@@ -800,6 +905,11 @@ def merge_trading_xml_sold_unsold_pages(
 ) -> SoldUnsoldCollectionResult:
     """Merge multi-page Trading XML SoldList or UnsoldList responses fail-closed."""
     validate_max_pages(max_pages)
+    target_list = (
+        "SoldList"
+        if str(list_name).lower().strip() in ("sold", "soldlist")
+        else "UnsoldList"
+    )
     if not pages:
         return SoldUnsoldCollectionResult(
             listings=(),
@@ -824,8 +934,23 @@ def merge_trading_xml_sold_unsold_pages(
     declared_total_pages: int | None = None
     declared_total_entries: int | None = None
     seen_page_hashes: set[str] = set()
+    is_truncated = False
+    processed_count = 0
 
     for page_idx, page in enumerate(pages):
+        # Enforce bounds while processing
+        if page_idx >= max_pages:
+            is_truncated = True
+            errors.append(
+                {
+                    "code": "MAX_PAGES_EXCEEDED",
+                    "diagnostic": f"Total XML pages reached limit {max_pages} while processing page {page_idx + 1}",
+                }
+            )
+            break
+
+        processed_count += 1
+
         # Loop / cycle detection
         if isinstance(page, (str, bytes)):
             page_bytes = (
@@ -843,12 +968,18 @@ def merge_trading_xml_sold_unsold_pages(
                 )
             seen_page_hashes.add(p_hash)
 
-        page_res = normalize_trading_xml_sold_unsold(page, window_days=window_days)
-        errors.extend(page_res.errors)
+        page_res = normalize_trading_xml_sold_unsold(
+            page, requested_list=target_list, window_days=window_days
+        )
+        # Suppress single-page PENDING_CONTINUATION errors during multi-page traversal
+        for err in page_res.errors:
+            if err.get("code") == "PENDING_CONTINUATION":
+                continue
+            errors.append(err)
 
         diag = page_res.diagnostics or {}
-        p_total_pages = diag.get(f"{list_name}_total_pages")
-        p_total_entries = diag.get(f"{list_name}_total_entries")
+        p_total_pages = diag.get(f"{target_list}_total_pages")
+        p_total_entries = diag.get(f"{target_list}_total_entries")
 
         if p_total_pages is None or p_total_entries is None:
             errors.append(
@@ -897,7 +1028,7 @@ def merge_trading_xml_sold_unsold_pages(
 
         page_ids = (
             page_res.sold_item_ids
-            if list_name == "SoldList"
+            if target_list == "SoldList"
             else page_res.unsold_item_ids
         )
         for i_id in page_ids:
@@ -905,28 +1036,18 @@ def merge_trading_xml_sold_unsold_pages(
                 errors.append(
                     {
                         "code": "DUPLICATE_ITEM_ID_ACROSS_PAGES",
-                        "diagnostic": f"Item ID {i_id} repeated across {list_name} pages",
+                        "diagnostic": f"Item ID {i_id} repeated across {target_list} pages",
                     }
                 )
             seen_ids.add(i_id)
             all_ids.append(i_id)
 
-    is_truncated = False
-    if len(pages) > max_pages:
-        is_truncated = True
-        errors.append(
-            {
-                "code": "MAX_PAGES_EXCEEDED",
-                "diagnostic": f"Total XML pages {len(pages)} exceeded limit {max_pages}",
-            }
-        )
-
-    if declared_total_pages is not None and len(pages) < declared_total_pages:
+    if declared_total_pages is not None and processed_count < declared_total_pages:
         is_truncated = True
         errors.append(
             {
                 "code": "PENDING_CONTINUATION",
-                "diagnostic": f"Retrieved {len(pages)} of {declared_total_pages} declared XML pages",
+                "diagnostic": f"Retrieved {processed_count} of {declared_total_pages} declared XML pages",
             }
         )
     elif declared_total_pages is None:
@@ -947,7 +1068,7 @@ def merge_trading_xml_sold_unsold_pages(
 
     outcome = (
         SaleClassification.SOLD
-        if list_name == "SoldList"
+        if target_list == "SoldList"
         else SaleClassification.UNSOLD
     )
     listings = tuple(
@@ -961,13 +1082,19 @@ def merge_trading_xml_sold_unsold_pages(
         for i_id in sorted(seen_ids)
     )
 
-    sold_set = frozenset(seen_ids) if list_name == "SoldList" else frozenset()
-    unsold_set = frozenset(seen_ids) if list_name == "UnsoldList" else frozenset()
+    sold_set = frozenset(seen_ids) if target_list == "SoldList" else frozenset()
+    unsold_set = frozenset(seen_ids) if target_list == "UnsoldList" else frozenset()
     classified = {
-        i_id: "sold" if list_name == "SoldList" else "unsold" for i_id in seen_ids
+        i_id: "sold" if target_list == "SoldList" else "unsold" for i_id in seen_ids
     }
 
-    is_complete = len(errors) == 0 and not is_truncated
+    is_complete = (
+        len(errors) == 0
+        and not is_truncated
+        and declared_total_pages is not None
+        and declared_total_entries is not None
+    )
+
     return SoldUnsoldCollectionResult(
         listings=listings,
         sold_item_ids=sold_set,
@@ -985,6 +1112,77 @@ def merge_trading_xml_sold_unsold_pages(
     )
 
 
+def merge_trading_xml_combined_responses(
+    pages: Sequence[str | bytes | ET.Element],
+    *,
+    max_pages: int = MAX_CLASSIFICATION_PAGES,
+    window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+) -> SoldUnsoldCollectionResult:
+    """Merge multi-page Trading XML responses containing both SoldList and UnsoldList."""
+    validate_max_pages(max_pages)
+    if not pages:
+        return SoldUnsoldCollectionResult(
+            listings=(),
+            sold_item_ids=frozenset(),
+            unsold_item_ids=frozenset(),
+            selling_classification={},
+            sold_items_count=0,
+            unsold_items_count=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "NO_PAGES_PROVIDED",
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["NO_PAGES_PROVIDED"],
+                },
+            ),
+        )
+
+    sold_res = merge_trading_xml_sold_unsold_pages(
+        pages, list_name="SoldList", max_pages=max_pages, window_days=window_days
+    )
+    unsold_res = merge_trading_xml_sold_unsold_pages(
+        pages, list_name="UnsoldList", max_pages=max_pages, window_days=window_days
+    )
+
+    all_errors = [*sold_res.errors, *unsold_res.errors]
+    is_complete = sold_res.is_complete and unsold_res.is_complete
+    is_truncated = sold_res.is_truncated or unsold_res.is_truncated
+
+    # Apply sold precedence:
+    classified: dict[str, str] = {i_id: "unsold" for i_id in unsold_res.unsold_item_ids}
+    for i_id in sold_res.sold_item_ids:
+        classified[i_id] = "sold"
+
+    all_ids = set(sold_res.sold_item_ids) | set(unsold_res.unsold_item_ids)
+    listings = tuple(
+        NormalizedListingClassification(
+            item_id=i_id,
+            lifecycle_state=ListingLifecycleState.ENDED,
+            sale_classification=SaleClassification.SOLD
+            if classified.get(i_id) == "sold"
+            else SaleClassification.UNSOLD,
+            source=ClassificationSource.TRADING_XML,
+            evidence_level=ClassificationEvidence.HIGH,
+        )
+        for i_id in sorted(all_ids)
+    )
+
+    return SoldUnsoldCollectionResult(
+        listings=listings,
+        sold_item_ids=sold_res.sold_item_ids,
+        unsold_item_ids=unsold_res.unsold_item_ids,
+        selling_classification=classified,
+        sold_items_count=len(sold_res.sold_item_ids),
+        unsold_items_count=len(unsold_res.unsold_item_ids),
+        is_complete=is_complete,
+        is_truncated=is_truncated,
+        total_count=len(all_ids),
+        window_days=window_days,
+        errors=tuple(all_errors),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Modern GraphQL Listing API Normalization
 # ---------------------------------------------------------------------------
@@ -995,10 +1193,12 @@ def normalize_graphql_seller_listing_search(
 ) -> SoldUnsoldCollectionResult:
     """Normalize GraphQL sellerListingSearch ended listings payload fail-closed.
 
-    Critical rule: Ended listings are NOT automatically classified as unsold.
-    If quantitySold > 0, they are classified as SOLD.
-    If quantitySold == 0, they are classified as UNSOLD.
-    If quantitySold is None or unverified, they are classified as UNKNOWN.
+    Critical rules:
+    - Ended listings are NOT automatically classified as unsold.
+    - If quantitySold > 0, they are classified as SOLD.
+    - If quantitySold == 0 and lifecycle is ENDED, they are classified as UNSOLD.
+    - Active, scheduled, or unknown listings with quantitySold == 0 are NOT UNSOLD.
+    - Missing pagination metadata, contradictory totals, or unverified census fail-closed.
     """
     if not isinstance(payload, Mapping):
         return SoldUnsoldCollectionResult(
@@ -1114,6 +1314,18 @@ def normalize_graphql_seller_listing_search(
             errors=tuple(errors),
         )
 
+    # Check for officially documented grouped result buckets
+    buckets_to_process: list[tuple[str, Mapping[str, Any], ListingLifecycleState]] = []
+    for b_key, b_lifecycle in (
+        ("endedListings", ListingLifecycleState.ENDED),
+        ("activeListings", ListingLifecycleState.ACTIVE),
+        ("scheduledListings", ListingLifecycleState.SCHEDULED),
+    ):
+        if b_key in container and isinstance(container[b_key], Mapping):
+            buckets_to_process.append((b_key, container[b_key], b_lifecycle))
+
+    is_grouped = len(buckets_to_process) > 0
+
     declared_total = _to_int(
         container.get("total")
         if "total" in container
@@ -1122,38 +1334,29 @@ def normalize_graphql_seller_listing_search(
         else container.get("totalEntries")
     )
 
-    raw_items = (
-        container.get("items")
-        if "items" in container
-        else container.get("listings")
-        if "listings" in container
-        else container.get("edges")
+    page_info = (
+        container.get("pageInfo")
+        if isinstance(container.get("pageInfo"), Mapping)
+        else None
     )
-
-    if raw_items is None:
-        # Check if count-only query
-        if declared_total is not None and not any(
-            k in container for k in ("items", "listings", "edges")
-        ):
+    is_truncated = False
+    if page_info is not None:
+        has_next = page_info.get("hasNextPage")
+        if has_next is True:
+            is_truncated = True
             errors.append(
                 {
-                    "code": "COUNT_ONLY_QUERY",
-                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["COUNT_ONLY_QUERY"],
+                    "code": "PENDING_CONTINUATION",
+                    "diagnostic": "GraphQL collection has pending continuation (hasNextPage=True)",
                 }
             )
-            return SoldUnsoldCollectionResult(
-                listings=(),
-                sold_item_ids=frozenset(),
-                unsold_item_ids=frozenset(),
-                selling_classification={},
-                sold_items_count=0,
-                unsold_items_count=0,
-                is_complete=False,
-                is_truncated=False,
-                total_count=declared_total,
-                errors=tuple(errors),
+        elif has_next is not None and not isinstance(has_next, bool):
+            errors.append(
+                {
+                    "code": "MALFORMED_PAGE_INFO",
+                    "diagnostic": "pageInfo.hasNextPage must be boolean",
+                }
             )
-        raw_items = []
 
     listings: list[NormalizedListingClassification] = []
     sold_ids: set[str] = set()
@@ -1161,81 +1364,232 @@ def normalize_graphql_seller_listing_search(
     classified: dict[str, str] = {}
     seen_ids: set[str] = set()
 
-    for raw in raw_items:
-        node = raw.get("node") if isinstance(raw, Mapping) and "node" in raw else raw
-        if not isinstance(node, Mapping):
-            continue
-        i_id = str(node.get("itemId") or node.get("listingId") or "").strip()
-        if not i_id:
-            errors.append(
-                {
-                    "code": "MISSING_ITEM_ID",
-                    "diagnostic": "Listing record missing required itemId or listingId",
-                }
+    if is_grouped:
+        # Process each official grouped bucket independently
+        bucket_totals = 0
+        for b_name, b_data, default_lifecycle in buckets_to_process:
+            b_total = _to_int(b_data.get("total") or b_data.get("totalCount"))
+            if b_total is not None:
+                bucket_totals += b_total
+            b_items = (
+                b_data.get("items")
+                if "items" in b_data
+                else b_data.get("listings")
+                if "listings" in b_data
+                else b_data.get("edges")
+            ) or []
+            if isinstance(b_items, Sequence) and not isinstance(b_items, (str, bytes)):
+                for raw in b_items:
+                    node = (
+                        raw.get("node")
+                        if isinstance(raw, Mapping) and "node" in raw
+                        else raw
+                    )
+                    if not isinstance(node, Mapping):
+                        continue
+                    i_id = str(
+                        node.get("itemId") or node.get("listingId") or ""
+                    ).strip()
+                    if not i_id:
+                        errors.append(
+                            {
+                                "code": "MISSING_ITEM_ID",
+                                "diagnostic": f"Listing in bucket {b_name} missing required identifier",
+                            }
+                        )
+                        continue
+                    if i_id in seen_ids:
+                        errors.append(
+                            {
+                                "code": "DUPLICATE_ITEM_ID",
+                                "diagnostic": f"Duplicate item ID in bucket {b_name}: {i_id}",
+                            }
+                        )
+                    seen_ids.add(i_id)
+
+                    raw_q_sold = (
+                        node.get("quantitySold")
+                        if "quantitySold" in node
+                        and node.get("quantitySold") is not None
+                        else node.get("soldQuantity")
+                    )
+                    q_sold = _to_int(raw_q_sold)
+                    raw_q_total = (
+                        node.get("quantity")
+                        if "quantity" in node and node.get("quantity") is not None
+                        else node.get("totalQuantity")
+                    )
+                    q_total = _to_int(raw_q_total)
+                    end_time_raw = node.get("itemEndDate") or node.get("endTime")
+                    ended_at = _parse_iso_datetime(end_time_raw)
+
+                    # Classification logic for grouped buckets:
+                    if default_lifecycle == ListingLifecycleState.ENDED:
+                        if q_sold is not None and q_sold > 0:
+                            outcome = SaleClassification.SOLD
+                            evidence = ClassificationEvidence.HIGH
+                            sold_ids.add(i_id)
+                            classified[i_id] = "sold"
+                        elif q_sold is not None and q_sold == 0:
+                            outcome = SaleClassification.UNSOLD
+                            evidence = ClassificationEvidence.HIGH
+                            unsold_ids.add(i_id)
+                            classified[i_id] = "unsold"
+                        else:
+                            outcome = SaleClassification.UNKNOWN
+                            evidence = ClassificationEvidence.UNKNOWN
+                            classified[i_id] = "unknown"
+                    else:
+                        # Active or scheduled listings with 0 sold are NOT unsold
+                        outcome = SaleClassification.UNKNOWN
+                        evidence = ClassificationEvidence.LOW
+                        classified[i_id] = "unknown"
+
+                    listings.append(
+                        NormalizedListingClassification(
+                            item_id=i_id,
+                            lifecycle_state=default_lifecycle,
+                            sale_classification=outcome,
+                            source=ClassificationSource.GRAPHQL,
+                            quantity_sold=q_sold,
+                            quantity_total=q_total,
+                            ended_at=ended_at,
+                            evidence_level=evidence,
+                        )
+                    )
+        if declared_total is None and bucket_totals > 0:
+            declared_total = bucket_totals
+    else:
+        # Flat container processing
+        raw_items = (
+            container.get("items")
+            if "items" in container
+            else container.get("listings")
+            if "listings" in container
+            else container.get("edges")
+        )
+
+        if raw_items is None:
+            # Check if count-only query
+            if declared_total is not None and not any(
+                k in container for k in ("items", "listings", "edges")
+            ):
+                errors.append(
+                    {
+                        "code": "COUNT_ONLY_QUERY",
+                        "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["COUNT_ONLY_QUERY"],
+                    }
+                )
+                return SoldUnsoldCollectionResult(
+                    listings=(),
+                    sold_item_ids=frozenset(),
+                    unsold_item_ids=frozenset(),
+                    selling_classification={},
+                    sold_items_count=0,
+                    unsold_items_count=0,
+                    is_complete=False,
+                    is_truncated=False,
+                    total_count=declared_total,
+                    errors=tuple(errors),
+                )
+            raw_items = []
+
+        for raw in raw_items:
+            node = (
+                raw.get("node") if isinstance(raw, Mapping) and "node" in raw else raw
             )
-            continue
-        if i_id in seen_ids:
-            errors.append(
-                {
-                    "code": "DUPLICATE_ITEM_ID",
-                    "diagnostic": f"Duplicate item ID encountered in page: {i_id}",
-                }
+            if not isinstance(node, Mapping):
+                continue
+            i_id = str(node.get("itemId") or node.get("listingId") or "").strip()
+            if not i_id:
+                errors.append(
+                    {
+                        "code": "MISSING_ITEM_ID",
+                        "diagnostic": "Listing record missing required itemId or listingId",
+                    }
+                )
+                continue
+            if i_id in seen_ids:
+                errors.append(
+                    {
+                        "code": "DUPLICATE_ITEM_ID",
+                        "diagnostic": f"Duplicate item ID encountered in page: {i_id}",
+                    }
+                )
+            seen_ids.add(i_id)
+
+            # Strict lifecycle state mapping: NEVER default unknown status to ENDED!
+            raw_status = str(node.get("status") or "").upper().strip()
+            if raw_status in ("ENDED", "COMPLETED", "CLOSED"):
+                lifecycle = ListingLifecycleState.ENDED
+            elif raw_status in ("ACTIVE", "LIVE"):
+                lifecycle = ListingLifecycleState.ACTIVE
+            elif raw_status in ("SCHEDULED",):
+                lifecycle = ListingLifecycleState.SCHEDULED
+            else:
+                lifecycle = ListingLifecycleState.UNKNOWN
+
+            raw_q_sold = (
+                node.get("quantitySold")
+                if "quantitySold" in node and node.get("quantitySold") is not None
+                else node.get("soldQuantity")
             )
-        seen_ids.add(i_id)
-
-        # Lifecycle state
-        raw_status = str(node.get("status") or "").upper()
-        lifecycle = (
-            ListingLifecycleState.ENDED
-            if raw_status in ("ENDED", "COMPLETED", "CLOSED")
-            else ListingLifecycleState.ACTIVE
-            if raw_status in ("ACTIVE", "LIVE")
-            else ListingLifecycleState.SCHEDULED
-            if raw_status in ("SCHEDULED",)
-            else ListingLifecycleState.ENDED  # Default to ended if evaluating endedListings search
-        )
-
-        q_sold = _to_int(
-            node.get("quantitySold")
-            if "quantitySold" in node
-            else node.get("soldQuantity")
-        )
-        q_total = _to_int(
-            node.get("quantity") if "quantity" in node else node.get("totalQuantity")
-        )
-        end_time_raw = node.get("itemEndDate") or node.get("endTime")
-        ended_at = _parse_iso_datetime(end_time_raw)
-
-        # Classification outcome
-        if q_sold is not None and q_sold > 0:
-            outcome = SaleClassification.SOLD
-            evidence = ClassificationEvidence.HIGH
-            sold_ids.add(i_id)
-            classified[i_id] = "sold"
-        elif q_sold is not None and q_sold == 0:
-            outcome = SaleClassification.UNSOLD
-            evidence = ClassificationEvidence.HIGH
-            unsold_ids.add(i_id)
-            classified[i_id] = "unsold"
-        else:
-            outcome = SaleClassification.UNKNOWN
-            evidence = ClassificationEvidence.UNKNOWN
-            classified[i_id] = "unknown"
-
-        listings.append(
-            NormalizedListingClassification(
-                item_id=i_id,
-                lifecycle_state=lifecycle,
-                sale_classification=outcome,
-                source=ClassificationSource.GRAPHQL,
-                quantity_sold=q_sold,
-                quantity_total=q_total,
-                ended_at=ended_at,
-                evidence_level=evidence,
+            q_sold = _to_int(raw_q_sold)
+            raw_q_total = (
+                node.get("quantity")
+                if "quantity" in node and node.get("quantity") is not None
+                else node.get("totalQuantity")
             )
+            q_total = _to_int(raw_q_total)
+            end_time_raw = node.get("itemEndDate") or node.get("endTime")
+            ended_at = _parse_iso_datetime(end_time_raw)
+
+            # Strict classification outcome
+            if lifecycle == ListingLifecycleState.ENDED:
+                if q_sold is not None and q_sold > 0:
+                    outcome = SaleClassification.SOLD
+                    evidence = ClassificationEvidence.HIGH
+                    sold_ids.add(i_id)
+                    classified[i_id] = "sold"
+                elif q_sold is not None and q_sold == 0:
+                    outcome = SaleClassification.UNSOLD
+                    evidence = ClassificationEvidence.HIGH
+                    unsold_ids.add(i_id)
+                    classified[i_id] = "unsold"
+                else:
+                    outcome = SaleClassification.UNKNOWN
+                    evidence = ClassificationEvidence.UNKNOWN
+                    classified[i_id] = "unknown"
+            else:
+                # Active, scheduled, or unknown listings with 0 sold are NOT unsold
+                outcome = SaleClassification.UNKNOWN
+                evidence = ClassificationEvidence.LOW
+                classified[i_id] = "unknown"
+
+            listings.append(
+                NormalizedListingClassification(
+                    item_id=i_id,
+                    lifecycle_state=lifecycle,
+                    sale_classification=outcome,
+                    source=ClassificationSource.GRAPHQL,
+                    quantity_sold=q_sold,
+                    quantity_total=q_total,
+                    ended_at=ended_at,
+                    evidence_level=evidence,
+                )
+            )
+
+    # Fail-closed census checks
+    if declared_total is None and (
+        page_info is None or page_info.get("hasNextPage") is None
+    ):
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "No total count or pageInfo provided in GraphQL response to verify completeness",
+            }
         )
 
-    # Check census count
     if declared_total is not None and len(listings) != declared_total:
         errors.append(
             {
@@ -1244,7 +1598,19 @@ def normalize_graphql_seller_listing_search(
             }
         )
 
-    is_complete = len(errors) == 0
+    is_complete = (
+        len(errors) == 0
+        and not is_truncated
+        and (
+            declared_total is not None
+            or (page_info is not None and page_info.get("hasNextPage") is False)
+        )
+    )
+
+    account_id = (
+        container.get("accountId") or container.get("sellerId") or data.get("accountId")
+    )
+
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
         sold_item_ids=frozenset(sold_ids),
@@ -1253,8 +1619,9 @@ def normalize_graphql_seller_listing_search(
         sold_items_count=len(sold_ids),
         unsold_items_count=len(unsold_ids),
         is_complete=is_complete,
-        is_truncated=False,
+        is_truncated=is_truncated,
         total_count=declared_total if declared_total is not None else len(listings),
+        account_id=str(account_id) if account_id else None,
         window_days=window_days,
         errors=tuple(errors),
     )
@@ -1311,35 +1678,153 @@ def normalize_rest_fulfillment_orders(
                 )
 
     raw_orders = payload.get("orders")
-    if raw_orders is None and not errors:
-        raw_orders = []
-
     declared_total = _to_int(payload.get("total"))
+
+    if raw_orders is None:
+        if declared_total == 0:
+            raw_orders = []
+        else:
+            errors.append(
+                {
+                    "code": "MISSING_REQUIRED_CONTAINER",
+                    "diagnostic": "Missing orders array in Fulfillment API payload",
+                }
+            )
+            raw_orders = []
+
+    # Check offset pagination metadata
+    limit = _to_int(payload.get("limit"))
+    offset = _to_int(payload.get("offset"))
+    has_next_link = bool(payload.get("next"))
+    is_truncated = False
+
+    if declared_total is None:
+        errors.append(
+            {
+                "code": "UNVERIFIED_COLLECTION_CENSUS",
+                "diagnostic": "Fulfillment response missing declared total",
+            }
+        )
+
+    if has_next_link or (
+        offset is not None
+        and limit is not None
+        and declared_total is not None
+        and (offset + len(raw_orders) < declared_total)
+    ):
+        is_truncated = True
+        errors.append(
+            {
+                "code": "PENDING_CONTINUATION",
+                "diagnostic": "Fulfillment response is partial page with pending continuation",
+            }
+        )
+
+    if (
+        declared_total is not None
+        and len(raw_orders) != declared_total
+        and not is_truncated
+        and (offset == 0 or offset is None)
+    ):
+        errors.append(
+            {
+                "code": "TOTAL_RECORDS_MISMATCH",
+                "diagnostic": f"Collected {len(raw_orders)} orders but declared total is {declared_total}",
+            }
+        )
+
     sold_by_item: dict[str, int] = {}
     orders_by_item: dict[str, list[str]] = {}
+    seen_order_ids: set[str] = set()
 
     if isinstance(raw_orders, Sequence) and not isinstance(raw_orders, (str, bytes)):
         for order in raw_orders:
             if not isinstance(order, Mapping):
+                errors.append(
+                    {
+                        "code": "MALFORMED_ORDER",
+                        "diagnostic": "Order record is not a structured mapping",
+                    }
+                )
                 continue
             order_id = str(order.get("orderId") or "").strip()
-            line_items = order.get("lineItems") or []
-            if isinstance(line_items, Sequence):
-                for line in line_items:
-                    if not isinstance(line, Mapping):
-                        continue
-                    item_id = str(
-                        line.get("legacyItemId")
-                        or line.get("listingId")
-                        or line.get("itemId")
-                        or ""
-                    ).strip()
-                    if not item_id:
-                        continue
-                    qty = max(1, _to_int(line.get("quantity")) or 1)
-                    sold_by_item[item_id] = sold_by_item.get(item_id, 0) + qty
-                    if order_id:
-                        orders_by_item.setdefault(item_id, []).append(order_id)
+            if not order_id:
+                errors.append(
+                    {
+                        "code": "MALFORMED_ORDER",
+                        "diagnostic": "Order record missing orderId",
+                    }
+                )
+                continue
+            if order_id in seen_order_ids:
+                errors.append(
+                    {
+                        "code": "DUPLICATE_ORDER_ID",
+                        "diagnostic": f"Duplicate order ID in response: {order_id}",
+                    }
+                )
+            seen_order_ids.add(order_id)
+
+            # Check cancel and payment status
+            cancel_status = (
+                order.get("cancelStatus")
+                if isinstance(order.get("cancelStatus"), Mapping)
+                else {}
+            )
+            cancel_state = str(cancel_status.get("cancelState") or "").upper()
+            if cancel_state == "CANCELED":
+                # Canceled orders are not evidence of completed sales
+                continue
+
+            line_items = order.get("lineItems")
+            if not isinstance(line_items, Sequence) or not line_items:
+                errors.append(
+                    {
+                        "code": "MALFORMED_ORDER",
+                        "diagnostic": f"Order {order_id} missing line items",
+                    }
+                )
+                continue
+
+            for line in line_items:
+                if not isinstance(line, Mapping):
+                    errors.append(
+                        {
+                            "code": "MALFORMED_ORDER",
+                            "diagnostic": f"Line item in order {order_id} is not a structured mapping",
+                        }
+                    )
+                    continue
+                item_id = str(
+                    line.get("legacyItemId")
+                    or line.get("listingId")
+                    or line.get("itemId")
+                    or ""
+                ).strip()
+                if not item_id:
+                    errors.append(
+                        {
+                            "code": "MISSING_ITEM_ID",
+                            "diagnostic": f"Line item in order {order_id} missing listing identifier",
+                        }
+                    )
+                    continue
+
+                raw_qty = line.get("quantity")
+                parsed_qty = _to_int(raw_qty)
+                if parsed_qty is None or parsed_qty <= 0:
+                    errors.append(
+                        {
+                            "code": "MALFORMED_ORDER",
+                            "diagnostic": f"Line item in order {order_id} has invalid quantity {raw_qty}",
+                        }
+                    )
+                    qty = 0
+                else:
+                    qty = parsed_qty
+
+                sold_by_item[item_id] = sold_by_item.get(item_id, 0) + qty
+                orders_by_item.setdefault(item_id, []).append(order_id)
 
     listings: list[NormalizedListingClassification] = []
     sold_ids: set[str] = set(sold_by_item.keys())
@@ -1350,16 +1835,20 @@ def normalize_rest_fulfillment_orders(
         listings.append(
             NormalizedListingClassification(
                 item_id=i_id,
-                lifecycle_state=ListingLifecycleState.ENDED,
+                lifecycle_state=ListingLifecycleState.UNKNOWN,  # Order confirms sale, not that listing has ended!
                 sale_classification=SaleClassification.SOLD,
                 source=ClassificationSource.REST_FULFILLMENT,
                 quantity_sold=sold_by_item[i_id],
                 order_ids=tuple(orders_by_item.get(i_id, ())),
-                evidence_level=ClassificationEvidence.HIGH,
+                evidence_level=ClassificationEvidence.HIGH
+                if not errors and not is_truncated
+                else ClassificationEvidence.MEDIUM,
             )
         )
 
-    is_complete = len(errors) == 0
+    is_complete = len(errors) == 0 and not is_truncated and declared_total is not None
+    account_id = payload.get("accountId") or payload.get("sellerId")
+
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
         sold_item_ids=frozenset(sold_ids),
@@ -1368,16 +1857,133 @@ def normalize_rest_fulfillment_orders(
         sold_items_count=len(sold_ids),
         unsold_items_count=0,
         is_complete=is_complete,
-        is_truncated=False,
-        total_count=declared_total
-        if declared_total is not None
-        else len(raw_orders if raw_orders else []),
+        is_truncated=is_truncated,
+        total_count=declared_total if declared_total is not None else len(raw_orders),
+        account_id=str(account_id) if account_id else None,
         window_days=window_days,
         errors=tuple(errors),
         diagnostics={
-            "orders_count": len(raw_orders) if raw_orders else 0,
+            "orders_count": len(raw_orders),
             "unique_sold_items_count": len(sold_ids),
         },
+    )
+
+
+def merge_rest_fulfillment_orders_pages(
+    pages: Sequence[Mapping[str, Any]],
+    *,
+    max_pages: int = MAX_CLASSIFICATION_PAGES,
+    window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+) -> SoldUnsoldCollectionResult:
+    """Merge multi-page REST Sell Fulfillment getOrders responses fail-closed."""
+    validate_max_pages(max_pages)
+    if not pages:
+        return SoldUnsoldCollectionResult(
+            listings=(),
+            sold_item_ids=frozenset(),
+            unsold_item_ids=frozenset(),
+            selling_classification={},
+            sold_items_count=0,
+            unsold_items_count=0,
+            is_complete=False,
+            is_truncated=False,
+            errors=(
+                {
+                    "code": "NO_PAGES_PROVIDED",
+                    "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES["NO_PAGES_PROVIDED"],
+                },
+            ),
+        )
+
+    all_orders: list[Any] = []
+    errors: list[dict[str, Any]] = []
+    declared_total: int | None = None
+    expected_offset = 0
+    is_truncated = False
+    account_id: str | None = None
+
+    for page_idx, page in enumerate(pages):
+        # Enforce bounds while processing
+        if page_idx >= max_pages:
+            is_truncated = True
+            errors.append(
+                {
+                    "code": "MAX_PAGES_EXCEEDED",
+                    "diagnostic": f"Total REST pages reached limit {max_pages} while processing page {page_idx + 1}",
+                }
+            )
+            break
+
+        if not isinstance(page, Mapping):
+            errors.append(
+                {
+                    "code": "MALFORMED_PAGE",
+                    "diagnostic": f"REST page {page_idx + 1} is not a valid mapping",
+                }
+            )
+            continue
+
+        p_total = _to_int(page.get("total"))
+        p_offset = _to_int(page.get("offset")) or 0
+
+        if declared_total is None and p_total is not None:
+            declared_total = p_total
+        elif (
+            declared_total is not None
+            and p_total is not None
+            and declared_total != p_total
+        ):
+            errors.append(
+                {
+                    "code": "CONTRADICTORY_PAGINATION_TOTALS",
+                    "diagnostic": f"Declared total changed from {declared_total} to {p_total}",
+                }
+            )
+
+        if p_offset != expected_offset and page_idx > 0:
+            errors.append(
+                {
+                    "code": "PAGINATION_SEQUENCE_ERROR",
+                    "diagnostic": f"Page {page_idx + 1} offset {p_offset} did not match expected {expected_offset}",
+                }
+            )
+
+        orders_list = page.get("orders") or []
+        if isinstance(orders_list, Sequence):
+            all_orders.extend(orders_list)
+            expected_offset = p_offset + len(orders_list)
+
+        if account_id is None:
+            account_id = page.get("accountId") or page.get("sellerId")
+
+    combined_payload = {
+        "orders": all_orders,
+        "total": declared_total if declared_total is not None else len(all_orders),
+        "limit": len(all_orders),
+        "offset": 0,
+        "accountId": account_id,
+    }
+    result = normalize_rest_fulfillment_orders(
+        combined_payload, window_days=window_days
+    )
+    merged_errors = [*errors, *result.errors]
+
+    return SoldUnsoldCollectionResult(
+        listings=result.listings,
+        sold_item_ids=result.sold_item_ids,
+        unsold_item_ids=result.unsold_item_ids,
+        selling_classification=result.selling_classification,
+        sold_items_count=result.sold_items_count,
+        unsold_items_count=result.unsold_items_count,
+        is_complete=len(merged_errors) == 0
+        and not is_truncated
+        and declared_total is not None
+        and len(all_orders) == declared_total,
+        is_truncated=is_truncated or result.is_truncated,
+        total_count=declared_total if declared_total is not None else len(all_orders),
+        account_id=str(account_id) if account_id else None,
+        window_days=window_days,
+        errors=tuple(merged_errors),
     )
 
 
@@ -1392,13 +1998,39 @@ def merge_composite_modern_sold_unsold(
 ) -> SoldUnsoldCollectionResult:
     """Merge GraphQL ended listings with REST Fulfillment orders to produce composite classification.
 
-    - Ended listings with matching orders or quantitySold > 0 -> SOLD
-    - Ended listings with 0 orders and quantitySold == 0 in complete collections -> UNSOLD
-    - Incomplete collections or conflicting signals -> UNKNOWN or AMBIGUOUS (fail-closed)
+    - Conflict-aware: If GraphQL says UNSOLD and REST says SOLD -> AMBIGUOUS (fail-closed)
+    - Order-only listings retain ListingLifecycleState.UNKNOWN (an order does not prove listing ended)
+    - Confirms account identity and time-window compatibility
+    - Propagates incomplete collection states
     """
-    is_complete = graphql_result.is_complete and orders_result.is_complete
-    is_truncated = graphql_result.is_truncated or orders_result.is_truncated
     errors = [*graphql_result.errors, *orders_result.errors]
+
+    # Verify account identity matching
+    if (
+        graphql_result.account_id
+        and orders_result.account_id
+        and graphql_result.account_id != orders_result.account_id
+    ):
+        errors.append(
+            {
+                "code": "ACCOUNT_MISMATCH",
+                "diagnostic": f"GraphQL account {graphql_result.account_id} does not match orders account {orders_result.account_id}",
+            }
+        )
+
+    # Verify time-window matching
+    if graphql_result.window_days != orders_result.window_days:
+        errors.append(
+            {
+                "code": "WINDOW_MISMATCH",
+                "diagnostic": f"GraphQL window {graphql_result.window_days}d does not match orders window {orders_result.window_days}d",
+            }
+        )
+
+    is_complete = (
+        graphql_result.is_complete and orders_result.is_complete and len(errors) == 0
+    )
+    is_truncated = graphql_result.is_truncated or orders_result.is_truncated
 
     order_sold_ids = set(orders_result.sold_item_ids)
     all_item_ids = {item.item_id for item in graphql_result.listings} | order_sold_ids
@@ -1414,27 +2046,72 @@ def merge_composite_modern_sold_unsold(
         gql_item = gql_map.get(i_id)
         has_order = i_id in order_sold_ids
 
-        if has_order or (
+        # CONFLICT DETECTION: GraphQL says UNSOLD but REST order says SOLD!
+        if (
+            gql_item is not None
+            and gql_item.sale_classification == SaleClassification.UNSOLD
+            and has_order
+        ):
+            outcome = SaleClassification.AMBIGUOUS
+            classified[i_id] = "ambiguous"
+            listings.append(
+                NormalizedListingClassification(
+                    item_id=i_id,
+                    lifecycle_state=gql_item.lifecycle_state,
+                    sale_classification=outcome,
+                    source=ClassificationSource.COMPOSITE,
+                    quantity_sold=gql_item.quantity_sold,
+                    ended_at=gql_item.ended_at,
+                    evidence_level=ClassificationEvidence.LOW,
+                    notes="Contradictory evidence: GraphQL reports UNSOLD but REST reports order",
+                )
+            )
+            errors.append(
+                {
+                    "code": "MALFORMED_ORDER",
+                    "diagnostic": f"Contradictory classification for item {i_id}: GraphQL reports UNSOLD but REST reports order",
+                }
+            )
+        elif has_order:
+            outcome = SaleClassification.SOLD
+            sold_ids.add(i_id)
+            classified[i_id] = "sold"
+            # If not in GraphQL ended listings, lifecycle is UNKNOWN (not ended!)
+            lifecycle = (
+                gql_item.lifecycle_state
+                if gql_item is not None
+                else ListingLifecycleState.UNKNOWN
+            )
+            qty = gql_item.quantity_sold if gql_item and gql_item.quantity_sold else 1
+            ended_at = gql_item.ended_at if gql_item else None
+            listings.append(
+                NormalizedListingClassification(
+                    item_id=i_id,
+                    lifecycle_state=lifecycle,
+                    sale_classification=outcome,
+                    source=ClassificationSource.COMPOSITE,
+                    quantity_sold=qty,
+                    ended_at=ended_at,
+                    evidence_level=ClassificationEvidence.HIGH
+                    if orders_result.is_complete
+                    else ClassificationEvidence.MEDIUM,
+                )
+            )
+        elif (
             gql_item is not None
             and gql_item.sale_classification == SaleClassification.SOLD
         ):
             outcome = SaleClassification.SOLD
             sold_ids.add(i_id)
             classified[i_id] = "sold"
-            qty = (
-                (gql_item.quantity_sold or 0)
-                if gql_item and gql_item.quantity_sold
-                else 1
-            )
-            ended_at = gql_item.ended_at if gql_item else None
             listings.append(
                 NormalizedListingClassification(
                     item_id=i_id,
-                    lifecycle_state=ListingLifecycleState.ENDED,
+                    lifecycle_state=gql_item.lifecycle_state,
                     sale_classification=outcome,
                     source=ClassificationSource.COMPOSITE,
-                    quantity_sold=qty,
-                    ended_at=ended_at,
+                    quantity_sold=gql_item.quantity_sold or 1,
+                    ended_at=gql_item.ended_at,
                     evidence_level=ClassificationEvidence.HIGH,
                 )
             )
@@ -1443,18 +2120,27 @@ def merge_composite_modern_sold_unsold(
             and gql_item.sale_classification == SaleClassification.UNSOLD
             and not has_order
         ):
-            outcome = SaleClassification.UNSOLD
-            unsold_ids.add(i_id)
-            classified[i_id] = "unsold"
+            # Only confirm UNSOLD if both collections are verified complete
+            if graphql_result.is_complete and orders_result.is_complete:
+                outcome = SaleClassification.UNSOLD
+                unsold_ids.add(i_id)
+                classified[i_id] = "unsold"
+                ev = ClassificationEvidence.HIGH
+            else:
+                # Incomplete collections: absence of order cannot prove unsold!
+                outcome = SaleClassification.UNKNOWN
+                classified[i_id] = "unknown"
+                ev = ClassificationEvidence.LOW
+
             listings.append(
                 NormalizedListingClassification(
                     item_id=i_id,
-                    lifecycle_state=ListingLifecycleState.ENDED,
+                    lifecycle_state=gql_item.lifecycle_state,
                     sale_classification=outcome,
                     source=ClassificationSource.COMPOSITE,
                     quantity_sold=0,
                     ended_at=gql_item.ended_at,
-                    evidence_level=ClassificationEvidence.HIGH,
+                    evidence_level=ev,
                 )
             )
         else:
@@ -1463,10 +2149,12 @@ def merge_composite_modern_sold_unsold(
             listings.append(
                 NormalizedListingClassification(
                     item_id=i_id,
-                    lifecycle_state=ListingLifecycleState.ENDED,
+                    lifecycle_state=gql_item.lifecycle_state
+                    if gql_item
+                    else ListingLifecycleState.UNKNOWN,
                     sale_classification=outcome,
                     source=ClassificationSource.COMPOSITE,
-                    evidence_level=ClassificationEvidence.LOW,
+                    evidence_level=ClassificationEvidence.UNKNOWN,
                 )
             )
 
@@ -1480,6 +2168,7 @@ def merge_composite_modern_sold_unsold(
         is_complete=is_complete and len(errors) == 0,
         is_truncated=is_truncated,
         total_count=len(all_item_ids),
+        account_id=graphql_result.account_id or orders_result.account_id,
         window_days=window_days,
         errors=tuple(errors),
     )
@@ -1495,7 +2184,9 @@ def _compare_single_field(
 ) -> tuple[str, str | None]:
     """Compare a single field between XML baseline and candidate snapshot."""
     if xml_val is None and cand_val is None:
-        return PARITY_EXACT_MATCH, None
+        if field_name in ("quantity_sold", "ended_at"):
+            return PARITY_UNSUPPORTED, "Field not provided in baseline Trading XML"
+        return PARITY_UNVERIFIED, "Field absent in both baseline and candidate"
     if xml_val is not None and cand_val is None:
         return (
             PARITY_MISSING_FIELD,
@@ -1588,14 +2279,24 @@ def compare_sold_unsold_snapshots(
         PARITY_UNSUPPORTED: 0,
     }
 
-    # Fail-closed check: if either is incomplete or truncated or has errors
+    # Fail-closed check: if either is incomplete or truncated or has errors or window mismatch
+    window_mismatch = xml_snapshot.window_days != candidate_snapshot.window_days
+    all_errors = [*xml_snapshot.errors, *candidate_snapshot.errors]
+    if window_mismatch:
+        all_errors.append(
+            {
+                "code": "WINDOW_MISMATCH",
+                "diagnostic": f"Window days mismatch: baseline={xml_snapshot.window_days}d, candidate={candidate_snapshot.window_days}d",
+            }
+        )
+
     is_inconclusive = (
         not xml_snapshot.is_complete
         or not candidate_snapshot.is_complete
         or xml_snapshot.is_truncated
         or candidate_snapshot.is_truncated
-        or len(xml_snapshot.errors) > 0
-        or len(candidate_snapshot.errors) > 0
+        or len(all_errors) > 0
+        or window_mismatch
     )
 
     if is_inconclusive:
@@ -1622,10 +2323,7 @@ def compare_sold_unsold_snapshots(
                 "unsold_items_count": candidate_snapshot.unsold_items_count,
                 "total_listings": len(candidate_snapshot.listings),
             },
-            "errors": [
-                *xml_snapshot.errors,
-                *candidate_snapshot.errors,
-            ],
+            "errors": all_errors,
         }
 
     # 1. Compare aggregate count and set fields

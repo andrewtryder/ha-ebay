@@ -22,6 +22,7 @@ from custom_components.ebay.parsers.sold_unsold_parity import (
     PARITY_DIFFERENT_SEMANTICS,
     PARITY_EXACT_MATCH,
     PARITY_MISSING_FIELD,
+    PARITY_UNSUPPORTED,
     PARITY_UNVERIFIED,
     SOLD_UNSOLD_CONTRACT_PROBES,
     ClassificationEvidence,
@@ -30,11 +31,14 @@ from custom_components.ebay.parsers.sold_unsold_parity import (
     NormalizedListingClassification,
     SaleClassification,
     SoldUnsoldCollectionResult,
+    _compare_single_field,
     _is_safe_item_pseudonym,
     _parse_iso_datetime,
     _resolve_safe_field_comparison_note,
     compare_sold_unsold_snapshots,
     merge_composite_modern_sold_unsold,
+    merge_rest_fulfillment_orders_pages,
+    merge_trading_xml_combined_responses,
     merge_trading_xml_sold_unsold_pages,
     normalize_graphql_seller_listing_search,
     normalize_rest_fulfillment_orders,
@@ -736,10 +740,10 @@ def test_cli_run_offline_custom_fixtures(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_async_run_live_validation_fails_closed_without_auth() -> None:
-    """Live validation helper fails closed if unauthenticated."""
+    """Live validation helper reports NOT_IMPLEMENTED because GraphQL schema entitlement is unverified."""
     res = await cli_harness.async_run_live_validation(None, max_pages=10)
     assert res["overall_status"] == "inconclusive"
-    assert any(e["code"] == "UNAUTHENTICATED" for e in res["errors"])
+    assert any(e["code"] == "NOT_IMPLEMENTED" for e in res["errors"])
 
 
 def test_cli_validate_max_pages_parser() -> None:
@@ -1198,3 +1202,541 @@ def test_cli_main_output_file(tmp_path: Path) -> None:
     assert out_file.exists()
     content = out_file.read_text(encoding="utf-8")
     assert "# Sold & Unsold Listing Classification Parity Report" in content
+
+
+# ---------------------------------------------------------------------------
+# Adversarial Regression Tests for Review 5720203171 Hardening
+# ---------------------------------------------------------------------------
+
+
+def test_graphql_grouped_buckets_and_strict_lifecycle() -> None:
+    """GraphQL sellerListingSearch grouped buckets must parse correctly with strict lifecycle mapping."""
+    payload = {
+        "data": {
+            "sellerListingSearch": {
+                "activeListings": {
+                    "total": 1,
+                    "items": [
+                        {
+                            "itemId": "110000000010",
+                            "status": "ACTIVE",
+                            "quantity": 5,
+                            "quantitySold": 0,  # Active listing with 0 sold is NOT unsold!
+                        }
+                    ],
+                },
+                "scheduledListings": {
+                    "total": 1,
+                    "items": [
+                        {
+                            "itemId": "110000000011",
+                            "status": "SCHEDULED",
+                            "quantity": 1,
+                            "quantitySold": 0,  # Scheduled listing with 0 sold is NOT unsold!
+                        }
+                    ],
+                },
+                "endedListings": {
+                    "total": 2,
+                    "items": [
+                        {
+                            "itemId": "110000000012",
+                            "status": "ENDED",
+                            "quantity": 1,
+                            "quantitySold": 1,  # Sold
+                        },
+                        {
+                            "itemId": "110000000013",
+                            "status": "ENDED",
+                            "quantity": 1,
+                            "quantitySold": 0,  # Unsold
+                        },
+                    ],
+                },
+            }
+        }
+    }
+    res = normalize_graphql_seller_listing_search(payload)
+    assert res.is_complete is True
+    # Verify active and scheduled are NOT classified as unsold
+    assert res.selling_classification["110000000010"] == "unknown"
+    assert res.selling_classification["110000000011"] == "unknown"
+    assert res.selling_classification["110000000012"] == "sold"
+    assert res.selling_classification["110000000013"] == "unsold"
+    assert res.sold_items_count == 1
+    assert res.unsold_items_count == 1
+
+
+def test_graphql_census_completeness_and_malformed_page_info() -> None:
+    """GraphQL collection must fail-closed if census metadata or pageInfo is missing/malformed."""
+    # Missing total and missing pageInfo
+    payload_no_census = {
+        "data": {
+            "sellerListingSearch": {
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                    }
+                ],
+            }
+        }
+    }
+    res = normalize_graphql_seller_listing_search(payload_no_census)
+    assert res.is_complete is False
+    assert any(e["code"] == "UNVERIFIED_COLLECTION_CENSUS" for e in res.errors)
+
+    # hasNextPage is True -> incomplete pending continuation
+    payload_pending = {
+        "data": {
+            "sellerListingSearch": {
+                "pageInfo": {"hasNextPage": True},
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                    }
+                ],
+            }
+        }
+    }
+    res_pending = normalize_graphql_seller_listing_search(payload_pending)
+    assert res_pending.is_complete is False
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res_pending.errors)
+
+    # hasNextPage is non-boolean
+    payload_malformed_pageinfo = {
+        "data": {
+            "sellerListingSearch": {
+                "pageInfo": {"hasNextPage": "true"},
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                    }
+                ],
+            }
+        }
+    }
+    res_malformed = normalize_graphql_seller_listing_search(payload_malformed_pageinfo)
+    assert res_malformed.is_complete is False
+    assert any(e["code"] == "MALFORMED_PAGE_INFO" for e in res_malformed.errors)
+
+
+def test_rest_fulfillment_orders_census_cancellation_and_invalid_quantity() -> None:
+    """REST fulfillment orders must check census completeness, ignore canceled orders, and reject invalid quantity."""
+    # total declares 10 orders, but payload only provides 1
+    payload_pending = {
+        "total": 10,
+        "limit": 50,
+        "offset": 0,
+        "orders": [
+            {
+                "orderId": "ord-1",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-1",
+                        "legacyItemId": "110000000001",
+                        "quantity": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    res_pending = normalize_rest_fulfillment_orders(payload_pending)
+    assert res_pending.is_complete is False
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res_pending.errors)
+
+    # total > 0 but orders container missing
+    payload_missing_orders = {"total": 5, "limit": 50, "offset": 0}
+    res_missing = normalize_rest_fulfillment_orders(payload_missing_orders)
+    assert res_missing.is_complete is False
+    assert any(e["code"] == "MISSING_REQUIRED_CONTAINER" for e in res_missing.errors)
+
+    # Canceled orders must not count as confirmed sales
+    payload_canceled = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "orders": [
+            {
+                "orderId": "ord-canceled",
+                "cancelStatus": {"cancelState": "CANCELED"},
+                "lineItems": [
+                    {
+                        "lineItemId": "li-1",
+                        "legacyItemId": "110000000001",
+                        "quantity": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    res_canceled = normalize_rest_fulfillment_orders(payload_canceled)
+    assert res_canceled.sold_items_count == 0
+    assert len(res_canceled.listings) == 0
+
+    # Duplicate order IDs
+    payload_dup = {
+        "total": 2,
+        "limit": 50,
+        "offset": 0,
+        "orders": [
+            {
+                "orderId": "dup-ord",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-1",
+                        "legacyItemId": "110000000001",
+                        "quantity": 1,
+                    }
+                ],
+            },
+            {
+                "orderId": "dup-ord",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-2",
+                        "legacyItemId": "110000000002",
+                        "quantity": 1,
+                    }
+                ],
+            },
+        ],
+    }
+    res_dup = normalize_rest_fulfillment_orders(payload_dup)
+    assert any(e["code"] == "DUPLICATE_ORDER_ID" for e in res_dup.errors)
+
+    # Invalid non-integer or <= 0 quantity in line item must not default to 1
+    payload_invalid_qty = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "orders": [
+            {
+                "orderId": "ord-bad-qty",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-1",
+                        "legacyItemId": "110000000001",
+                        "quantity": -5,
+                    }
+                ],
+            }
+        ],
+    }
+    res_invalid_qty = normalize_rest_fulfillment_orders(payload_invalid_qty)
+    assert any(e["code"] == "MALFORMED_ORDER" for e in res_invalid_qty.errors)
+    assert res_invalid_qty.listings[0].quantity_sold == 0
+
+
+def test_rest_fulfillment_orders_multi_page_merger() -> None:
+    """REST fulfillment multi-page merger must enforce 25-page cap, offset sequence, and consistent totals."""
+    # Respects 25-page max and halts while processing
+    pages = [
+        {
+            "total": 30,
+            "limit": 1,
+            "offset": i,
+            "orders": [
+                {
+                    "orderId": f"ord-{i}",
+                    "lineItems": [
+                        {
+                            "lineItemId": f"li-{i}",
+                            "legacyItemId": f"1100000000{i:02d}",
+                            "quantity": 1,
+                        }
+                    ],
+                }
+            ],
+        }
+        for i in range(26)
+    ]
+    res_merged = merge_rest_fulfillment_orders_pages(pages, max_pages=25)
+    assert res_merged.is_truncated is True
+    assert res_merged.is_complete is False
+    assert any(e["code"] == "MAX_PAGES_EXCEEDED" for e in res_merged.errors)
+    assert len(res_merged.listings) == 25
+
+    # Out of order offset sequencing
+    bad_sequence = [pages[0], pages[2]]  # Skipped page 1 (offset 1)
+    res_seq = merge_rest_fulfillment_orders_pages(bad_sequence, max_pages=25)
+    assert any(e["code"] == "PAGINATION_SEQUENCE_ERROR" for e in res_seq.errors)
+
+    # Contradictory total declared
+    p1 = {"total": 50, "limit": 10, "offset": 0, "orders": []}
+    p2 = {"total": 60, "limit": 10, "offset": 10, "orders": []}
+    res_contra = merge_rest_fulfillment_orders_pages([p1, p2], max_pages=25)
+    assert any(
+        e["code"] == "CONTRADICTORY_PAGINATION_TOTALS" for e in res_contra.errors
+    )
+
+
+def test_composite_modern_sold_unsold_contradictions_and_accounts() -> None:
+    """Composite merger detects contradictions (UNSOLD vs SOLD) -> AMBIGUOUS, and enforces account/window parity."""
+    # Contradiction: GraphQL says ENDED + quantitySold == 0 (UNSOLD), but REST order reports confirmed sale!
+    gql_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "accountId": "seller_1",
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                    }
+                ],
+            }
+        }
+    }
+    gql_res = normalize_graphql_seller_listing_search(gql_payload, window_days=60)
+
+    orders_payload = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "accountId": "seller_1",
+        "orders": [
+            {
+                "orderId": "ord-conflict",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-1",
+                        "legacyItemId": "110000000001",
+                        "quantity": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    orders_res = normalize_rest_fulfillment_orders(orders_payload, window_days=60)
+
+    comp = merge_composite_modern_sold_unsold(gql_res, orders_res, window_days=60)
+    assert comp.selling_classification["110000000001"] == "ambiguous"
+    assert comp.listings[0].sale_classification == SaleClassification.AMBIGUOUS
+    assert comp.listings[0].evidence_level == ClassificationEvidence.LOW
+    assert any(e["code"] == "MALFORMED_ORDER" for e in comp.errors)
+
+    # Order-only item: item exists in orders but was not found in GraphQL search
+    # Must retain lifecycle UNKNOWN (never forced to ENDED, because GTC listings remain active)
+    orders_only_payload = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "orders": [
+            {
+                "orderId": "ord-active-gtc",
+                "lineItems": [
+                    {
+                        "lineItemId": "li-2",
+                        "legacyItemId": "110000000099",
+                        "quantity": 1,
+                    }
+                ],
+            }
+        ],
+    }
+    orders_only_res = normalize_rest_fulfillment_orders(orders_only_payload)
+    empty_gql = normalize_graphql_seller_listing_search(
+        {"data": {"sellerListingSearch": {"total": 0, "items": []}}}
+    )
+    comp_order_only = merge_composite_modern_sold_unsold(empty_gql, orders_only_res)
+    assert comp_order_only.selling_classification["110000000099"] == "sold"
+    assert comp_order_only.listings[0].lifecycle_state == ListingLifecycleState.UNKNOWN
+
+    # Account mismatch between GraphQL and REST
+    gql_acc_a = normalize_graphql_seller_listing_search(
+        {
+            "data": {
+                "sellerListingSearch": {
+                    "total": 0,
+                    "accountId": "seller_alpha",
+                    "items": [],
+                }
+            }
+        }
+    )
+    orders_acc_b = normalize_rest_fulfillment_orders(
+        {"total": 0, "accountId": "seller_beta", "orders": []}
+    )
+    comp_acc_mismatch = merge_composite_modern_sold_unsold(gql_acc_a, orders_acc_b)
+    assert any(e["code"] == "ACCOUNT_MISMATCH" for e in comp_acc_mismatch.errors)
+    assert comp_acc_mismatch.is_complete is False
+
+    # Window mismatch between GraphQL and REST
+    gql_w60 = normalize_graphql_seller_listing_search(
+        {"data": {"sellerListingSearch": {"total": 0, "items": []}}},
+        window_days=60,
+    )
+    orders_w90 = normalize_rest_fulfillment_orders(
+        {"total": 0, "orders": []}, window_days=90
+    )
+    comp_win_mismatch = merge_composite_modern_sold_unsold(
+        gql_w60, orders_w90, window_days=60
+    )
+    assert any(e["code"] == "WINDOW_MISMATCH" for e in comp_win_mismatch.errors)
+    assert comp_win_mismatch.is_complete is False
+
+
+def test_trading_xml_baseline_false_completeness_and_bounds() -> None:
+    """Trading XML parser must reject missing containers, unverified single-page pagination, and enforce 25-page bounds."""
+    # Single page declaring TotalNumberOfPages=2 -> PENDING_CONTINUATION
+    xml_multi_page = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <SoldList>
+        <PaginationResult>
+          <TotalNumberOfPages>2</TotalNumberOfPages>
+          <TotalNumberOfEntries>2</TotalNumberOfEntries>
+        </PaginationResult>
+        <ItemArray>
+          <Item><ItemID>110000000001</ItemID><QuantitySold>1</QuantitySold></Item>
+        </ItemArray>
+      </SoldList>
+      <UnsoldList>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>0</TotalNumberOfEntries>
+        </PaginationResult>
+      </UnsoldList>
+    </GetMyeBaySellingResponse>"""
+    res_pending = normalize_trading_xml_sold_unsold(xml_multi_page)
+    assert res_pending.is_complete is False
+    assert any(e["code"] == "PENDING_CONTINUATION" for e in res_pending.errors)
+
+    # Combined mode missing UnsoldList
+    xml_missing_unsold = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <SoldList>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+        <ItemArray>
+          <Item><ItemID>110000000001</ItemID><QuantitySold>1</QuantitySold></Item>
+        </ItemArray>
+      </SoldList>
+    </GetMyeBaySellingResponse>"""
+    res_missing_unsold = normalize_trading_xml_sold_unsold(
+        xml_missing_unsold, requested_list="both"
+    )
+    assert res_missing_unsold.is_complete is False
+    assert any(
+        e["code"] == "MISSING_REQUIRED_CONTAINER" for e in res_missing_unsold.errors
+    )
+
+    # Missing PaginationResult
+    xml_no_pagination = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <SoldList>
+        <ItemArray>
+          <Item><ItemID>110000000001</ItemID><QuantitySold>1</QuantitySold></Item>
+        </ItemArray>
+      </SoldList>
+      <UnsoldList />
+    </GetMyeBaySellingResponse>"""
+    res_no_pag = normalize_trading_xml_sold_unsold(xml_no_pagination)
+    assert res_no_pag.is_complete is False
+    assert any(e["code"] == "MISSING_PAGINATION_METADATA" for e in res_no_pag.errors)
+
+    # 26 pages provided to merge_trading_xml_sold_unsold_pages -> bounded at 25 while processing
+    page_template = """<?xml version="1.0" encoding="utf-8"?>
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <SoldList>
+        <PaginationResult>
+          <TotalNumberOfPages>30</TotalNumberOfPages>
+          <TotalNumberOfEntries>30</TotalNumberOfEntries>
+        </PaginationResult>
+        <ItemArray>
+          <Item><ItemID>1100000000{idx:02d}</ItemID><QuantitySold>1</QuantitySold></Item>
+        </ItemArray>
+      </SoldList>
+    </GetMyeBaySellingResponse>"""
+    many_pages = [page_template.format(idx=i) for i in range(26)]
+    res_25_cap = merge_trading_xml_sold_unsold_pages(
+        many_pages, list_name="sold", max_pages=25
+    )
+    assert res_25_cap.is_truncated is True
+    assert res_25_cap.is_complete is False
+    assert any(e["code"] == "MAX_PAGES_EXCEEDED" for e in res_25_cap.errors)
+    assert len(res_25_cap.listings) == 25
+
+    # merge_trading_xml_combined_responses merges sold and unsold snapshots
+    combined_page = cli_harness.get_synthetic_sold_unsold_xml()
+    combined_snap = merge_trading_xml_combined_responses([combined_page])
+    assert combined_snap.is_complete is True
+    assert combined_snap.sold_items_count == 1
+    assert combined_snap.unsold_items_count == 2
+
+
+def test_parity_engine_unsupported_fields_and_window_mismatch() -> None:
+    """Parity engine must report PARITY_UNSUPPORTED for baseline-omitted fields and fail-closed on window mismatch."""
+    status, note = _compare_single_field("quantity_sold", None, None)
+    assert status == PARITY_UNSUPPORTED
+    assert note == "Field not provided in baseline Trading XML"
+
+    status_end, note_end = _compare_single_field("ended_at", None, None)
+    assert status_end == PARITY_UNSUPPORTED
+    assert note_end == "Field not provided in baseline Trading XML"
+
+    # Window mismatch in snapshot comparison
+    snap_xml = normalize_trading_xml_sold_unsold(
+        cli_harness.get_synthetic_sold_unsold_xml(), window_days=60
+    )
+    snap_cand = merge_composite_modern_sold_unsold(
+        normalize_graphql_seller_listing_search(
+            cli_harness.get_synthetic_graphql_ended_listings(), window_days=90
+        ),
+        normalize_rest_fulfillment_orders(
+            cli_harness.get_synthetic_rest_fulfillment_orders(), window_days=90
+        ),
+        window_days=90,
+    )
+    cmp_res = compare_sold_unsold_snapshots(snap_xml, snap_cand)
+    assert cmp_res["is_inconclusive"] is True
+    assert any(e["code"] == "WINDOW_MISMATCH" for e in cmp_res["errors"])
+
+
+def test_cli_fixture_strictness_and_live_flag(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """CLI must reject partial fixture configurations and exit 1 for live mode."""
+    xml_file = tmp_path / "dummy.xml"
+    xml_file.write_text("<xml/>", encoding="utf-8")
+
+    # Providing only --xml-fixture without graphql and orders fixtures
+    ret = cli_harness.main(["--xml-fixture", str(xml_file)])
+    assert ret == 1
+    err_msg = capsys.readouterr().err
+    assert "all three fixtures must be provided" in err_msg
+
+    # Providing non-existent fixture path
+    non_existent = tmp_path / "missing.json"
+    ret_missing = cli_harness.main(
+        [
+            "--xml-fixture",
+            str(xml_file),
+            "--graphql-fixture",
+            str(non_existent),
+            "--orders-fixture",
+            str(xml_file),
+        ]
+    )
+    assert ret_missing == 1
+    err_missing = capsys.readouterr().err
+    assert "Fixture file not found" in err_missing
+
+    # Passing --live reports NOT_IMPLEMENTED and exits 1
+    ret_live = cli_harness.main(["--live"])
+    assert ret_live == 1
+    captured = capsys.readouterr().out
+    assert "NOT_IMPLEMENTED" in captured

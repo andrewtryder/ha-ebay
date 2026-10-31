@@ -38,7 +38,6 @@ if str(REPO_ROOT) not in sys.path:
 from custom_components.ebay.parsers.sold_unsold_parity import (  # noqa: E402
     MAX_CLASSIFICATION_PAGES,
     SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
-    SoldUnsoldCollectionResult,
     compare_sold_unsold_snapshots,
     merge_composite_modern_sold_unsold,
     normalize_graphql_seller_listing_search,
@@ -234,8 +233,8 @@ async def async_run_live_validation(
         "field_comparisons": {},
         "errors": [
             {
-                "code": "UNAUTHENTICATED",
-                "diagnostic": "Live validation requires authenticated eBay session context",
+                "code": "NOT_IMPLEMENTED",
+                "diagnostic": "Live validation is not implemented because GraphQL sellerListingSearch schema entitlement is unverified. Use offline fixtures (--xml-fixture, --graphql-fixture, --orders-fixture) or --synthetic-demo.",
             }
         ],
     }
@@ -326,38 +325,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_all_sold_unsold_contract_probes()
 
     if args.xml_fixture or args.graphql_fixture or args.orders_fixture:
-        xml_snapshot: SoldUnsoldCollectionResult
-        if args.xml_fixture and args.xml_fixture.is_file():
-            xml_snapshot = normalize_trading_xml_sold_unsold(
-                args.xml_fixture.read_text(encoding="utf-8"),
-                window_days=args.window_days,
+        if not (args.xml_fixture and args.graphql_fixture and args.orders_fixture):
+            sys.stderr.write(
+                "Error: When using custom fixtures, all three fixtures must be provided: "
+                "--xml-fixture, --graphql-fixture, and --orders-fixture. "
+                "Partial fixture input with synthetic substitution is rejected.\n"
             )
-        else:
-            xml_snapshot = normalize_trading_xml_sold_unsold(
-                get_synthetic_sold_unsold_xml(), window_days=args.window_days
-            )
+            return 1
 
-        gql_snapshot: SoldUnsoldCollectionResult
-        if args.graphql_fixture and args.graphql_fixture.is_file():
-            gql_data = json.loads(args.graphql_fixture.read_text(encoding="utf-8"))
-            gql_snapshot = normalize_graphql_seller_listing_search(
-                gql_data, window_days=args.window_days
-            )
-        else:
-            gql_snapshot = normalize_graphql_seller_listing_search(
-                get_synthetic_graphql_ended_listings(), window_days=args.window_days
-            )
+        for fixture_path, label in (
+            (args.xml_fixture, "--xml-fixture"),
+            (args.graphql_fixture, "--graphql-fixture"),
+            (args.orders_fixture, "--orders-fixture"),
+        ):
+            if not fixture_path.is_file():
+                sys.stderr.write(
+                    f"Error: Fixture file not found for {label}: {fixture_path}\n"
+                )
+                return 1
 
-        orders_snapshot: SoldUnsoldCollectionResult
-        if args.orders_fixture and args.orders_fixture.is_file():
-            orders_data = json.loads(args.orders_fixture.read_text(encoding="utf-8"))
-            orders_snapshot = normalize_rest_fulfillment_orders(
-                orders_data, window_days=args.window_days
-            )
-        else:
-            orders_snapshot = normalize_rest_fulfillment_orders(
-                get_synthetic_rest_fulfillment_orders(), window_days=args.window_days
-            )
+        xml_snapshot = normalize_trading_xml_sold_unsold(
+            args.xml_fixture.read_text(encoding="utf-8"),
+            window_days=args.window_days,
+        )
+        gql_data = json.loads(args.graphql_fixture.read_text(encoding="utf-8"))
+        gql_snapshot = normalize_graphql_seller_listing_search(
+            gql_data, window_days=args.window_days
+        )
+        orders_data = json.loads(args.orders_fixture.read_text(encoding="utf-8"))
+        orders_snapshot = normalize_rest_fulfillment_orders(
+            orders_data, window_days=args.window_days
+        )
 
         candidate = merge_composite_modern_sold_unsold(
             gql_snapshot, orders_snapshot, window_days=args.window_days

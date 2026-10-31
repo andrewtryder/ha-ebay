@@ -43,21 +43,30 @@ In the current production architecture, Home Assistant polls seller listings usi
 
 ### 3.1 GraphQL `sellerListingSearch` (Ended Listings) **[OFFICIALLY DOCUMENTED]** **[OFFLINE TESTED]** **[LIVE UNVERIFIED]**
 
-The eBay GraphQL seller listing search API provides candidate queries for ended seller listings:
-- **Operation / Field**: `sellerListingSearch(status: [ENDED], range: ...)`
+The eBay GraphQL seller listing search API provides candidate queries for seller listings:
+- **Operation / Field**: `sellerListingSearch`
+- **Result Structure**: Responses may return a flat list or officially documented grouped buckets:
+  - `endedListings`: Listings whose listing period has elapsed or was ended early.
+  - `activeListings`: Currently active listings available for purchase.
+  - `scheduledListings`: Listings scheduled to start at a future time.
 - **Key Fields**:
   - `itemId` / `listingId`: Listing identifier.
   - `status`: Lifecycle state (`ENDED`, `COMPLETED`, `CLOSED`, `ACTIVE`, `SCHEDULED`).
   - `quantitySold`: Number of items sold.
   - `quantity`: Total listing quantity.
   - `itemEndDate` / `endTime`: Listing end timestamp (ISO 8601).
+- **Classification Rules**:
+  - A listing with `quantitySold == 0` is classified as `UNSOLD` **only** when its lifecycle state is positively verified as `ENDED`.
+  - Active, scheduled, or unknown lifecycle listings with `quantitySold == 0` are never classified as unsold.
+  - If a GraphQL ended listing reports `quantitySold == 0` (claiming unsold) but REST Fulfillment reports a confirmed completed order for that same listing, the candidate outcome is marked as `AMBIGUOUS` with an error diagnostic rather than silently accepting either source.
 
 ### 3.2 REST Sell Fulfillment API `getOrders` **[OFFICIALLY DOCUMENTED]** **[REPOSITORY VERIFIED]** **[LIVE VERIFIED]**
 
 The eBay REST Sell Fulfillment API provides authoritative order details for sales:
 - **Endpoint**: `GET /sell/fulfillment/v1/order`
 - **Scopes**: `https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly` or `sell.fulfillment`
-- **Pagination Contract**: Uses **limit/offset pagination** (`limit` query parameter, max 50; `offset` query parameter, integer), returning `total: int`, `href`, `next`, and `prev`.
+- **Pagination Contract**: Uses **limit/offset pagination** (`limit` query parameter, default 50, maximum 200; `offset` query parameter, integer), returning `total: int`, `href`, `next`, and `prev`.
+- **Date Window Support**: When no date filter is provided, the API defaults to orders created within the last 90 days. Using ISO timestamp range filters (`creationdate`, `lastmodifieddate`), historical orders can be retrieved for up to 2 years (730 days) in the past.
 
 ---
 
@@ -79,7 +88,7 @@ To prevent architectural and data-integrity defects, the following seven misconc
 - **Correction**: **False**. An order's status describes logistical fulfillment (`NOT_STARTED`, `IN_PROGRESS`, `FULFILLED`) or payment status (`PAID`). A listing's sale outcome describes whether an eBay listing resulted in a sale (`SOLD`) or concluded without selling (`UNSOLD`). An order may be cancelled or refunded post-sale while the underlying listing remains classified as sold in historical reporting.
 
 ### Misconception 5: "Legacy classification and REST Fulfillment use identical date windows"
-- **Correction**: **False**. Legacy Trading XML `GetMyeBaySelling` enforces a strict 60-day window (`DurationInDays=60`). The REST Fulfillment API accepts arbitrary ISO timestamp filters (`creationdate`, `lastmodifieddate`) up to 90 days. Date windows must be strictly aligned during parity comparisons.
+- **Correction**: **False**. Legacy Trading XML `GetMyeBaySelling` enforces a configurable duration window (typically 60 days, up to 90 days via `DurationInDays`). The REST Fulfillment API defaults to 90 days when unfiltered and supports historical queries up to 2 years (730 days) using ISO date filters. Date windows must be strictly aligned during parity comparisons to prevent false divergences.
 
 ### Misconception 6: "SKU inventory records can be substituted for verified eBay listing ItemIDs"
 - **Correction**: **False**. The eBay Sell Inventory API uses merchant-defined SKUs, which are optional and do not map 1:1 to eBay listing ItemIDs (especially for multi-variation listings or sellers who do not use Inventory API). Legacy Home Assistant sensors and events are keyed on numeric `ItemID`.

@@ -120,7 +120,7 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 ### 8. Sold & Unsold Listing Classification Modernization (Milestone 7)
 - **Authoritative API Research & Contract Discovery**:
   - Researched modern eBay data sources for sold and unsold listing classification: GraphQL `sellerListingSearch(status: [ENDED])` candidate probes vs. REST Sell Fulfillment API `getOrders` (`GET /sell/fulfillment/v1/order`).
-  - Corrected official documentation: REST Sell Fulfillment API uses limit/offset pagination with `limit` (max 50) and `offset` query parameters, returning an integer `total`, rather than cursor-based pagination.
+  - Corrected official documentation: REST Sell Fulfillment API uses limit/offset pagination with `limit` (default 50, max 200) and `offset` query parameters, returning an integer `total`, rather than cursor-based pagination. Default lookback is 90 days, with historical retrieval up to 2 years via ISO date filters.
   - Established critical operational boundary: Ended listings in GraphQL `sellerListingSearch` are **not** automatically classified as unsold; an ended listing can be sold (auction win or fixed-price purchase) or unsold (ended without sales). Only `quantitySold == 0` confirms unsold status, while `quantitySold > 0` confirms sold status.
   - Identified REST Sell Fulfillment limitation: `getOrders` only captures completed sales (line items mapped to `legacyItemId`); it generates zero records for unsold listings, so orders alone cannot verify unsold inventory.
   - Designed composite modern model merging GraphQL ended listings with REST Sell Fulfillment orders for complete outcome classification.
