@@ -287,6 +287,15 @@ class RestClientMixin:
             persisted_token["expires_in"] = expires_in
             persisted_token["expires_at"] = time.time() + expires_in
 
+        if hasattr(self._oauth_session, "token"):
+            if isinstance(self._oauth_session.token, dict):
+                self._oauth_session.token.update(persisted_token)
+            else:
+                try:
+                    self._oauth_session.token = persisted_token
+                except AttributeError:
+                    pass
+
         hass = getattr(self._oauth_session, "hass", None)
         config_entry = getattr(self._oauth_session, "config_entry", None)
         config_entries = getattr(hass, "config_entries", None)
@@ -300,6 +309,7 @@ class RestClientMixin:
                 data={**getattr(config_entry, "data", {}), "token": persisted_token},
             )
 
+        self._store_access_token(persisted_token)
         return str(persisted_token["access_token"])
 
     async def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
@@ -384,10 +394,13 @@ class RestClientMixin:
                     accept_language=accept_language,
                     deadline=deadline,
                 )
-            except EbayAuthError:
+            except EbayAuthError as exc:
                 if not auth_refreshed and (attempt + 1 < max_attempts):
                     auth_refreshed = True
-                    self._clear_access_token()
+                    rejected_token = getattr(exc, "failed_token", None) or getattr(
+                        self, "_access_token", None
+                    )
+                    await self.async_refresh_access_token(failed_token=rejected_token)
                     if time.monotonic() < deadline:
                         continue
                 raise
@@ -535,7 +548,8 @@ class RestClientMixin:
                     # 401 MUST raise EbayAuthError immediately to allow outer auth refresh.
                     # Never multiply retries here.
                     raise EbayAuthError(
-                        f"eBay REST auth failed with HTTP {response.status}"
+                        f"eBay REST auth failed with HTTP {response.status}",
+                        failed_token=access_token,
                     )
                 if response.status == 204:
                     return {}

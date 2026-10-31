@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import time
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import xml.etree.ElementTree as ET
 
 import aiohttp
+from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 import pytest
 
 from custom_components.ebay.api import (
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
+    EbayAuthTransientError,
     EbayPartialFailure,
 )
 from custom_components.ebay.clients.resilience import (
@@ -27,6 +30,10 @@ from custom_components.ebay.coordinator import EbayDataUpdateCoordinator
 from custom_components.ebay.diagnostics import async_get_config_entry_diagnostics
 from custom_components.ebay.events import EbayEventMixin
 from custom_components.ebay.oauth2 import EbayOAuth2Implementation
+from custom_components.ebay.oauth_errors import (
+    OAuth2TokenRequestReauthError,
+    OAuth2TokenRequestTransientError,
+)
 from custom_components.ebay.parsers.xml import _rate_limit_error
 
 
@@ -1414,6 +1421,351 @@ async def test_multiple_concurrent_requests_share_token_refresh() -> None:
     )
     assert res1 == {"result": "ok"}
     assert res2 == {"result": "ok"}
+    assert refresh_count == 1
+    assert client.async_refresh_access_token.await_count == 1
+
+
+# ==============================================================================
+# OAuth 401 Forced Token Refresh and Deduplication Tests
+# ==============================================================================
+
+
+class _MockConfigEntry:
+    def __init__(self, token: dict[str, Any]) -> None:
+        self.data = {"token": dict(token)}
+        self.entry_id = "test_entry_id"
+        self.reauth_started = False
+
+    def async_start_reauth_if_available(self, hass: Any) -> None:
+        self.reauth_started = True
+
+    def async_start_reauth(self, hass: Any) -> None:
+        self.reauth_started = True
+
+
+class _MockImplementation:
+    def __init__(self, refresh_return: dict[str, Any] | None = None) -> None:
+        self.refresh_calls: list[dict[str, Any]] = []
+        self.refresh_return = refresh_return or {
+            "access_token": "fresh_access_token",
+            "expires_in": 7200,
+        }
+        self.side_effect: Exception | None = None
+
+    async def async_refresh_token(self, token: dict[str, Any]) -> dict[str, Any]:
+        self.refresh_calls.append(dict(token))
+        if self.side_effect:
+            raise self.side_effect
+        return self.refresh_return
+
+
+class _MockHass:
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        self.config_entries = Mock()
+        self.config_entries.async_update_entry = Mock()
+
+
+def _build_oauth_client(
+    initial_access_token: str = "initial_rejected_token",
+    expires_in_future: float = 3600.0,
+    session: Any = None,
+    retry_policy: BoundedRetryPolicy | None = None,
+) -> tuple[EbayApiClient, _MockImplementation, _MockConfigEntry]:
+    """Create an EbayApiClient configured with an OAuth2Session."""
+    token_dict = {
+        "access_token": initial_access_token,
+        "refresh_token": "valid_refresh_token",
+        "expires_at": time.time() + expires_in_future,
+    }
+    mock_entry = _MockConfigEntry(token_dict)
+    mock_impl = _MockImplementation()
+    mock_hass = _MockHass()
+    oauth_session = OAuth2Session(mock_hass, mock_entry, mock_impl)
+
+    client = EbayApiClient(
+        session or Mock(),
+        environment="production",
+        client_id="test_client_id",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="valid_refresh_token",
+        site_id="0",
+        oauth_session=oauth_session,
+        retry_policy=retry_policy,
+    )
+    return client, mock_impl, mock_entry
+
+
+@pytest.mark.asyncio
+async def test_rest_401_valid_by_expiry_forces_refresh_and_replays() -> None:
+    """REST HTTP 401 forces OAuth token refresh on valid-by-expiry token and replays request."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="tok_401")
+    recorded_headers: list[dict[str, str]] = []
+
+    def _mock_get(url: str, **kwargs: Any) -> _FakeContext:
+        headers = dict(kwargs.get("headers") or {})
+        recorded_headers.append(headers)
+        if headers.get("Authorization") == "Bearer tok_401":
+            return _FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+        return _FakeContext(_FakeResponse(status=200, json_payload={"status": "ok"}))
+
+    client._session.get = Mock(side_effect=_mock_get)
+
+    res = await client._async_rest_get(
+        "https://api.ebay.com/test", partial_category="orders"
+    )
+    assert res == {"status": "ok"}
+    assert len(mock_impl.refresh_calls) == 1
+    assert mock_impl.refresh_calls[0]["access_token"] == "tok_401"
+    assert len(recorded_headers) == 2
+    assert recorded_headers[0]["Authorization"] == "Bearer tok_401"
+    assert recorded_headers[1]["Authorization"] == "Bearer fresh_access_token"
+
+
+@pytest.mark.asyncio
+async def test_trading_401_valid_by_expiry_forces_refresh_and_replays() -> None:
+    """Trading HTTP 401 forces OAuth token refresh on valid-by-expiry token and replays request."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="tok_401")
+    recorded_headers: list[dict[str, str]] = []
+
+    def _mock_post(url: str, **kwargs: Any) -> _FakeContext:
+        headers = dict(kwargs.get("headers") or {})
+        recorded_headers.append(headers)
+        if headers.get("X-EBAY-API-IAF-TOKEN") == "tok_401":
+            return _FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+        return _FakeContext(
+            _FakeResponse(
+                status=200,
+                text='<?xml version="1.0" encoding="utf-8"?><GetOrdersResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack></GetOrdersResponse>',
+            )
+        )
+
+    client._session.post = Mock(side_effect=_mock_post)
+
+    root = await client.async_call_trading_api("GetOrders", "<GetOrdersRequest/>")
+    assert root.tag.endswith("GetOrdersResponse")
+    assert len(mock_impl.refresh_calls) == 1
+    assert mock_impl.refresh_calls[0]["access_token"] == "tok_401"
+    assert len(recorded_headers) == 2
+    assert recorded_headers[0]["X-EBAY-API-IAF-TOKEN"] == "tok_401"
+    assert recorded_headers[1]["X-EBAY-API-IAF-TOKEN"] == "fresh_access_token"
+
+
+@pytest.mark.asyncio
+async def test_trading_auth_ack_failure_forces_refresh_and_replays() -> None:
+    """Trading Ack=Failure with auth error code forces OAuth token refresh and replays."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="tok_ack_fail")
+    recorded_headers: list[dict[str, str]] = []
+
+    def _mock_post(url: str, **kwargs: Any) -> _FakeContext:
+        headers = dict(kwargs.get("headers") or {})
+        recorded_headers.append(headers)
+        if headers.get("X-EBAY-API-IAF-TOKEN") == "tok_ack_fail":
+            return _FakeContext(
+                _FakeResponse(
+                    status=200,
+                    text=(
+                        '<?xml version="1.0" encoding="utf-8"?>'
+                        '<GetOrdersResponse xmlns="urn:ebay:apis:eBLBaseComponents">'
+                        "<Ack>Failure</Ack>"
+                        "<Errors><ErrorCode>931</ErrorCode><ShortMessage>Auth token is invalid</ShortMessage></Errors>"
+                        "</GetOrdersResponse>"
+                    ),
+                )
+            )
+        return _FakeContext(
+            _FakeResponse(
+                status=200,
+                text='<?xml version="1.0" encoding="utf-8"?><GetOrdersResponse xmlns="urn:ebay:apis:eBLBaseComponents"><Ack>Success</Ack></GetOrdersResponse>',
+            )
+        )
+
+    client._session.post = Mock(side_effect=_mock_post)
+
+    root = await client.async_call_trading_api("GetOrders", "<GetOrdersRequest/>")
+    assert root.tag.endswith("GetOrdersResponse")
+    assert len(mock_impl.refresh_calls) == 1
+    assert mock_impl.refresh_calls[0]["access_token"] == "tok_ack_fail"
+    assert len(recorded_headers) == 2
+    assert recorded_headers[0]["X-EBAY-API-IAF-TOKEN"] == "tok_ack_fail"
+    assert recorded_headers[1]["X-EBAY-API-IAF-TOKEN"] == "fresh_access_token"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rest_401_requests_deduplicate_under_lock() -> None:
+    """Multiple concurrent requests encountering 401 execute exactly one OAuth token refresh."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="tok_shared_401")
+
+    # Add slight latency to simulated token exchange
+    original_refresh = mock_impl.async_refresh_token
+
+    async def _slow_refresh(token: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(0.02)
+        return await original_refresh(token)
+
+    mock_impl.async_refresh_token = _slow_refresh  # type: ignore[method-assign]
+
+    def _mock_get(url: str, **kwargs: Any) -> _FakeContext:
+        headers = dict(kwargs.get("headers") or {})
+        if headers.get("Authorization") == "Bearer tok_shared_401":
+            return _FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+        return _FakeContext(_FakeResponse(status=200, json_payload={"result": url}))
+
+    client._session.get = Mock(side_effect=_mock_get)
+
+    results = await asyncio.gather(
+        client._async_rest_get("https://api.ebay.com/test1", partial_category="test"),
+        client._async_rest_get("https://api.ebay.com/test2", partial_category="test"),
+        client._async_rest_get("https://api.ebay.com/test3", partial_category="test"),
+    )
+    assert len(results) == 3
+    assert all("result" in r for r in results)
+    # Crucial assertion: exactly 1 refresh was performed across all concurrent requests
+    assert len(mock_impl.refresh_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_subsequent_request_reuses_refreshed_token() -> None:
+    """Following a successful token refresh, subsequent requests reuse the new token."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="tok_initial")
+
+    def _mock_get(url: str, **kwargs: Any) -> _FakeContext:
+        headers = dict(kwargs.get("headers") or {})
+        if headers.get("Authorization") == "Bearer tok_initial":
+            return _FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+        return _FakeContext(_FakeResponse(status=200, json_payload={"status": "ok"}))
+
+    client._session.get = Mock(side_effect=_mock_get)
+
+    # First request: encounters 401 and refreshes
+    await client._async_rest_get(
+        "https://api.ebay.com/test1", partial_category="orders"
+    )
+    assert len(mock_impl.refresh_calls) == 1
+
+    # Second request: immediately uses fresh_access_token without refreshing
+    res2 = await client._async_rest_get(
+        "https://api.ebay.com/test2", partial_category="orders"
+    )
+    assert res2 == {"status": "ok"}
+    assert len(mock_impl.refresh_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_401_transient_refresh_failure_halts_immediately() -> None:
+    """Transient token refresh failure raises EbayAuthTransientError without endpoint retry."""
+    client, mock_impl, _ = _build_oauth_client(
+        initial_access_token="tok_transient_fail"
+    )
+    mock_impl.side_effect = OAuth2TokenRequestTransientError(
+        domain="ebay", request_info=MagicMock()
+    )
+
+    client._session.get = Mock(
+        return_value=_FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+    )
+
+    with pytest.raises(EbayAuthTransientError):
+        await client._async_rest_get(
+            "https://api.ebay.com/test", partial_category="orders"
+        )
+
+    # Failed refresh halts immediately: endpoint called only once
+    assert client._session.get.call_count == 1
+    assert len(mock_impl.refresh_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_trading_401_reauth_failure_triggers_reauth_and_halts() -> None:
+    """Permanent token refresh failure raises EbayAuthError, starts reauth, and halts."""
+    client, mock_impl, mock_entry = _build_oauth_client(
+        initial_access_token="tok_reauth_fail"
+    )
+    mock_impl.side_effect = OAuth2TokenRequestReauthError(
+        domain="ebay", request_info=MagicMock()
+    )
+
+    client._session.post = Mock(
+        return_value=_FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+    )
+
+    with pytest.raises(EbayAuthError, match="OAuth token refresh failed"):
+        await client.async_call_trading_api("GetOrders", "<GetOrdersRequest/>")
+
+    # Endpoint called only once
+    assert client._session.post.call_count == 1
+    assert len(mock_impl.refresh_calls) == 1
+    assert mock_entry.reauth_started is True
+
+
+@pytest.mark.asyncio
+async def test_http_403_never_triggers_refresh_in_rest_or_trading() -> None:
+    """HTTP 403 Forbidden strictly executes zero retries and zero token refreshes."""
+    client, mock_impl, _ = _build_oauth_client(initial_access_token="valid_tok")
+
+    # REST 403
+    client._session.get = Mock(
+        return_value=_FakeContext(_FakeResponse(status=403, text="Forbidden"))
+    )
+    with pytest.raises(EbayPartialFailure):
+        await client._async_rest_get(
+            "https://api.ebay.com/test", partial_category="orders"
+        )
+    assert len(mock_impl.refresh_calls) == 0
+    assert client._session.get.call_count == 1
+
+    # Trading 403
+    client._session.post = Mock(
+        return_value=_FakeContext(_FakeResponse(status=403, text="Forbidden"))
+    )
+    with pytest.raises(EbayApiError) as exc_info:
+        await client.async_call_trading_api("GetOrders", "<GetOrdersRequest/>")
+    assert exc_info.value.status == 403
+    assert len(mock_impl.refresh_calls) == 0
+    assert client._session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_401_on_exhausted_attempt_budget_halts_without_refresh() -> None:
+    """HTTP 401 on the final attempt budget halts without refresh or exceeded attempts."""
+    # max_retries=0 allows only 1 attempt
+    policy = BoundedRetryPolicy(max_retries=0)
+    client, mock_impl, _ = _build_oauth_client(
+        initial_access_token="tok_budget_exhausted",
+        retry_policy=policy,
+    )
+
+    # REST on 401 with max_retries=0 (attempt=0 is already attempt+1 == max_attempts)
+    client._session.get = Mock(
+        return_value=_FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+    )
+    with pytest.raises(EbayAuthError):
+        await client._async_rest_get(
+            "https://api.ebay.com/test", partial_category="orders"
+        )
+    assert len(mock_impl.refresh_calls) == 0
+    assert client._session.get.call_count == 1
+
+    # Trading on 401 with max_retries=0
+    client._session.post = Mock(
+        return_value=_FakeContext(_FakeResponse(status=401, text="Unauthorized"))
+    )
+    with pytest.raises(EbayAuthError):
+        await client.async_call_trading_api("GetOrders", "<GetOrdersRequest/>")
+    assert len(mock_impl.refresh_calls) == 0
+    assert client._session.post.call_count == 1
+
+
+def test_ebay_auth_error_privacy_and_token_attribute() -> None:
+    """EbayAuthError retains failed_token attribute while never leaking it in str or repr."""
+    secret = "v^1.1#i^1#r^1#I^3#f^0#p^3#r^1#t^Ul4xMF82OkREQ0M2"
+    err = EbayAuthError("eBay REST auth failed with HTTP 401", failed_token=secret)
+
+    assert err.failed_token == secret
+    assert secret not in str(err)
+    assert secret not in repr(err)
+    assert repr(err) == "EbayAuthError('eBay REST auth failed with HTTP 401')"
 
 
 # ==============================================================================

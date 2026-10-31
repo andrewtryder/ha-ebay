@@ -85,10 +85,13 @@ class TradingClientMixin:
                 return await self._async_call_trading_api_once(
                     call_name, xml_body, deadline=deadline
                 )
-            except EbayAuthError:
+            except EbayAuthError as exc:
                 if not auth_refreshed and (attempt + 1 < max_attempts):
                     auth_refreshed = True
-                    self._clear_access_token()
+                    rejected_token = getattr(exc, "failed_token", None) or getattr(
+                        self, "_access_token", None
+                    )
+                    await self.async_refresh_access_token(failed_token=rejected_token)
                     if time.monotonic() < deadline:
                         continue
                 raise
@@ -185,7 +188,10 @@ class TradingClientMixin:
                         page,
                         _duration_ms(start),
                     )
-                    raise EbayAuthError("eBay Trading API auth failed with HTTP 401")
+                    raise EbayAuthError(
+                        "eBay Trading API auth failed with HTTP 401",
+                        failed_token=access_token,
+                    )
                 if response.status == 403:
                     _LOGGER.debug(
                         "Trading API call forbidden call=%s page=%s status=403 duration_ms=%.1f",
@@ -257,7 +263,10 @@ class TradingClientMixin:
                     status=429,
                 )
             if _auth_like_error(root):
-                raise EbayAuthError(f"eBay Trading API returned Ack={ack!r}")
+                raise EbayAuthError(
+                    f"eBay Trading API returned Ack={ack!r}",
+                    failed_token=access_token,
+                )
             raise EbayApiError(f"eBay Trading API returned Ack={ack!r}")
         if ack == "Warning":
             self._api_warnings.extend(extract_trading_warnings(root))
