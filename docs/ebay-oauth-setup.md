@@ -208,11 +208,16 @@ exchange and creates the integration entry.
 
 ## Multiple eBay accounts
 
-A configuration is unique by environment and Client ID. Only one eBay account
-can therefore be configured for a given developer application credential set.
+As of Milestone 9, **you can configure multiple distinct eBay accounts using the same eBay developer application keyset**. You do not need to register separate developer applications on eBay to monitor additional accounts.
 
-To monitor another eBay account, create a separate eBay developer application
-and configure it with a different Client ID.
+To add another account:
+1. Go to **Settings → Devices & services → Add integration** and select **eBay**.
+2. Enter the same **App ID**, **Cert ID**, and **RuName** as your existing entry.
+3. When the eBay sign-in and consent page appears in your browser, sign in with your **other** regular eBay account and grant access.
+4. Home Assistant verifies the account's durable identifier (`EIASToken`) and creates a separate, completely isolated `ConfigEntry` (e.g. `eBay (second_seller)`).
+
+> [!NOTE]
+> If eBay does not return a durable `EIASToken` for an account or the account identity is ambiguous, setup will fail closed (`account_ambiguous`) to protect your installation from duplicate or conflicted entries. Authorizing the exact same account twice will safely abort with `already_configured`.
 
 ## Manual authorization fallback
 
@@ -257,3 +262,17 @@ codes, and OAuth state values as confidential.
 The screenshots in this guide are cropped and redacted. Do not publish your own
 screenshots until all application identifiers, account names, email addresses,
 tokens, codes, and personal Home Assistant URLs have been removed.
+
+---
+
+## Architectural Context: Why BYO Developer Credentials?
+
+Users often ask why the integration requires setting up an eBay Developers Program account instead of offering a one-click "Connect eBay" button.
+
+As documented in [`docs/one-click-oauth-architecture.md`](one-click-oauth-architecture.md), eBay OAuth 2.0 requires an application-level Client Secret (Cert ID) for token exchange and does not support public-client PKCE. Distributing a shared client secret in an open-source HACS integration is strictly prohibited by the eBay API License Agreement and creates severe security and rate-limiting risks for all users.
+
+The Bring-Your-Own (BYO) credentials pattern ensures that:
+1. Each Home Assistant installation possesses its own isolated 5,000 call/day rate limit.
+2. No central server or third party has custody of your eBay tokens or account activity.
+3. Your credentials and tokens reside exclusively on your local Home Assistant instance.
+4. Multiple distinct eBay accounts can be securely authorized under the same keyset (Milestone 9).
