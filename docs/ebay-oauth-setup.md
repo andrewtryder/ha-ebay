@@ -39,11 +39,12 @@ eBay test accounts and test data.
 
 1. Go to **Settings → Devices & services**.
 2. Select **Add integration** and search for **eBay**.
-3. Home Assistant displays the setup screen with your OAuth callback URL and credential fields.
-4. Copy the OAuth callback URL displayed on the setup screen and leave the window open.
+3. Home Assistant displays the initial setup screen:
+   - **Start guided setup (Recommended)**: Walks you through obtaining your developer keys, registering Home Assistant's callback URL, and getting your RuName.
+   - **Enter credentials directly**: If you already have your App ID, Cert ID, and RuName from a previous setup or another eBay account, choose this option to proceed directly to the credentials form.
 
-You will paste that exact callback URL into the eBay developer portal. Do not
-substitute your Home Assistant local URL or external URL.
+> [!TIP]
+> You supply your eBay developer application keys, **not legacy user tokens or developer test tokens**. Home Assistant exchanges and refreshes your account tokens automatically.
 
 ## 2. Sign in to the eBay Developers Program
 
@@ -53,36 +54,13 @@ Open the application keys page:
 https://developer.ebay.com/my/keys
 ```
 
-Sign in with your eBay Developers Program account. Register for the program
+Sign in with your eBay Developers Program account. Register for the free program
 first if you do not already have an account.
 
 ![eBay Developers Program sign-in page](images/ebay-oauth/01-developer-sign-in.webp)
 
-This developer account can be different from the regular eBay account you will
-authorize later.
-
-## OAuth scopes
-
-Initial authorization requests only the **core** eBay API scope used for buying
-and selling telemetry (Trading API).
-
-Optional seller-operation modules request additional scopes when enabled:
-
-- `sell.analytics.readonly` — Sell Analytics views and seller standards
-- `sell.fulfillment.readonly` — orders and fulfillment
-- `sell.payment.dispute` (GET-only in this integration; no `.readonly` variant)
-- `commerce.feedback` (GET-only in this integration; `.readonly` is Client Credential Grant only)
-- `commerce.message` (GET-only in this integration; no `.readonly` variant)
-
-Enabling a module that needs scopes you have not granted yet starts
-reauthorization for the full set required by currently enabled features.
-Disabling a feature stops its API calls but does not revoke granted scopes.
-Missing optional scopes are reported as partial failures; the rest of the
-integration keeps working.
-
-Existing installations that already granted the full scope set continue to
-work without reauthorization.
-
+This developer account owns the application keys and can be distinct from the
+regular eBay buyer or seller account you will authorize later.
 
 ## 3. Create or open an application keyset
 
@@ -108,80 +86,66 @@ Home Assistant does not use the **Dev ID**.
 > Do not mix Production credentials with the Sandbox environment, or Sandbox
 > credentials with the Production environment.
 
-## 4. Open the eBay sign-in settings
+## 4. Configure eBay Redirect URL and RuName
 
-On the same application keys page, find:
+In the guided wizard's **Configure eBay redirect URL (RuName)** screen, Home Assistant
+displays your exact runtime callback URL (e.g. `https://my.home-assistant.io/redirect/oauth`).
+
+1. On the eBay Application Keys page, scroll down to:
 
 ```text
 Get a Token from eBay via Your Application
 ```
 
-Under **Your eBay Sign-in Settings**, select **Add eBay Redirect URL** or expand
-an existing redirect configuration.
+2. Under **Your eBay Sign-in Settings**, select **Add eBay Redirect URL** or expand
+   an existing redirect configuration.
 
 ![eBay sign-in settings showing the RuName and OAuth status](images/ebay-oauth/03-redirect-runame.webp)
 
-Use these settings:
-
-- Select **OAuth**, not **Auth'n'Auth**.
-- Set **Display Title** to a recognizable name such as `Home Assistant`.
-- If eBay requests a privacy-policy URL, a personal self-hosted installation
-  may use:
-
-```text
-https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md
-```
-
-Use your own privacy-policy URL if you deploy the integration as part of another
-service or under different terms.
-
-The **Display Title** is only a label. It is not the RuName and it is not the
-callback URL.
-
-## 5. Register the Home Assistant callback URL
-
-Paste the callback URL from Home Assistant into both fields:
-
-- **Your auth accepted URL**
-- **Your auth declined URL**
+3. Configure the redirect settings:
+   - Select **OAuth**, not **Auth'n'Auth**.
+   - Set **Display Title** to a recognizable name such as `Home Assistant`.
+   - If eBay requests a privacy-policy URL, you may use:
+     `https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md`
+   - Paste the exact Home Assistant callback URL into **both** fields:
+     - **Your auth accepted URL**
+     - **Your auth declined URL**
 
 ![eBay redirect configuration showing the accepted and declined URL fields](images/ebay-oauth/04-redirect-fields.webp)
 
-The screenshot shows a common Home Assistant callback URL. Always use the exact
-value shown by your Home Assistant setup flow.
+4. Select **Save**. eBay saves the redirect and generates your unique **RuName**
+   (eBay Redirect URL name).
 
-Select **Save**. eBay then assigns a **RuName** to this redirect configuration.
-Copy the generated RuName; it normally appears as a long hyphenated identifier.
+Copy the generated RuName. Note the critical distinctions:
+- **Display Title**: a human-readable label (`Home Assistant`). It is NOT your RuName.
+- **Callback URL**: the browser return URL supplied by Home Assistant (`https://my.home-assistant.io/redirect/oauth`).
+- **RuName**: the long hyphenated identifier generated by eBay after saving.
 
-The three values are different:
+## 5. Enter application credentials in Home Assistant
 
-- **Display Title**: a human-readable label
-- **Callback URL**: the URL supplied by Home Assistant
-- **RuName**: the identifier generated by eBay after the redirect is saved
-
-The callback is used only during authorization and reauthorization. Normal
-operation does not require SSH, a tunnel, port forwarding, or public inbound
-access to Home Assistant.
-
-## 6. Enter the application credentials in Home Assistant
-
-Return to the Home Assistant setup window and enter:
+In the **Enter eBay application keys** form, enter your credentials:
 
 | Home Assistant field | Value |
 | --- | --- |
-| eBay environment | The environment selected on the eBay keys page |
+| eBay environment | The environment selected on the eBay keys page (Production or Sandbox) |
 | App ID / Client ID | The App ID from that environment's keyset |
 | Cert ID / Client secret | The Cert ID from the same keyset |
 | RuName | The generated eBay Redirect URL name |
 | eBay marketplace | Select your marketplace (default: eBay United States) |
 
+The integration automatically trims leading and trailing whitespace from every field
+and validates that:
+- You have not pasted a URL or Display Title into the RuName field.
+- You have not pasted an RuName or URL into the App ID / Client ID field.
+- All required fields are present.
+
+If validation fails, your validly entered keys are preserved in the form so you do not
+need to re-enter them.
+
 Leave **Manual authorization (troubleshooting fallback)** unchecked for standard
 automatic setup.
 
-Continue after checking that all three eBay identifiers came from the same
-Production or Sandbox configuration.
-
-## 7. Authorize the regular eBay account
+## 6. Authorize the regular eBay account
 
 Home Assistant opens eBay's authorization page. Sign in with the regular eBay
 account whose buying, watching, bidding, or selling activity you want to
@@ -195,7 +159,7 @@ create the application.
 > Here** in the developer portal. That creates a developer test token and is not
 > the Home Assistant authorization flow.
 
-## 8. Link the browser back to Home Assistant
+## 7. Link the browser back to Home Assistant
 
 After eBay authorization, the browser may display the Home Assistant linking
 page.

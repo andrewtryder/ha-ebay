@@ -172,4 +172,18 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Confirmed eBay OAuth mandates RuName for `redirect_uri` and Basic Auth with client secret for token exchange; PKCE is not supported for public client token exchange.
   - Documented that OAuth grants and refresh tokens are non-transferable across developer keysets.
   - Preserved 100% of Milestone 9 multi-account guarantees (`EIASToken`, 3-state equivalence, atomic reauthorization).
-  - Milestone status: **Architecture assessment completed; zero production cutover.** Next planned workstream: **Guided BYO Onboarding Wizard Implementation (Milestone 10.1 Feature PR) / Milestone 11 (Reliability, Quotas, & Compatibility Hardening)**.
+  - Milestone status: **Architecture assessment completed; merged in PR #104 (`ea03ca5`).**
+
+### 12. Guided BYO eBay OAuth Onboarding Implementation (Milestone 10.1)
+- **Guided Setup Experience & Wizard Navigation**:
+  - Implemented structured native Home Assistant config flow sequence in [`custom_components/ebay/config_flow.py`](../custom_components/ebay/config_flow.py):
+    - `async_step_user`: Presents welcome screen explaining user-owned developer keysets, Production vs Sandbox, and Dev ID exclusion, offering a choice between guided setup and direct credential entry.
+    - `async_step_redirect_guidance`: Displays dynamic runtime callback URLs via `async_get_ebay_callback_url(hass)` (`https://my.home-assistant.io/redirect/oauth`), clearly distinguishing Display Title from RuName and detailing accepted/declined redirect configuration in eBay's portal.
+    - `async_step_credentials`: Streamlined credential form with automatic whitespace trimming across all fields, format validation rejecting URLs and display titles in RuName, and format validation rejecting URLs or RuNames in Client ID.
+    - Reauthorization bypass: `SOURCE_REAUTH` bypasses introductory guidance and redirect steps, pre-filling known keys while strictly enforcing EIASToken identity continuity.
+  - Backward compatibility: Preserved `async_step_automatic`, `async_step_prepare_application`, and `async_step_authorization_method` entry points.
+- **Safety, Isolation & Verification**:
+  - Maintained 100% of Milestone 9 multi-account identity guarantees: durable `EIASToken` verification, 3-state account equivalence (`SAME`, `DIFFERENT`, `UNKNOWN`), duplicate prevention (`already_configured`), and ambiguous identity protection (`account_ambiguous`).
+  - Preserved validly entered credentials upon form validation failures.
+  - Automatic token management: 2-hour access token renewal and 18-month refresh token cycles; users never copy or paste legacy Auth'n'Auth tokens.
+  - Milestone status: **Implementation completed with extensive tests and documentation on branch `feat/ebay-guided-oauth-onboarding`.** Next planned workstream: **Milestone 11 (Reliability, Quotas, & Compatibility Hardening)**.
