@@ -494,6 +494,23 @@ class NormalizedListingClassification:
 
 
 @dataclass(frozen=True)
+class ProviderVerificationEvidence:
+    """Explicit external proof of identity, time-window bounding, and API entitlement.
+
+    Offline fixtures and self-reported response fields NEVER automatically confer verification.
+    """
+
+    account_verified: bool = False
+    verified_account_id: str | None = None
+    window_verified: bool = False
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
+    window_filter_field: str | None = None
+    api_entitlement_verified: bool = False
+    provenance_source: str = "unverified_offline"
+
+
+@dataclass(frozen=True)
 class SoldUnsoldCollectionResult:
     """Normalized snapshot of sold and unsold listings across a time window."""
 
@@ -510,6 +527,9 @@ class SoldUnsoldCollectionResult:
     account_verified: bool = False
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS
     window_verified: bool = False
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
+    entitlement_verified: bool = False
     reconciliation_ready: bool = False
     errors: tuple[dict[str, Any], ...] = ()
     diagnostics: dict[str, Any] = field(default_factory=dict)
@@ -603,6 +623,7 @@ def normalize_trading_xml_sold_unsold(
     *,
     requested_list: str = "both",
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+    evidence: ProviderVerificationEvidence | None = None,
 ) -> SoldUnsoldCollectionResult:
     """Normalize a single-page Trading XML GetMyeBaySelling (SoldList/UnsoldList) response."""
     if isinstance(root_or_xml, (str, bytes)):
@@ -883,6 +904,35 @@ def normalize_trading_xml_sold_unsold(
     )
     is_complete = not has_errors and not is_truncated and has_expected_containers
 
+    account_verified = False
+    window_verified = False
+    entitlement_verified = False
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
+    account_id: str | None = None
+
+    if evidence is not None:
+        if evidence.account_verified and evidence.verified_account_id:
+            account_verified = True
+            account_id = evidence.verified_account_id
+        if evidence.window_verified:
+            window_start_utc = evidence.window_start_utc
+            window_end_utc = evidence.window_end_utc
+            window_verified = (
+                window_start_utc is not None
+                and window_end_utc is not None
+                and is_complete
+            )
+        entitlement_verified = bool(evidence.api_entitlement_verified)
+
+    reconciliation_ready = (
+        is_complete
+        and account_verified
+        and window_verified
+        and entitlement_verified
+        and len(errors) == 0
+    )
+
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
         sold_item_ids=frozenset(sold_ids_list),
@@ -893,7 +943,14 @@ def normalize_trading_xml_sold_unsold(
         is_complete=is_complete,
         is_truncated=is_truncated,
         total_count=len(all_ids),
+        account_id=account_id,
+        account_verified=account_verified,
         window_days=window_days,
+        window_verified=window_verified,
+        window_start_utc=window_start_utc,
+        window_end_utc=window_end_utc,
+        entitlement_verified=entitlement_verified,
+        reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
         diagnostics=diag_info,
     )
@@ -1193,6 +1250,7 @@ def normalize_graphql_seller_listing_search(
     payload: Mapping[str, Any] | None,
     *,
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+    trust_evidence: ProviderVerificationEvidence | None = None,
 ) -> SoldUnsoldCollectionResult:
     """Normalize GraphQL sellerListingSearch ended listings payload fail-closed.
 
@@ -1703,27 +1761,89 @@ def normalize_graphql_seller_listing_search(
     account_id = (
         container.get("accountId") or container.get("sellerId") or data.get("accountId")
     )
-    account_verified = bool(account_id)
-    has_ended = any(
-        item.lifecycle_state == ListingLifecycleState.ENDED for item in listings
-    )
-    window_verified = (
-        not is_truncated
-        and not any(
-            err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
-            for err in errors
-        )
-        and (
-            not has_ended
-            or all(
-                item.ended_at is not None
-                for item in listings
-                if item.lifecycle_state == ListingLifecycleState.ENDED
-            )
-        )
-    )
+    observed_account_id = str(account_id) if account_id else None
+
+    # Strict provenance verification: never self-certify from payload fields!
+    account_verified = False
+    window_verified = False
+    entitlement_verified = False
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
+
+    if trust_evidence is not None:
+        # 1. Account verification requires external proof matching observed ID (if present)
+        if trust_evidence.account_verified and trust_evidence.verified_account_id:
+            if (
+                observed_account_id
+                and observed_account_id != trust_evidence.verified_account_id
+            ):
+                errors.append(
+                    {
+                        "code": "ACCOUNT_MISMATCH",
+                        "diagnostic": f"Payload account {observed_account_id} does not match verified account {trust_evidence.verified_account_id}",
+                    }
+                )
+                account_verified = False
+            else:
+                account_verified = True
+                observed_account_id = trust_evidence.verified_account_id
+
+        # 2. Window verification requires explicit requested UTC boundaries
+        if trust_evidence.window_verified:
+            window_start_utc = trust_evidence.window_start_utc
+            window_end_utc = trust_evidence.window_end_utc
+            if window_start_utc is None or window_end_utc is None:
+                errors.append(
+                    {
+                        "code": "WINDOW_MISMATCH",
+                        "diagnostic": "Window verification requires explicit window_start_utc and window_end_utc",
+                    }
+                )
+                window_verified = False
+            elif not listings:
+                # An empty collection cannot prove window coverage without external audit
+                errors.append(
+                    {
+                        "code": "WINDOW_MISMATCH",
+                        "diagnostic": "Empty collection cannot establish window verification",
+                    }
+                )
+                window_verified = False
+            else:
+                # Every ended listing must have a valid timestamp within [window_start_utc, window_end_utc]
+                invalid_dates = False
+                for item in listings:
+                    if item.lifecycle_state == ListingLifecycleState.ENDED:
+                        if item.ended_at is None:
+                            invalid_dates = True
+                            break
+                        if item.ended_at < (
+                            window_start_utc - timedelta(days=1)
+                        ) or item.ended_at > (window_end_utc + timedelta(days=1)):
+                            invalid_dates = True
+                            break
+                if invalid_dates:
+                    errors.append(
+                        {
+                            "code": "WINDOW_MISMATCH",
+                            "diagnostic": "Collection contains ended listings outside verified UTC window boundaries",
+                        }
+                    )
+                    window_verified = False
+                else:
+                    window_verified = not is_truncated and not any(
+                        err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
+                        for err in errors
+                    )
+
+        entitlement_verified = bool(trust_evidence.api_entitlement_verified)
+
     reconciliation_ready = (
-        is_complete and account_verified and window_verified and len(errors) == 0
+        is_complete
+        and account_verified
+        and window_verified
+        and entitlement_verified
+        and len(errors) == 0
     )
 
     return SoldUnsoldCollectionResult(
@@ -1736,10 +1856,13 @@ def normalize_graphql_seller_listing_search(
         is_complete=is_complete,
         is_truncated=is_truncated,
         total_count=declared_total if declared_total is not None else len(listings),
-        account_id=str(account_id) if account_id else None,
+        account_id=observed_account_id,
         account_verified=account_verified,
         window_days=window_days,
         window_verified=window_verified,
+        window_start_utc=window_start_utc,
+        window_end_utc=window_end_utc,
+        entitlement_verified=entitlement_verified,
         reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
     )
@@ -1752,6 +1875,7 @@ def normalize_rest_fulfillment_orders(
     payload: Mapping[str, Any] | None,
     *,
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+    evidence: ProviderVerificationEvidence | None = None,
 ) -> SoldUnsoldCollectionResult:
     """Normalize REST Sell Fulfillment getOrders response.
 
@@ -1990,13 +2114,68 @@ def normalize_rest_fulfillment_orders(
         and len(raw_orders) == declared_total
     )
     account_id = payload.get("accountId") or payload.get("sellerId")
-    account_verified = bool(account_id)
-    window_verified = not is_truncated and not any(
-        err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
-        for err in errors
-    )
+    observed_account_id = str(account_id) if account_id else None
+
+    # Strict provenance verification: never self-certify from payload fields!
+    account_verified = False
+    window_verified = False
+    entitlement_verified = False
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
+
+    if evidence is not None:
+        # 1. Account verification requires external proof matching observed ID (if present)
+        if evidence.account_verified and evidence.verified_account_id:
+            if (
+                observed_account_id
+                and observed_account_id != evidence.verified_account_id
+            ):
+                errors.append(
+                    {
+                        "code": "ACCOUNT_MISMATCH",
+                        "diagnostic": f"Payload account {observed_account_id} does not match verified account {evidence.verified_account_id}",
+                    }
+                )
+                account_verified = False
+            else:
+                account_verified = True
+                observed_account_id = evidence.verified_account_id
+
+        # 2. Window verification requires explicit requested UTC boundaries
+        if evidence.window_verified:
+            window_start_utc = evidence.window_start_utc
+            window_end_utc = evidence.window_end_utc
+            if window_start_utc is None or window_end_utc is None:
+                errors.append(
+                    {
+                        "code": "WINDOW_MISMATCH",
+                        "diagnostic": "Window verification requires explicit window_start_utc and window_end_utc",
+                    }
+                )
+                window_verified = False
+            elif not raw_orders and not listings:
+                # An empty collection cannot prove window coverage without external audit
+                errors.append(
+                    {
+                        "code": "WINDOW_MISMATCH",
+                        "diagnostic": "Empty collection cannot establish window verification",
+                    }
+                )
+                window_verified = False
+            else:
+                window_verified = not is_truncated and not any(
+                    err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
+                    for err in errors
+                )
+
+        entitlement_verified = bool(evidence.api_entitlement_verified)
+
     reconciliation_ready = (
-        is_complete and account_verified and window_verified and len(errors) == 0
+        is_complete
+        and account_verified
+        and window_verified
+        and entitlement_verified
+        and len(errors) == 0
     )
 
     return SoldUnsoldCollectionResult(
@@ -2009,10 +2188,13 @@ def normalize_rest_fulfillment_orders(
         is_complete=is_complete,
         is_truncated=is_truncated,
         total_count=declared_total if declared_total is not None else len(raw_orders),
-        account_id=str(account_id) if account_id else None,
+        account_id=observed_account_id,
         account_verified=account_verified,
         window_days=window_days,
         window_verified=window_verified,
+        window_start_utc=window_start_utc,
+        window_end_utc=window_end_utc,
+        entitlement_verified=entitlement_verified,
         reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
         diagnostics={
@@ -2027,6 +2209,7 @@ def merge_rest_fulfillment_orders_pages(
     *,
     max_pages: int = MAX_CLASSIFICATION_PAGES,
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS,
+    evidence: ProviderVerificationEvidence | None = None,
 ) -> SoldUnsoldCollectionResult:
     """Merge multi-page REST Sell Fulfillment getOrders responses fail-closed."""
     validate_max_pages(max_pages)
@@ -2058,6 +2241,8 @@ def merge_rest_fulfillment_orders_pages(
     is_truncated = False
     account_id: str | None = None
     last_limit: int | None = None
+    seen_accounts: set[str] = set()
+    pages_with_account = 0
 
     for page_idx, page in enumerate(pages):
         # Enforce bounds while processing
@@ -2124,16 +2309,19 @@ def merge_rest_fulfillment_orders_pages(
                 }
             )
 
-        # Account consistency check across pages
+        # Account consistency check across pages: require every page to provide consistent account ID
         p_acc = page.get("accountId") or page.get("sellerId")
         if p_acc:
+            p_acc_str = str(p_acc)
+            pages_with_account += 1
+            seen_accounts.add(p_acc_str)
             if account_id is None:
-                account_id = str(p_acc)
-            elif account_id != str(p_acc):
+                account_id = p_acc_str
+            elif account_id != p_acc_str:
                 errors.append(
                     {
                         "code": "ACCOUNT_MISMATCH",
-                        "diagnostic": f"Account mismatch across pages: {account_id} vs {p_acc}",
+                        "diagnostic": f"Account mismatch across pages: {account_id} vs {p_acc_str}",
                     }
                 )
 
@@ -2200,6 +2388,16 @@ def merge_rest_fulfillment_orders_pages(
                     }
                 )
 
+    # In multi-page responses, if any page had account identity, ALL pages must have it consistently
+    num_valid_pages = sum(1 for p in pages if isinstance(p, Mapping))
+    if pages_with_account > 0 and pages_with_account < num_valid_pages:
+        errors.append(
+            {
+                "code": "ACCOUNT_MISMATCH",
+                "diagnostic": f"Account identity missing on {num_valid_pages - pages_with_account} pages",
+            }
+        )
+
     combined_payload = {
         "orders": all_orders,
         "total": declared_total if declared_total is not None else len(all_orders),
@@ -2208,19 +2406,10 @@ def merge_rest_fulfillment_orders_pages(
         "accountId": account_id,
     }
     result = normalize_rest_fulfillment_orders(
-        combined_payload, window_days=window_days
+        combined_payload, window_days=window_days, evidence=evidence
     )
     merged_errors = [*errors, *result.errors]
 
-    account_verified = bool(account_id)
-    window_verified = (
-        not is_truncated
-        and not result.is_truncated
-        and not any(
-            err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
-            for err in merged_errors
-        )
-    )
     is_complete = (
         len(merged_errors) == 0
         and not is_truncated
@@ -2228,8 +2417,21 @@ def merge_rest_fulfillment_orders_pages(
         and declared_total is not None
         and len(all_orders) == declared_total
     )
+    account_verified = (
+        result.account_verified
+        and (len(seen_accounts) <= 1)
+        and not any(err.get("code") == "ACCOUNT_MISMATCH" for err in merged_errors)
+    )
+    window_verified = (
+        result.window_verified and not is_truncated and not result.is_truncated
+    )
+    entitlement_verified = result.entitlement_verified
     reconciliation_ready = (
-        is_complete and account_verified and window_verified and len(merged_errors) == 0
+        is_complete
+        and account_verified
+        and window_verified
+        and entitlement_verified
+        and len(merged_errors) == 0
     )
 
     return SoldUnsoldCollectionResult(
@@ -2242,10 +2444,13 @@ def merge_rest_fulfillment_orders_pages(
         is_complete=is_complete,
         is_truncated=is_truncated or result.is_truncated,
         total_count=declared_total if declared_total is not None else len(all_orders),
-        account_id=str(account_id) if account_id else None,
+        account_id=result.account_id,
         account_verified=account_verified,
         window_days=window_days,
         window_verified=window_verified,
+        window_start_utc=result.window_start_utc,
+        window_end_utc=result.window_end_utc,
+        entitlement_verified=entitlement_verified,
         reconciliation_ready=reconciliation_ready,
         errors=tuple(merged_errors),
         diagnostics={
@@ -2273,22 +2478,35 @@ def merge_composite_modern_sold_unsold(
     """
     errors = [*graphql_result.errors, *orders_result.errors]
 
-    # Verify account identity matching
+    # Verify account identity matching: both must be verified and have matching IDs
     account_verified = False
-    if graphql_result.account_id and orders_result.account_id:
-        if graphql_result.account_id != orders_result.account_id:
+    if graphql_result.account_verified and orders_result.account_verified:
+        if (
+            graphql_result.account_id
+            and orders_result.account_id
+            and graphql_result.account_id == orders_result.account_id
+        ):
+            account_verified = True
+        else:
             errors.append(
                 {
                     "code": "ACCOUNT_MISMATCH",
                     "diagnostic": f"GraphQL account {graphql_result.account_id} does not match orders account {orders_result.account_id}",
                 }
             )
-        else:
-            account_verified = True
-    else:
-        account_verified = False
+    elif (
+        graphql_result.account_id
+        and orders_result.account_id
+        and graphql_result.account_id != orders_result.account_id
+    ):
+        errors.append(
+            {
+                "code": "ACCOUNT_MISMATCH",
+                "diagnostic": f"GraphQL account {graphql_result.account_id} does not match orders account {orders_result.account_id}",
+            }
+        )
 
-    # Verify time-window matching
+    # Verify time-window matching: days AND verified start/end UTC bounds
     window_verified = False
     if graphql_result.window_days != orders_result.window_days:
         errors.append(
@@ -2297,17 +2515,55 @@ def merge_composite_modern_sold_unsold(
                 "diagnostic": f"GraphQL window {graphql_result.window_days}d does not match orders window {orders_result.window_days}d",
             }
         )
-    else:
-        window_verified = (
-            graphql_result.window_verified and orders_result.window_verified
-        )
+    elif graphql_result.window_verified and orders_result.window_verified:
+        # Check actual UTC intervals
+        if (
+            graphql_result.window_start_utc is not None
+            and orders_result.window_start_utc is not None
+            and graphql_result.window_end_utc is not None
+            and orders_result.window_end_utc is not None
+        ):
+            diff_start = abs(
+                (
+                    graphql_result.window_start_utc - orders_result.window_start_utc
+                ).total_seconds()
+            )
+            diff_end = abs(
+                (
+                    graphql_result.window_end_utc - orders_result.window_end_utc
+                ).total_seconds()
+            )
+            if diff_start <= 300.0 and diff_end <= 300.0:
+                window_verified = True
+            else:
+                errors.append(
+                    {
+                        "code": "WINDOW_MISMATCH",
+                        "diagnostic": "GraphQL and REST request UTC window bounds differ by more than 5 minutes",
+                    }
+                )
+        else:
+            errors.append(
+                {
+                    "code": "WINDOW_MISMATCH",
+                    "diagnostic": "Missing UTC start/end timestamp bounds on verified collections",
+                }
+            )
+
+    entitlement_verified = bool(
+        graphql_result.entitlement_verified and orders_result.entitlement_verified
+    )
 
     is_complete = (
         graphql_result.is_complete and orders_result.is_complete and len(errors) == 0
     )
     is_truncated = graphql_result.is_truncated or orders_result.is_truncated
     reconciliation_ready = (
-        is_complete and account_verified and window_verified and len(errors) == 0
+        is_complete
+        and account_verified
+        and window_verified
+        and entitlement_verified
+        and len(errors) == 0
     )
 
     order_sold_ids = set(orders_result.sold_item_ids)
@@ -2450,6 +2706,10 @@ def merge_composite_modern_sold_unsold(
         account_verified=account_verified,
         window_days=window_days,
         window_verified=window_verified,
+        window_start_utc=graphql_result.window_start_utc
+        or orders_result.window_start_utc,
+        window_end_utc=graphql_result.window_end_utc or orders_result.window_end_utc,
+        entitlement_verified=entitlement_verified,
         reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
     )
@@ -2788,11 +3048,16 @@ def compare_sold_unsold_snapshots(
         else:
             overall_parity = "fail"
 
-        # Migration readiness requires verified full parity AND reconciliation readiness on both sides
+        # Migration readiness requires verified full parity AND reconciliation readiness,
+        # account verification, window verification, and external API entitlement on both sides.
         if (
             overall_parity == "pass"
             and xml_snapshot.reconciliation_ready
             and candidate_snapshot.reconciliation_ready
+            and candidate_snapshot.account_verified
+            and candidate_snapshot.window_verified
+            and candidate_snapshot.entitlement_verified
+            and xml_snapshot.entitlement_verified
         ):
             migration_readiness = "ready"
             migration_readiness_reason = "VERIFIED_FULL_PARITY"
@@ -2800,6 +3065,16 @@ def compare_sold_unsold_snapshots(
             migration_readiness = "blocked"
             if unsupported_count > 0:
                 migration_readiness_reason = "UNSUPPORTED_FIELDS_IN_BASELINE"
+            elif (
+                not candidate_snapshot.entitlement_verified
+                or not xml_snapshot.entitlement_verified
+            ):
+                migration_readiness_reason = "API_ENTITLEMENT_UNVERIFIED"
+            elif (
+                not candidate_snapshot.account_verified
+                or not candidate_snapshot.window_verified
+            ):
+                migration_readiness_reason = "UNVERIFIED_PROVENANCE"
             elif not (
                 xml_snapshot.reconciliation_ready
                 and candidate_snapshot.reconciliation_ready
@@ -2841,6 +3116,8 @@ def compare_sold_unsold_snapshots(
 SAFE_MIGRATION_READINESS_REASONS: dict[str, str] = {
     "UNSUPPORTED_FIELDS_IN_BASELINE": "Monitored fields (quantity_sold, ended_at) are unsupported in Trading XML; full parity blocked",
     "COLLECTION_NOT_RECONCILIATION_READY": "Candidate collection is not verified complete, account-matched, and window-bounded",
+    "UNVERIFIED_PROVENANCE": "Candidate collection lacks verified account identity or explicit UTC window bounds provenance",
+    "API_ENTITLEMENT_UNVERIFIED": "Candidate collection lacks verified API entitlement and OAuth scopes",
     "EMPTY_COLLECTION": "Empty collection; record-level fields unverified",
     "PARITY_FAILED": "Field comparison found semantic differences or missing fields",
     "VERIFIED_FULL_PARITY": "Full 10-field parity verified and reconciliation ready",

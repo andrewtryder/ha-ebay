@@ -170,12 +170,21 @@ The parity comparison engine compares XML baseline and candidate snapshots acros
 - **Full Parity (`overall_status`)**: Requires full coverage across all 10 monitored fields without any `unsupported` or `unverified` states. Because `quantity_sold` and `ended_at` remain unsupported in baseline Trading XML, `overall_status` evaluates to `inconclusive` (never `pass`).
 - **Migration Readiness (`migration_readiness`)**: Evaluates whether modern endpoints are ready for autonomous production cutover. Migration readiness is strictly `blocked` (`migration_readiness_reason: UNSUPPORTED_FIELDS_IN_BASELINE`) because Trading XML baseline limitations and unverified GraphQL schema entitlement prevent verified parity.
 
-### Positive Account & Window Reconciliation Readiness
-Offline collection completeness (`is_complete`) measures syntactic and page-level integrity of individual response collections. Stronger **cross-provider reconciliation readiness** (`reconciliation_ready`) requires:
-1. `account_verified`: Explicit matching account identifiers across both endpoints (absent IDs in offline fixtures are unverified, not matching).
-2. `window_verified`: Proof of bounded date intervals (undated listings or missing range filters leave window unverified).
-3. `is_complete`: Full offset-zero census without gaps or pending continuations.
-4. `errors == 0`: Zero structural, parsing, or pagination errors.
+### Positive Account & Window Reconciliation Readiness and Provenance Integrity
+Offline collection completeness (`is_complete`) measures syntactic and page-level integrity of individual response collections. Stronger **cross-provider reconciliation readiness** (`reconciliation_ready`) requires external proof of request provenance:
+1. `account_verified`: Requires external authenticated identity verification (`ProviderVerificationEvidence`). Raw payload fields such as `accountId` or `sellerId` in unauthenticated responses NEVER self-certify account identity. Multi-page REST sequences must have uniform, consistent account identity across all pages.
+2. `window_verified`: Proof of bounded date intervals (`window_start_utc` and `window_end_utc`) matching between providers. Undated listings, missing range filters, empty collections, or listings falling outside the lookback interval invalidate window verification.
+3. `entitlement_verified`: Verified API entitlement and OAuth scopes for candidate endpoints.
+4. `is_complete`: Full offset-zero census without gaps or pending continuations.
+5. `errors == 0`: Zero structural, parsing, or pagination errors.
+
+### Migration Readiness Permanently Blocked in Milestone 7
+Migration readiness (`migration_readiness`) evaluates whether candidate modern endpoints are safe for production cutover. In Milestone 7:
+- Hand-crafted synthetic snapshots or offline fixtures cannot earn `migration_readiness: ready`.
+- If external API entitlement is unverified: `migration_readiness: blocked` with reason `API_ENTITLEMENT_UNVERIFIED`.
+- If account or window provenance is unverified: `migration_readiness: blocked` with reason `UNVERIFIED_PROVENANCE`.
+- If baseline Trading XML lacks monitored fields: `migration_readiness: blocked` with reason `UNSUPPORTED_FIELDS_IN_BASELINE`.
+- In all offline verification contexts, migration readiness remains safely and permanently `blocked`.
 
 ### Anti-False-Positive Empty Collection Rule
 If both the XML baseline and candidate snapshots return verified empty collections (0 listings), record-level fields cannot be evaluated. The engine classifies record-level fields as `unverified` and reports `overall_status: inconclusive`, preventing false-positive pass claims when no records were tested.

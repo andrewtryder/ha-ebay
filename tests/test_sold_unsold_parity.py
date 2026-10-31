@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -29,6 +29,7 @@ from custom_components.ebay.parsers.sold_unsold_parity import (
     ClassificationSource,
     ListingLifecycleState,
     NormalizedListingClassification,
+    ProviderVerificationEvidence,
     SaleClassification,
     SoldUnsoldCollectionResult,
     _compare_single_field,
@@ -2083,9 +2084,12 @@ def test_graphql_date_window_evidence_off_window_and_undated() -> None:
 
 
 def test_composite_cross_provider_account_and_window_evidence() -> None:
-    """Composite modern merger requires positive evidence of account identity and window bounds."""
-    # Matching accounts and verified dates
-    now_iso = datetime.now(timezone.utc).isoformat()
+    """Composite modern merger requires positive external evidence of account identity and window bounds."""
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    start_dt = now_dt - timedelta(days=60)
+    end_dt = now_dt
+
     gql_payload = {
         "data": {
             "sellerListingSearch": {
@@ -2102,7 +2106,13 @@ def test_composite_cross_provider_account_and_window_evidence() -> None:
             }
         }
     }
-    gql_res = normalize_graphql_seller_listing_search(gql_payload, window_days=60)
+    # Raw fixtures without external trust evidence fail-closed on account/window verification
+    gql_res_unverified = normalize_graphql_seller_listing_search(
+        gql_payload, window_days=60
+    )
+    assert gql_res_unverified.account_verified is False
+    assert gql_res_unverified.window_verified is False
+    assert gql_res_unverified.reconciliation_ready is False
 
     orders_payload = {
         "total": 1,
@@ -2116,13 +2126,52 @@ def test_composite_cross_provider_account_and_window_evidence() -> None:
             }
         ],
     }
-    orders_res = normalize_rest_fulfillment_orders(orders_payload, window_days=60)
+    orders_res_unverified = normalize_rest_fulfillment_orders(
+        orders_payload, window_days=60
+    )
+    assert orders_res_unverified.account_verified is False
+    assert orders_res_unverified.window_verified is False
+    assert orders_res_unverified.reconciliation_ready is False
 
-    comp = merge_composite_modern_sold_unsold(gql_res, orders_res, window_days=60)
-    assert comp.is_complete is True
-    assert comp.account_verified is True
-    assert comp.window_verified is True
-    assert comp.reconciliation_ready is True
+    comp_unverified = merge_composite_modern_sold_unsold(
+        gql_res_unverified, orders_res_unverified, window_days=60
+    )
+    assert comp_unverified.is_complete is True
+    assert comp_unverified.account_verified is False
+    assert comp_unverified.window_verified is False
+    assert comp_unverified.reconciliation_ready is False
+
+    # Now verify with explicit ProviderVerificationEvidence
+    evidence = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="seller_verified",
+        window_verified=True,
+        window_start_utc=start_dt,
+        window_end_utc=end_dt,
+        api_entitlement_verified=True,
+        provenance_source="test_harness",
+    )
+    gql_res_verified = normalize_graphql_seller_listing_search(
+        gql_payload, window_days=60, trust_evidence=evidence
+    )
+    assert gql_res_verified.account_verified is True
+    assert gql_res_verified.window_verified is True
+    assert gql_res_verified.reconciliation_ready is True
+
+    orders_res_verified = normalize_rest_fulfillment_orders(
+        orders_payload, window_days=60, evidence=evidence
+    )
+    assert orders_res_verified.account_verified is True
+    assert orders_res_verified.window_verified is True
+    assert orders_res_verified.reconciliation_ready is True
+
+    comp_verified = merge_composite_modern_sold_unsold(
+        gql_res_verified, orders_res_verified, window_days=60
+    )
+    assert comp_verified.is_complete is True
+    assert comp_verified.account_verified is True
+    assert comp_verified.window_verified is True
+    assert comp_verified.reconciliation_ready is True
 
     # Missing account in GraphQL leaves account_verified=False and reconciliation_ready=False
     gql_no_acc_payload = {
@@ -2144,7 +2193,7 @@ def test_composite_cross_provider_account_and_window_evidence() -> None:
         gql_no_acc_payload, window_days=60
     )
     comp_unverified_acc = merge_composite_modern_sold_unsold(
-        gql_no_acc, orders_res, window_days=60
+        gql_no_acc, orders_res_verified, window_days=60
     )
     assert comp_unverified_acc.account_verified is False
     assert comp_unverified_acc.reconciliation_ready is False
@@ -2187,4 +2236,303 @@ def test_compare_sold_unsold_snapshots_unsupported_fields_separation() -> None:
     md = render_sold_unsold_parity_markdown(report)
     assert "**Supported Fields Parity:** `PASS`" in md
     assert "**Overall Status:** `INCONCLUSIVE`" in md
-    assert "**Migration Readiness:** `BLOCKED`" in md
+
+
+def test_adversarial_forged_account_and_unverified_provenance() -> None:
+    """Adversarial tests: forged account IDs, unbounded queries, off-window listings, and empty collections."""
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    start_dt = now_dt - timedelta(days=60)
+    end_dt = now_dt
+
+    # 1. Forged accountId in payload without external verified evidence leaves account_verified=False
+    payload_forged = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "accountId": "forged_seller_id",
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 1,
+                        "itemEndDate": now_iso,
+                    }
+                ],
+            }
+        }
+    }
+    res_forged = normalize_graphql_seller_listing_search(payload_forged)
+    assert res_forged.account_verified is False
+    assert res_forged.account_id == "forged_seller_id"
+    assert res_forged.reconciliation_ready is False
+
+    # Evidence with contradictory verified account emits ACCOUNT_MISMATCH and fails verification
+    evidence_diff_account = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="real_authenticated_seller",
+        window_verified=True,
+        window_start_utc=start_dt,
+        window_end_utc=end_dt,
+        api_entitlement_verified=True,
+    )
+    res_mismatch = normalize_graphql_seller_listing_search(
+        payload_forged, trust_evidence=evidence_diff_account
+    )
+    assert res_mismatch.account_verified is False
+    assert any(e["code"] == "ACCOUNT_MISMATCH" for e in res_mismatch.errors)
+
+    # 2. Current timestamps with unbounded query (no window evidence) leaves window_verified=False
+    assert res_forged.window_verified is False
+
+    # 3. Ended listing outside verified UTC window invalidates window evidence
+    old_iso = (now_dt - timedelta(days=120)).isoformat()
+    payload_off_window = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "accountId": "real_authenticated_seller",
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 1,
+                        "itemEndDate": old_iso,
+                    }
+                ],
+            }
+        }
+    }
+    evidence_valid = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="real_authenticated_seller",
+        window_verified=True,
+        window_start_utc=start_dt,
+        window_end_utc=end_dt,
+        api_entitlement_verified=True,
+    )
+    res_off_win = normalize_graphql_seller_listing_search(
+        payload_off_window, trust_evidence=evidence_valid
+    )
+    assert res_off_win.window_verified is False
+    assert any(e["code"] == "WINDOW_MISMATCH" for e in res_off_win.errors)
+
+    # 4. Empty collection cannot establish window_verified=True
+    payload_empty = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 0,
+                "items": [],
+            }
+        }
+    }
+    res_empty = normalize_graphql_seller_listing_search(
+        payload_empty, trust_evidence=evidence_valid
+    )
+    assert res_empty.window_verified is False
+    assert any(e["code"] == "WINDOW_MISMATCH" for e in res_empty.errors)
+
+
+def test_adversarial_utc_window_mismatch_with_matching_days() -> None:
+    """Matching window_days=60 with mismatched UTC start/end intervals fails window verification."""
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+
+    # Provider A ran query for interval [T-60d, T]
+    evidence_a = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="seller_common",
+        window_verified=True,
+        window_start_utc=now_dt - timedelta(days=60),
+        window_end_utc=now_dt,
+        api_entitlement_verified=True,
+    )
+    # Provider B ran query for interval [T-70d, T-10d] (matching window_days=60, but shifted UTC interval)
+    evidence_b = ProviderVerificationEvidence(
+        account_verified=True,
+        verified_account_id="seller_common",
+        window_verified=True,
+        window_start_utc=now_dt - timedelta(days=70),
+        window_end_utc=now_dt - timedelta(days=10),
+        api_entitlement_verified=True,
+    )
+
+    gql_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "accountId": "seller_common",
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 1,
+                        "itemEndDate": now_iso,
+                    }
+                ],
+            }
+        }
+    }
+    res_a = normalize_graphql_seller_listing_search(
+        gql_payload, window_days=60, trust_evidence=evidence_a
+    )
+
+    orders_payload = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "accountId": "seller_common",
+        "orders": [
+            {
+                "orderId": "ord-1",
+                "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+            }
+        ],
+    }
+    res_b = normalize_rest_fulfillment_orders(
+        orders_payload, window_days=60, evidence=evidence_b
+    )
+
+    comp = merge_composite_modern_sold_unsold(res_a, res_b, window_days=60)
+    assert comp.window_verified is False
+    assert any(e["code"] == "WINDOW_MISMATCH" for e in comp.errors)
+    assert comp.reconciliation_ready is False
+
+
+def test_adversarial_multipage_rest_missing_per_page_account_metadata() -> None:
+    """Multi-page REST merger must reject sequence where some pages omit account metadata."""
+    pages = [
+        {
+            "total": 2,
+            "limit": 1,
+            "offset": 0,
+            "accountId": "seller_consistent",
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            "total": 2,
+            "limit": 1,
+            "offset": 1,
+            # Missing accountId on page 2!
+            "orders": [
+                {
+                    "orderId": "ord-2",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_missing_acc = merge_rest_fulfillment_orders_pages(pages)
+    assert any(e["code"] == "ACCOUNT_MISMATCH" for e in res_missing_acc.errors)
+    assert res_missing_acc.account_verified is False
+
+
+def test_adversarial_handcrafted_snapshot_migration_readiness_blocked() -> None:
+    """Hand-crafted full parity snapshot cannot earn migration_readiness='ready' without verified entitlement."""
+    now_dt = datetime.now(timezone.utc)
+    listing_item = NormalizedListingClassification(
+        item_id="110000000001",
+        lifecycle_state=ListingLifecycleState.ENDED,
+        sale_classification=SaleClassification.SOLD,
+        source=ClassificationSource.TRADING_XML,
+        quantity_sold=1,
+        ended_at=now_dt,
+        evidence_level=ClassificationEvidence.HIGH,
+    )
+
+    # XML snapshot claiming reconciliation_ready=True but entitlement_verified=False
+    xml_snap = SoldUnsoldCollectionResult(
+        listings=(listing_item,),
+        sold_item_ids=frozenset(["110000000001"]),
+        unsold_item_ids=frozenset(),
+        selling_classification={"110000000001": "sold"},
+        sold_items_count=1,
+        unsold_items_count=0,
+        is_complete=True,
+        total_count=1,
+        account_id="seller_1",
+        account_verified=True,
+        window_verified=True,
+        entitlement_verified=False,  # Unverified entitlement!
+        reconciliation_ready=True,
+    )
+
+    # Candidate snapshot also claiming reconciliation_ready=True but entitlement_verified=False
+    cand_snap = SoldUnsoldCollectionResult(
+        listings=(listing_item,),
+        sold_item_ids=frozenset(["110000000001"]),
+        unsold_item_ids=frozenset(),
+        selling_classification={"110000000001": "sold"},
+        sold_items_count=1,
+        unsold_items_count=0,
+        is_complete=True,
+        total_count=1,
+        account_id="seller_1",
+        account_verified=True,
+        window_verified=True,
+        entitlement_verified=False,  # Unverified entitlement!
+        reconciliation_ready=True,
+    )
+
+    report = compare_sold_unsold_snapshots(xml_snap, cand_snap)
+    assert report["overall_status"] == "pass"
+    assert report["supported_fields_parity"] == "pass"
+    # Migration readiness MUST be blocked due to lack of API entitlement proof!
+    assert report["migration_readiness"] == "blocked"
+    assert report["migration_readiness_reason"] == "API_ENTITLEMENT_UNVERIFIED"
+
+    # If candidate has unverified provenance (account or window not verified)
+    cand_unverified_prov = SoldUnsoldCollectionResult(
+        listings=(listing_item,),
+        sold_item_ids=frozenset(["110000000001"]),
+        unsold_item_ids=frozenset(),
+        selling_classification={"110000000001": "sold"},
+        sold_items_count=1,
+        unsold_items_count=0,
+        is_complete=True,
+        total_count=1,
+        account_id="seller_1",
+        account_verified=False,  # Unverified account!
+        window_verified=True,
+        entitlement_verified=True,
+        reconciliation_ready=True,
+    )
+    xml_snap_entitled = SoldUnsoldCollectionResult(
+        listings=(listing_item,),
+        sold_item_ids=frozenset(["110000000001"]),
+        unsold_item_ids=frozenset(),
+        selling_classification={"110000000001": "sold"},
+        sold_items_count=1,
+        unsold_items_count=0,
+        is_complete=True,
+        total_count=1,
+        account_id="seller_1",
+        account_verified=True,
+        window_verified=True,
+        entitlement_verified=True,
+        reconciliation_ready=True,
+    )
+    report_unverified_prov = compare_sold_unsold_snapshots(
+        xml_snap_entitled, cand_unverified_prov
+    )
+    assert report_unverified_prov["migration_readiness"] == "blocked"
+    assert (
+        report_unverified_prov["migration_readiness_reason"] == "UNVERIFIED_PROVENANCE"
+    )
+
+    # Sanitization checks for new reason codes
+    sanitized_ent = sanitize_sold_unsold_parity_report(report)
+    assert sanitized_ent["migration_readiness"] == "blocked"
+    assert "entitlement" in sanitized_ent["migration_readiness_reason"].lower()
+
+    sanitized_prov = sanitize_sold_unsold_parity_report(report_unverified_prov)
+    assert sanitized_prov["migration_readiness"] == "blocked"
+    assert "provenance" in sanitized_prov["migration_readiness_reason"].lower()
+
+    md_blocked = render_sold_unsold_parity_markdown(report_unverified_prov)
+    assert "**Migration Readiness:** `BLOCKED`" in md_blocked
