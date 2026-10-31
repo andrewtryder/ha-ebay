@@ -263,7 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Execute live read-only verification against eBay (requires credentials)",
+        help="Reserved: Live validation is not implemented because GraphQL sellerListingSearch schema entitlement is unverified. Exits with NOT_IMPLEMENTED.",
     )
     parser.add_argument(
         "--synthetic-demo",
@@ -311,7 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--env-file",
         type=Path,
-        help="Path to .env file for credentials",
+        help="Reserved / non-functional for Milestone 7 (live validation is not implemented)",
     )
     return parser
 
@@ -385,7 +385,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(output_str)
 
-    return 0 if sanitized.get("overall_status") == "pass" else 1
+    is_synthetic = not (
+        args.xml_fixture or args.graphql_fixture or args.orders_fixture or args.live
+    )
+    if sanitized.get("overall_status") == "pass":
+        return 0
+    if (
+        is_synthetic
+        and sanitized.get("supported_fields_parity") == "pass"
+        and not sanitized.get("errors")
+    ):
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

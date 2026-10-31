@@ -15,7 +15,7 @@ import re
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -507,7 +507,10 @@ class SoldUnsoldCollectionResult:
     is_truncated: bool = False
     total_count: int | None = None
     account_id: str | None = None
+    account_verified: bool = False
     window_days: int = SOLD_UNSOLD_DEFAULT_WINDOW_DAYS
+    window_verified: bool = False
+    reconciliation_ready: bool = False
     errors: tuple[dict[str, Any], ...] = ()
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -1368,9 +1371,40 @@ def normalize_graphql_seller_listing_search(
         # Process each official grouped bucket independently
         bucket_totals = 0
         for b_name, b_data, default_lifecycle in buckets_to_process:
-            b_total = _to_int(b_data.get("total") or b_data.get("totalCount"))
+            b_total = _to_int(
+                b_data.get("total")
+                if "total" in b_data
+                else b_data.get("totalCount")
+                if "totalCount" in b_data
+                else b_data.get("totalEntries")
+            )
             if b_total is not None:
                 bucket_totals += b_total
+
+            # Validate each grouped bucket's own pagination metadata independently
+            b_page_info = (
+                b_data.get("pageInfo")
+                if isinstance(b_data.get("pageInfo"), Mapping)
+                else None
+            )
+            if b_page_info is not None:
+                b_has_next = b_page_info.get("hasNextPage")
+                if b_has_next is True:
+                    is_truncated = True
+                    errors.append(
+                        {
+                            "code": "PENDING_CONTINUATION",
+                            "diagnostic": f"Bucket {b_name} has pending continuation (hasNextPage=True)",
+                        }
+                    )
+                elif b_has_next is not None and not isinstance(b_has_next, bool):
+                    errors.append(
+                        {
+                            "code": "MALFORMED_PAGE_INFO",
+                            "diagnostic": f"Bucket {b_name} pageInfo.hasNextPage must be boolean",
+                        }
+                    )
+
             b_items = (
                 b_data.get("items")
                 if "items" in b_data
@@ -1378,6 +1412,7 @@ def normalize_graphql_seller_listing_search(
                 if "listings" in b_data
                 else b_data.get("edges")
             ) or []
+            bucket_item_count = 0
             if isinstance(b_items, Sequence) and not isinstance(b_items, (str, bytes)):
                 for raw in b_items:
                     node = (
@@ -1387,6 +1422,7 @@ def normalize_graphql_seller_listing_search(
                     )
                     if not isinstance(node, Mapping):
                         continue
+                    bucket_item_count += 1
                     i_id = str(
                         node.get("itemId") or node.get("listingId") or ""
                     ).strip()
@@ -1425,16 +1461,36 @@ def normalize_graphql_seller_listing_search(
 
                     # Classification logic for grouped buckets:
                     if default_lifecycle == ListingLifecycleState.ENDED:
+                        now_utc = datetime.now(timezone.utc)
+                        cutoff_utc = now_utc - timedelta(days=window_days)
+                        is_undated = ended_at is None
+                        is_off_window = False
+                        if ended_at is not None:
+                            if ended_at < (
+                                cutoff_utc - timedelta(days=1)
+                            ) or ended_at > (now_utc + timedelta(days=1)):
+                                is_off_window = True
+
                         if q_sold is not None and q_sold > 0:
                             outcome = SaleClassification.SOLD
                             evidence = ClassificationEvidence.HIGH
                             sold_ids.add(i_id)
                             classified[i_id] = "sold"
                         elif q_sold is not None and q_sold == 0:
-                            outcome = SaleClassification.UNSOLD
-                            evidence = ClassificationEvidence.HIGH
-                            unsold_ids.add(i_id)
-                            classified[i_id] = "unsold"
+                            if is_off_window:
+                                outcome = SaleClassification.UNKNOWN
+                                evidence = ClassificationEvidence.LOW
+                                classified[i_id] = "unknown"
+                            elif is_undated:
+                                outcome = SaleClassification.UNSOLD
+                                evidence = ClassificationEvidence.MEDIUM
+                                unsold_ids.add(i_id)
+                                classified[i_id] = "unsold"
+                            else:
+                                outcome = SaleClassification.UNSOLD
+                                evidence = ClassificationEvidence.HIGH
+                                unsold_ids.add(i_id)
+                                classified[i_id] = "unsold"
                         else:
                             outcome = SaleClassification.UNKNOWN
                             evidence = ClassificationEvidence.UNKNOWN
@@ -1457,10 +1513,27 @@ def normalize_graphql_seller_listing_search(
                             evidence_level=evidence,
                         )
                     )
+
+            if b_total is not None and bucket_item_count != b_total:
+                errors.append(
+                    {
+                        "code": "TOTAL_RECORDS_MISMATCH",
+                        "diagnostic": f"Bucket {b_name} collected {bucket_item_count} items but declared total is {b_total}",
+                    }
+                )
+
         if declared_total is None and bucket_totals > 0:
             declared_total = bucket_totals
     else:
         # Flat container processing
+        if page_info is None and declared_total is None:
+            errors.append(
+                {
+                    "code": "UNVERIFIED_COLLECTION_CENSUS",
+                    "diagnostic": "Flat GraphQL response lacks both total and pageInfo pagination metadata",
+                }
+            )
+
         raw_items = (
             container.get("items")
             if "items" in container
@@ -1546,16 +1619,36 @@ def normalize_graphql_seller_listing_search(
 
             # Strict classification outcome
             if lifecycle == ListingLifecycleState.ENDED:
+                now_utc = datetime.now(timezone.utc)
+                cutoff_utc = now_utc - timedelta(days=window_days)
+                is_undated = ended_at is None
+                is_off_window = False
+                if ended_at is not None:
+                    if ended_at < (cutoff_utc - timedelta(days=1)) or ended_at > (
+                        now_utc + timedelta(days=1)
+                    ):
+                        is_off_window = True
+
                 if q_sold is not None and q_sold > 0:
                     outcome = SaleClassification.SOLD
                     evidence = ClassificationEvidence.HIGH
                     sold_ids.add(i_id)
                     classified[i_id] = "sold"
                 elif q_sold is not None and q_sold == 0:
-                    outcome = SaleClassification.UNSOLD
-                    evidence = ClassificationEvidence.HIGH
-                    unsold_ids.add(i_id)
-                    classified[i_id] = "unsold"
+                    if is_off_window:
+                        outcome = SaleClassification.UNKNOWN
+                        evidence = ClassificationEvidence.LOW
+                        classified[i_id] = "unknown"
+                    elif is_undated:
+                        outcome = SaleClassification.UNSOLD
+                        evidence = ClassificationEvidence.MEDIUM
+                        unsold_ids.add(i_id)
+                        classified[i_id] = "unsold"
+                    else:
+                        outcome = SaleClassification.UNSOLD
+                        evidence = ClassificationEvidence.HIGH
+                        unsold_ids.add(i_id)
+                        classified[i_id] = "unsold"
                 else:
                     outcome = SaleClassification.UNKNOWN
                     evidence = ClassificationEvidence.UNKNOWN
@@ -1610,6 +1703,28 @@ def normalize_graphql_seller_listing_search(
     account_id = (
         container.get("accountId") or container.get("sellerId") or data.get("accountId")
     )
+    account_verified = bool(account_id)
+    has_ended = any(
+        item.lifecycle_state == ListingLifecycleState.ENDED for item in listings
+    )
+    window_verified = (
+        not is_truncated
+        and not any(
+            err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
+            for err in errors
+        )
+        and (
+            not has_ended
+            or all(
+                item.ended_at is not None
+                for item in listings
+                if item.lifecycle_state == ListingLifecycleState.ENDED
+            )
+        )
+    )
+    reconciliation_ready = (
+        is_complete and account_verified and window_verified and len(errors) == 0
+    )
 
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
@@ -1622,7 +1737,10 @@ def normalize_graphql_seller_listing_search(
         is_truncated=is_truncated,
         total_count=declared_total if declared_total is not None else len(listings),
         account_id=str(account_id) if account_id else None,
+        account_verified=account_verified,
         window_days=window_days,
+        window_verified=window_verified,
+        reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
     )
 
@@ -1678,7 +1796,11 @@ def normalize_rest_fulfillment_orders(
                 )
 
     raw_orders = payload.get("orders")
-    declared_total = _to_int(payload.get("total"))
+    declared_total = _to_int(payload.get("total") if "total" in payload else None)
+    offset = _to_int(payload.get("offset") if "offset" in payload else None)
+    limit = _to_int(payload.get("limit") if "limit" in payload else None)
+    has_next_link = bool(payload.get("next"))
+    is_truncated = False
 
     if raw_orders is None:
         if declared_total == 0:
@@ -1691,18 +1813,31 @@ def normalize_rest_fulfillment_orders(
                 }
             )
             raw_orders = []
-
-    # Check offset pagination metadata
-    limit = _to_int(payload.get("limit"))
-    offset = _to_int(payload.get("offset"))
-    has_next_link = bool(payload.get("next"))
-    is_truncated = False
-
-    if declared_total is None:
+    elif not isinstance(raw_orders, Sequence) or isinstance(raw_orders, (str, bytes)):
         errors.append(
             {
-                "code": "UNVERIFIED_COLLECTION_CENSUS",
-                "diagnostic": "Fulfillment response missing declared total",
+                "code": "MISSING_REQUIRED_CONTAINER",
+                "diagnostic": "Orders container is not a sequence",
+            }
+        )
+        raw_orders = []
+
+    # Check required pagination metadata
+    if declared_total is None or offset is None or limit is None:
+        errors.append(
+            {
+                "code": "MISSING_PAGINATION_METADATA",
+                "diagnostic": "Fulfillment response missing required pagination metadata (total, offset, or limit)",
+            }
+        )
+
+    # Offset greater than 0 means terminal or partial page, not a complete census
+    if offset is not None and offset > 0:
+        is_truncated = True
+        errors.append(
+            {
+                "code": "PENDING_CONTINUATION",
+                "diagnostic": f"Fulfillment response starts at offset {offset}; incomplete census without preceding pages",
             }
         )
 
@@ -1724,7 +1859,7 @@ def normalize_rest_fulfillment_orders(
         declared_total is not None
         and len(raw_orders) != declared_total
         and not is_truncated
-        and (offset == 0 or offset is None)
+        and offset == 0
     ):
         errors.append(
             {
@@ -1846,8 +1981,23 @@ def normalize_rest_fulfillment_orders(
             )
         )
 
-    is_complete = len(errors) == 0 and not is_truncated and declared_total is not None
+    is_complete = (
+        len(errors) == 0
+        and not is_truncated
+        and declared_total is not None
+        and offset == 0
+        and limit is not None
+        and len(raw_orders) == declared_total
+    )
     account_id = payload.get("accountId") or payload.get("sellerId")
+    account_verified = bool(account_id)
+    window_verified = not is_truncated and not any(
+        err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
+        for err in errors
+    )
+    reconciliation_ready = (
+        is_complete and account_verified and window_verified and len(errors) == 0
+    )
 
     return SoldUnsoldCollectionResult(
         listings=tuple(listings),
@@ -1860,7 +2010,10 @@ def normalize_rest_fulfillment_orders(
         is_truncated=is_truncated,
         total_count=declared_total if declared_total is not None else len(raw_orders),
         account_id=str(account_id) if account_id else None,
+        account_verified=account_verified,
         window_days=window_days,
+        window_verified=window_verified,
+        reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
         diagnostics={
             "orders_count": len(raw_orders),
@@ -1887,6 +2040,9 @@ def merge_rest_fulfillment_orders_pages(
             unsold_items_count=0,
             is_complete=False,
             is_truncated=False,
+            account_verified=False,
+            window_verified=False,
+            reconciliation_ready=False,
             errors=(
                 {
                     "code": "NO_PAGES_PROVIDED",
@@ -1901,6 +2057,7 @@ def merge_rest_fulfillment_orders_pages(
     expected_offset = 0
     is_truncated = False
     account_id: str | None = None
+    last_limit: int | None = None
 
     for page_idx, page in enumerate(pages):
         # Enforce bounds while processing
@@ -1923,8 +2080,35 @@ def merge_rest_fulfillment_orders_pages(
             )
             continue
 
-        p_total = _to_int(page.get("total"))
-        p_offset = _to_int(page.get("offset")) or 0
+        # Check for errors in page
+        if "errors" in page and isinstance(page["errors"], Sequence):
+            for err in page["errors"]:
+                if isinstance(err, Mapping):
+                    code = err.get("errorId") or err.get("errorCode") or "API_ERROR"
+                    errors.append(
+                        {
+                            "code": sanitize_diagnostic_token(code, kind="error_code"),
+                            "diagnostic": GENERIC_DIAGNOSTIC_MESSAGES.get(
+                                sanitize_diagnostic_token(code, kind="error_code"),
+                                "REST Fulfillment API returned an error condition",
+                            ),
+                        }
+                    )
+
+        p_total = _to_int(page.get("total") if "total" in page else None)
+        p_offset = _to_int(page.get("offset") if "offset" in page else None)
+        p_limit = _to_int(page.get("limit") if "limit" in page else None)
+
+        if p_limit is not None:
+            last_limit = p_limit
+
+        if p_total is None or p_offset is None or p_limit is None:
+            errors.append(
+                {
+                    "code": "MISSING_PAGINATION_METADATA",
+                    "diagnostic": f"Page {page_idx + 1} missing required pagination metadata (total, offset, limit)",
+                }
+            )
 
         if declared_total is None and p_total is not None:
             declared_total = p_total
@@ -1940,26 +2124,86 @@ def merge_rest_fulfillment_orders_pages(
                 }
             )
 
-        if p_offset != expected_offset and page_idx > 0:
+        # Account consistency check across pages
+        p_acc = page.get("accountId") or page.get("sellerId")
+        if p_acc:
+            if account_id is None:
+                account_id = str(p_acc)
+            elif account_id != str(p_acc):
+                errors.append(
+                    {
+                        "code": "ACCOUNT_MISMATCH",
+                        "diagnostic": f"Account mismatch across pages: {account_id} vs {p_acc}",
+                    }
+                )
+
+        # Offset sequence validation
+        if page_idx == 0:
+            if p_offset is not None and p_offset != 0:
+                errors.append(
+                    {
+                        "code": "PAGINATION_SEQUENCE_ERROR",
+                        "diagnostic": f"First page offset must be 0, got {p_offset}",
+                    }
+                )
+        else:
+            if p_offset is not None and p_offset != expected_offset:
+                errors.append(
+                    {
+                        "code": "PAGINATION_SEQUENCE_ERROR",
+                        "diagnostic": f"Page {page_idx + 1} offset {p_offset} did not match expected {expected_offset}",
+                    }
+                )
+
+        orders_list = page.get("orders")
+        if (
+            orders_list is None
+            or not isinstance(orders_list, Sequence)
+            or isinstance(orders_list, (str, bytes))
+        ):
             errors.append(
                 {
-                    "code": "PAGINATION_SEQUENCE_ERROR",
-                    "diagnostic": f"Page {page_idx + 1} offset {p_offset} did not match expected {expected_offset}",
+                    "code": "MISSING_REQUIRED_CONTAINER",
+                    "diagnostic": f"Page {page_idx + 1} missing orders container",
                 }
             )
-
-        orders_list = page.get("orders") or []
-        if isinstance(orders_list, Sequence):
+            orders_list = []
+        else:
+            if (
+                declared_total is not None
+                and expected_offset >= declared_total
+                and page_idx > 0
+            ):
+                errors.append(
+                    {
+                        "code": "PAGES_AFTER_END_DECLARED",
+                        "diagnostic": f"Received page {page_idx + 1} after reaching declared total {declared_total}",
+                    }
+                )
             all_orders.extend(orders_list)
-            expected_offset = p_offset + len(orders_list)
+            if p_offset is not None:
+                expected_offset = p_offset + len(orders_list)
+            else:
+                expected_offset += len(orders_list)
 
-        if account_id is None:
-            account_id = page.get("accountId") or page.get("sellerId")
+        # Check pending continuation on last provided page
+        if page_idx == len(pages) - 1:
+            has_next = bool(page.get("next"))
+            if has_next or (
+                declared_total is not None and expected_offset < declared_total
+            ):
+                is_truncated = True
+                errors.append(
+                    {
+                        "code": "PENDING_CONTINUATION",
+                        "diagnostic": "Fulfillment pages sequence has pending continuation or uncollected items",
+                    }
+                )
 
     combined_payload = {
         "orders": all_orders,
         "total": declared_total if declared_total is not None else len(all_orders),
-        "limit": len(all_orders),
+        "limit": len(all_orders) if all_orders else (last_limit or 50),
         "offset": 0,
         "accountId": account_id,
     }
@@ -1968,6 +2212,26 @@ def merge_rest_fulfillment_orders_pages(
     )
     merged_errors = [*errors, *result.errors]
 
+    account_verified = bool(account_id)
+    window_verified = (
+        not is_truncated
+        and not result.is_truncated
+        and not any(
+            err.get("code") in ("WINDOW_MISMATCH", "TOTAL_RECORDS_MISMATCH")
+            for err in merged_errors
+        )
+    )
+    is_complete = (
+        len(merged_errors) == 0
+        and not is_truncated
+        and not result.is_truncated
+        and declared_total is not None
+        and len(all_orders) == declared_total
+    )
+    reconciliation_ready = (
+        is_complete and account_verified and window_verified and len(merged_errors) == 0
+    )
+
     return SoldUnsoldCollectionResult(
         listings=result.listings,
         sold_item_ids=result.sold_item_ids,
@@ -1975,15 +2239,19 @@ def merge_rest_fulfillment_orders_pages(
         selling_classification=result.selling_classification,
         sold_items_count=result.sold_items_count,
         unsold_items_count=result.unsold_items_count,
-        is_complete=len(merged_errors) == 0
-        and not is_truncated
-        and declared_total is not None
-        and len(all_orders) == declared_total,
+        is_complete=is_complete,
         is_truncated=is_truncated or result.is_truncated,
         total_count=declared_total if declared_total is not None else len(all_orders),
         account_id=str(account_id) if account_id else None,
+        account_verified=account_verified,
         window_days=window_days,
+        window_verified=window_verified,
+        reconciliation_ready=reconciliation_ready,
         errors=tuple(merged_errors),
+        diagnostics={
+            "orders_count": len(all_orders),
+            "unique_sold_items_count": len(result.sold_item_ids),
+        },
     )
 
 
@@ -2006,19 +2274,22 @@ def merge_composite_modern_sold_unsold(
     errors = [*graphql_result.errors, *orders_result.errors]
 
     # Verify account identity matching
-    if (
-        graphql_result.account_id
-        and orders_result.account_id
-        and graphql_result.account_id != orders_result.account_id
-    ):
-        errors.append(
-            {
-                "code": "ACCOUNT_MISMATCH",
-                "diagnostic": f"GraphQL account {graphql_result.account_id} does not match orders account {orders_result.account_id}",
-            }
-        )
+    account_verified = False
+    if graphql_result.account_id and orders_result.account_id:
+        if graphql_result.account_id != orders_result.account_id:
+            errors.append(
+                {
+                    "code": "ACCOUNT_MISMATCH",
+                    "diagnostic": f"GraphQL account {graphql_result.account_id} does not match orders account {orders_result.account_id}",
+                }
+            )
+        else:
+            account_verified = True
+    else:
+        account_verified = False
 
     # Verify time-window matching
+    window_verified = False
     if graphql_result.window_days != orders_result.window_days:
         errors.append(
             {
@@ -2026,11 +2297,18 @@ def merge_composite_modern_sold_unsold(
                 "diagnostic": f"GraphQL window {graphql_result.window_days}d does not match orders window {orders_result.window_days}d",
             }
         )
+    else:
+        window_verified = (
+            graphql_result.window_verified and orders_result.window_verified
+        )
 
     is_complete = (
         graphql_result.is_complete and orders_result.is_complete and len(errors) == 0
     )
     is_truncated = graphql_result.is_truncated or orders_result.is_truncated
+    reconciliation_ready = (
+        is_complete and account_verified and window_verified and len(errors) == 0
+    )
 
     order_sold_ids = set(orders_result.sold_item_ids)
     all_item_ids = {item.item_id for item in graphql_result.listings} | order_sold_ids
@@ -2169,7 +2447,10 @@ def merge_composite_modern_sold_unsold(
         is_truncated=is_truncated,
         total_count=len(all_item_ids),
         account_id=graphql_result.account_id or orders_result.account_id,
+        account_verified=account_verified,
         window_days=window_days,
+        window_verified=window_verified,
+        reconciliation_ready=reconciliation_ready,
         errors=tuple(errors),
     )
 
@@ -2311,6 +2592,12 @@ def compare_sold_unsold_snapshots(
         return {
             "overall_status": "inconclusive",
             "is_inconclusive": True,
+            "supported_fields_parity": "inconclusive",
+            "comparable_supported_fields_count": 0,
+            "unsupported_fields_count": 0,
+            "unverified_fields_count": len(MONITORED_CLASSIFICATION_FIELDS),
+            "migration_readiness": "blocked",
+            "migration_readiness_reason": "COLLECTION_NOT_RECONCILIATION_READY",
             "field_counts": counts,
             "field_comparisons": field_comparisons,
             "baseline_summary": {
@@ -2387,6 +2674,12 @@ def compare_sold_unsold_snapshots(
             }
             counts[PARITY_UNVERIFIED] += 1
         overall_parity = "inconclusive"
+        supported_fields_parity = "inconclusive"
+        comparable_supported_count = 0
+        unsupported_count = counts[PARITY_UNSUPPORTED]
+        unverified_count = counts[PARITY_UNVERIFIED]
+        migration_readiness = "blocked"
+        migration_readiness_reason = "EMPTY_COLLECTION"
     else:
         # Check identity set match
         if xml_ids != cand_ids:
@@ -2439,6 +2732,8 @@ def compare_sold_unsold_snapshots(
                     overall_f = PARITY_DIFFERENT_SEMANTICS
                 elif any(s == PARITY_MISSING_FIELD for s in field_states):
                     overall_f = PARITY_MISSING_FIELD
+                elif any(s == PARITY_UNSUPPORTED for s in field_states):
+                    overall_f = PARITY_UNSUPPORTED
                 elif any(s == PARITY_UNVERIFIED for s in field_states):
                     overall_f = PARITY_UNVERIFIED
                 elif all(s == PARITY_EXACT_MATCH for s in field_states):
@@ -2458,19 +2753,72 @@ def compare_sold_unsold_snapshots(
                 }
                 counts[overall_f] += 1
 
-        overall_parity = (
-            "pass"
-            if xml_ids == cand_ids
+        supported_fields = [
+            fld
+            for fld, comp in field_comparisons.items()
+            if comp["status"] != PARITY_UNSUPPORTED
+        ]
+        unsupported_count = counts[PARITY_UNSUPPORTED]
+        unverified_count = counts[PARITY_UNVERIFIED]
+        comparable_supported_count = len(supported_fields)
+
+        if counts[PARITY_DIFFERENT_SEMANTICS] > 0 or counts[PARITY_MISSING_FIELD] > 0:
+            supported_fields_parity = "fail"
+        elif (
+            xml_ids == cand_ids
             and len(matched_ids) > 0
-            and counts[PARITY_DIFFERENT_SEMANTICS] == 0
-            and counts[PARITY_MISSING_FIELD] == 0
-            and counts[PARITY_UNVERIFIED] == 0
-            else "fail"
-        )
+            and comparable_supported_count > 0
+            and all(
+                field_comparisons[f]["status"]
+                in (PARITY_EXACT_MATCH, PARITY_EQUIVALENT_NORMALIZED)
+                for f in supported_fields
+            )
+        ):
+            supported_fields_parity = "pass"
+        else:
+            supported_fields_parity = "inconclusive"
+
+        # Overall parity requires ALL 10 monitored fields to be evaluated without unsupported/unverified
+        if counts[PARITY_DIFFERENT_SEMANTICS] > 0 or counts[PARITY_MISSING_FIELD] > 0:
+            overall_parity = "fail"
+        elif unsupported_count > 0 or unverified_count > 0:
+            overall_parity = "inconclusive"
+        elif supported_fields_parity == "pass":
+            overall_parity = "pass"
+        else:
+            overall_parity = "fail"
+
+        # Migration readiness requires verified full parity AND reconciliation readiness on both sides
+        if (
+            overall_parity == "pass"
+            and xml_snapshot.reconciliation_ready
+            and candidate_snapshot.reconciliation_ready
+        ):
+            migration_readiness = "ready"
+            migration_readiness_reason = "VERIFIED_FULL_PARITY"
+        else:
+            migration_readiness = "blocked"
+            if unsupported_count > 0:
+                migration_readiness_reason = "UNSUPPORTED_FIELDS_IN_BASELINE"
+            elif not (
+                xml_snapshot.reconciliation_ready
+                and candidate_snapshot.reconciliation_ready
+            ):
+                migration_readiness_reason = "COLLECTION_NOT_RECONCILIATION_READY"
+            elif overall_parity == "fail" or supported_fields_parity == "fail":
+                migration_readiness_reason = "PARITY_FAILED"
+            else:
+                migration_readiness_reason = "BLOCKED"
 
     return {
         "overall_status": overall_parity,
         "is_inconclusive": overall_parity == "inconclusive",
+        "supported_fields_parity": supported_fields_parity,
+        "comparable_supported_fields_count": comparable_supported_count,
+        "unsupported_fields_count": unsupported_count,
+        "unverified_fields_count": unverified_count,
+        "migration_readiness": migration_readiness,
+        "migration_readiness_reason": migration_readiness_reason,
         "field_counts": counts,
         "field_comparisons": field_comparisons,
         "baseline_summary": {
@@ -2490,10 +2838,25 @@ def compare_sold_unsold_snapshots(
 # ---------------------------------------------------------------------------
 # Privacy Protection & Report Sanitization (Default-Deny)
 # ---------------------------------------------------------------------------
+SAFE_MIGRATION_READINESS_REASONS: dict[str, str] = {
+    "UNSUPPORTED_FIELDS_IN_BASELINE": "Monitored fields (quantity_sold, ended_at) are unsupported in Trading XML; full parity blocked",
+    "COLLECTION_NOT_RECONCILIATION_READY": "Candidate collection is not verified complete, account-matched, and window-bounded",
+    "EMPTY_COLLECTION": "Empty collection; record-level fields unverified",
+    "PARITY_FAILED": "Field comparison found semantic differences or missing fields",
+    "VERIFIED_FULL_PARITY": "Full 10-field parity verified and reconciliation ready",
+    "BLOCKED": "Migration readiness blocked",
+}
+
 ALLOWED_REPORT_TOP_KEYS: frozenset[str] = frozenset(
     {
         "overall_status",
         "is_inconclusive",
+        "supported_fields_parity",
+        "comparable_supported_fields_count",
+        "unsupported_fields_count",
+        "unverified_fields_count",
+        "migration_readiness",
+        "migration_readiness_reason",
         "field_counts",
         "field_comparisons",
         "baseline_summary",
@@ -2512,6 +2875,14 @@ def sanitize_sold_unsold_parity_report(report: Mapping[str, Any]) -> dict[str, A
         return {
             "overall_status": "inconclusive",
             "is_inconclusive": True,
+            "supported_fields_parity": "inconclusive",
+            "comparable_supported_fields_count": 0,
+            "unsupported_fields_count": 0,
+            "unverified_fields_count": len(MONITORED_CLASSIFICATION_FIELDS),
+            "migration_readiness": "blocked",
+            "migration_readiness_reason": SAFE_MIGRATION_READINESS_REASONS[
+                "COLLECTION_NOT_RECONCILIATION_READY"
+            ],
             "field_counts": {},
             "field_comparisons": {},
             "errors": [
@@ -2534,6 +2905,44 @@ def sanitize_sold_unsold_parity_report(report: Mapping[str, Any]) -> dict[str, A
     sanitized["is_inconclusive"] = bool(
         report.get("is_inconclusive", sanitized["overall_status"] == "inconclusive")
     )
+
+    # 3. Supported fields parity
+    raw_sfp = str(report.get("supported_fields_parity", "inconclusive")).lower()
+    sanitized["supported_fields_parity"] = (
+        raw_sfp if raw_sfp in ("pass", "fail", "inconclusive") else "inconclusive"
+    )
+
+    # 4. Field breakdown counts
+    for cnt_k in (
+        "comparable_supported_fields_count",
+        "unsupported_fields_count",
+        "unverified_fields_count",
+    ):
+        v = report.get(cnt_k)
+        sanitized[cnt_k] = (
+            max(0, int(v))
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            else 0
+        )
+
+    # 5. Migration readiness
+    raw_mr = str(report.get("migration_readiness", "blocked")).lower()
+    sanitized["migration_readiness"] = (
+        raw_mr if raw_mr in ("ready", "blocked") else "blocked"
+    )
+
+    # 6. Migration readiness reason (idempotent lookup)
+    raw_mrr = str(report.get("migration_readiness_reason") or "BLOCKED")
+    if raw_mrr in SAFE_MIGRATION_READINESS_REASONS.values():
+        sanitized["migration_readiness_reason"] = raw_mrr
+    elif raw_mrr in SAFE_MIGRATION_READINESS_REASONS:
+        sanitized["migration_readiness_reason"] = SAFE_MIGRATION_READINESS_REASONS[
+            raw_mrr
+        ]
+    else:
+        sanitized["migration_readiness_reason"] = SAFE_MIGRATION_READINESS_REASONS[
+            "BLOCKED"
+        ]
 
     # 3. Field counts
     raw_counts = report.get("field_counts")
@@ -2670,6 +3079,11 @@ def render_sold_unsold_parity_markdown(report: Mapping[str, Any]) -> str:
     """Render a sanitized markdown summary of the sold/unsold classification comparison."""
     sanitized = sanitize_sold_unsold_parity_report(report)
     status = sanitized.get("overall_status", "unknown").upper()
+    sfp = str(sanitized.get("supported_fields_parity", "inconclusive")).upper()
+    mr = str(sanitized.get("migration_readiness", "blocked")).upper()
+    mrr = sanitized.get("migration_readiness_reason", "")
+    comp_supp = sanitized.get("comparable_supported_fields_count", 0)
+    unsupp = sanitized.get("unsupported_fields_count", 0)
     counts = sanitized.get("field_counts", {})
     comparisons = sanitized.get("field_comparisons", {})
 
@@ -2677,6 +3091,10 @@ def render_sold_unsold_parity_markdown(report: Mapping[str, Any]) -> str:
         "# Sold & Unsold Listing Classification Parity Report",
         "",
         f"**Overall Status:** `{status}`",
+        f"**Supported Fields Parity:** `{sfp}`",
+        f"**Migration Readiness:** `{mr}` ({mrr})",
+        f"**Comparable Supported Fields:** {comp_supp} / {len(MONITORED_CLASSIFICATION_FIELDS)}",
+        f"**Unsupported Monitored Fields:** {unsupp} / {len(MONITORED_CLASSIFICATION_FIELDS)}",
         f"**Inconclusive:** `{sanitized.get('is_inconclusive', False)}`",
         "",
         "## Summary Counts",

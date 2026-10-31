@@ -130,13 +130,17 @@ Milestone 7 introduces typed, immutable classification structures in [`custom_co
   - `is_complete: bool`
   - `is_truncated: bool`
   - `total_count: int | None = None`
+  - `account_id: str | None = None`
+  - `account_verified: bool = False`
   - `window_days: int = 60`
+  - `window_verified: bool = False`
+  - `reconciliation_ready: bool = False`
   - `errors: tuple[dict[str, Any], ...] = ()`
   - `diagnostics: dict[str, Any] | None = None`
 
 ---
 
-## 6. Parity Comparison Engine & 6-State Taxonomy
+## 6. Parity Comparison Engine, Supported-Fields Parity & Migration Readiness
 
 The parity comparison engine compares XML baseline and candidate snapshots across all monitored fields:
 
@@ -158,7 +162,20 @@ The parity comparison engine compares XML baseline and candidate snapshots acros
 - `different_semantics`: Substantive value difference or conflicting classification.
 - `missing_field`: Field present in baseline but missing in candidate.
 - `unverified`: Snapshot incomplete, truncated, or census cannot be proven.
-- `unsupported`: Field not supported by candidate source.
+- `unsupported`: Field not supported by baseline or candidate source.
+
+### Supported Fields Parity vs. Full 10-Field Migration Parity
+- **Baseline Trading XML Limitation**: The legacy Trading XML `GetMyeBaySelling` baseline does not supply per-listing `quantity_sold` or explicit `ended_at` timestamps on unsold items. Consequently, these 2 fields are classified as `unsupported` (`PARITY_UNSUPPORTED`).
+- **Supported Fields Parity (`supported_fields_parity`)**: Measures equivalence across the 8 comparable fields supported by both sources (`sold_items_count`, `unsold_items_count`, `sold_item_ids`, `unsold_item_ids`, `selling_classification`, `item_id`, `lifecycle_state`, `sale_classification`). In offline synthetic verification, this achieves `pass`.
+- **Full Parity (`overall_status`)**: Requires full coverage across all 10 monitored fields without any `unsupported` or `unverified` states. Because `quantity_sold` and `ended_at` remain unsupported in baseline Trading XML, `overall_status` evaluates to `inconclusive` (never `pass`).
+- **Migration Readiness (`migration_readiness`)**: Evaluates whether modern endpoints are ready for autonomous production cutover. Migration readiness is strictly `blocked` (`migration_readiness_reason: UNSUPPORTED_FIELDS_IN_BASELINE`) because Trading XML baseline limitations and unverified GraphQL schema entitlement prevent verified parity.
+
+### Positive Account & Window Reconciliation Readiness
+Offline collection completeness (`is_complete`) measures syntactic and page-level integrity of individual response collections. Stronger **cross-provider reconciliation readiness** (`reconciliation_ready`) requires:
+1. `account_verified`: Explicit matching account identifiers across both endpoints (absent IDs in offline fixtures are unverified, not matching).
+2. `window_verified`: Proof of bounded date intervals (undated listings or missing range filters leave window unverified).
+3. `is_complete`: Full offset-zero census without gaps or pending continuations.
+4. `errors == 0`: Zero structural, parsing, or pagination errors.
 
 ### Anti-False-Positive Empty Collection Rule
 If both the XML baseline and candidate snapshots return verified empty collections (0 listings), record-level fields cannot be evaluated. The engine classifies record-level fields as `unverified` and reports `overall_status: inconclusive`, preventing false-positive pass claims when no records were tested.
@@ -207,3 +224,6 @@ uv run --locked python scripts/validate_sold_unsold_parity.py \
 
 ### Page Limit Enforcement
 The CLI and underlying live validation functions enforce `--max-pages` between 1 and 25 (`MAX_CLASSIFICATION_PAGES`). Values outside this range are rejected before any network access.
+
+### Reserved Live Mode
+The `--live` option is reserved and returns `NOT_IMPLEMENTED`. Live validation cannot be enabled until eBay confirms production entitlement and published schemas for `sellerListingSearch`. The CLI exits 1 with a structured diagnostic message if `--live` is passed.

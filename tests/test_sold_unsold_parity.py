@@ -382,6 +382,8 @@ def test_normalize_rest_fulfillment_orders_multi_line_items_and_multi_qty() -> N
     """Orders with multiple line items and multi-quantity track unique item IDs correctly."""
     payload = {
         "total": 1,
+        "limit": 50,
+        "offset": 0,
         "orders": [
             {
                 "orderId": "12-34567-89012",
@@ -1740,3 +1742,449 @@ def test_cli_fixture_strictness_and_live_flag(
     assert ret_live == 1
     captured = capsys.readouterr().out
     assert "NOT_IMPLEMENTED" in captured
+
+
+def test_rest_fulfillment_terminal_offset_page_and_missing_metadata() -> None:
+    """REST Fulfillment normalizer must reject terminal-only offset pages and missing metadata."""
+    # Terminal offset page: total=2, offset=1, limit=1, orders=[1 order]
+    terminal_payload = {
+        "total": 2,
+        "offset": 1,
+        "limit": 1,
+        "orders": [
+            {
+                "orderId": "09-12345-67890",
+                "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+            }
+        ],
+    }
+    res_terminal = normalize_rest_fulfillment_orders(terminal_payload)
+    assert res_terminal.is_complete is False
+    assert res_terminal.is_truncated is True
+    assert any(err["code"] == "PENDING_CONTINUATION" for err in res_terminal.errors)
+
+    # Missing required metadata: total omitted
+    no_total = {
+        "offset": 0,
+        "limit": 50,
+        "orders": [],
+    }
+    res_no_total = normalize_rest_fulfillment_orders(no_total)
+    assert res_no_total.is_complete is False
+    assert any(
+        err["code"] == "MISSING_PAGINATION_METADATA" for err in res_no_total.errors
+    )
+
+    # Missing required metadata: offset omitted
+    no_offset = {
+        "total": 1,
+        "limit": 50,
+        "orders": [
+            {
+                "orderId": "09-12345-67891",
+                "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+            }
+        ],
+    }
+    res_no_offset = normalize_rest_fulfillment_orders(no_offset)
+    assert res_no_offset.is_complete is False
+    assert any(
+        err["code"] == "MISSING_PAGINATION_METADATA" for err in res_no_offset.errors
+    )
+
+
+def test_merge_rest_fulfillment_orders_pages_adversarial_pagination() -> None:
+    """REST Fulfillment page merger must enforce offset sequences, total consistency, and account IDs."""
+    # 1. Page 2 missing total or offset
+    pages_missing_meta = [
+        {
+            "total": 2,
+            "offset": 0,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            # Missing total and limit!
+            "offset": 1,
+            "orders": [
+                {
+                    "orderId": "ord-2",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_meta = merge_rest_fulfillment_orders_pages(pages_missing_meta)
+    assert res_meta.is_complete is False
+    assert any(err["code"] == "MISSING_PAGINATION_METADATA" for err in res_meta.errors)
+
+    # 2. Sequence gap: page 1 offset 0, page 2 offset 5 instead of 1
+    pages_gap = [
+        {
+            "total": 2,
+            "offset": 0,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            "total": 2,
+            "offset": 5,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-2",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_gap = merge_rest_fulfillment_orders_pages(pages_gap)
+    assert res_gap.is_complete is False
+    assert any(err["code"] == "PAGINATION_SEQUENCE_ERROR" for err in res_gap.errors)
+
+    # 3. Account conflict across pages
+    pages_conflict = [
+        {
+            "total": 2,
+            "offset": 0,
+            "limit": 1,
+            "accountId": "seller_alpha",
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            "total": 2,
+            "offset": 1,
+            "limit": 1,
+            "accountId": "seller_beta",
+            "orders": [
+                {
+                    "orderId": "ord-2",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_conflict = merge_rest_fulfillment_orders_pages(pages_conflict)
+    assert res_conflict.is_complete is False
+    assert any(err["code"] == "ACCOUNT_MISMATCH" for err in res_conflict.errors)
+
+    # 4. Truncated collection: total=3 but only 2 orders provided without pending next
+    pages_truncated = [
+        {
+            "total": 3,
+            "offset": 0,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            "total": 3,
+            "offset": 1,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-2",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_trunc = merge_rest_fulfillment_orders_pages(pages_truncated)
+    assert res_trunc.is_complete is False
+    assert res_trunc.is_truncated is True
+    assert any(err["code"] == "PENDING_CONTINUATION" for err in res_trunc.errors)
+
+    # 5. Empty pages list
+    res_empty = merge_rest_fulfillment_orders_pages([])
+    assert res_empty.is_complete is False
+    assert any(err["code"] == "NO_PAGES_PROVIDED" for err in res_empty.errors)
+
+    # 6. Page is not a mapping
+    res_non_map = merge_rest_fulfillment_orders_pages(["not-a-dict"])  # type: ignore[arg-type]
+    assert res_non_map.is_complete is False
+    assert any(err["code"] == "MALFORMED_PAGE" for err in res_non_map.errors)
+
+    # 7. Page containing API errors array
+    pages_with_err = [
+        {
+            "total": 1,
+            "offset": 0,
+            "limit": 1,
+            "orders": [],
+            "errors": [{"errorId": "INTERNAL_SERVER_ERROR"}],
+        }
+    ]
+    res_api_err = merge_rest_fulfillment_orders_pages(pages_with_err)
+    assert res_api_err.is_complete is False
+    assert any(err["code"] == "INTERNAL_SERVER_ERROR" for err in res_api_err.errors)
+
+    # 8. Extra page after reaching declared total
+    pages_after_end = [
+        {
+            "total": 1,
+            "offset": 0,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-1",
+                    "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+                }
+            ],
+        },
+        {
+            "total": 1,
+            "offset": 1,
+            "limit": 1,
+            "orders": [
+                {
+                    "orderId": "ord-extra",
+                    "lineItems": [{"legacyItemId": "110000000002", "quantity": 1}],
+                }
+            ],
+        },
+    ]
+    res_after_end = merge_rest_fulfillment_orders_pages(pages_after_end)
+    assert res_after_end.is_complete is False
+    assert any(
+        err["code"] == "PAGES_AFTER_END_DECLARED" for err in res_after_end.errors
+    )
+
+    # 9. Page missing orders container
+    pages_no_orders = [
+        {
+            "total": 1,
+            "offset": 0,
+            "limit": 1,
+            "orders": "invalid_orders_type",
+        }
+    ]
+    res_no_orders = merge_rest_fulfillment_orders_pages(pages_no_orders)
+    assert res_no_orders.is_complete is False
+    assert any(
+        err["code"] == "MISSING_REQUIRED_CONTAINER" for err in res_no_orders.errors
+    )
+
+
+def test_graphql_grouped_bucket_nested_continuation_and_totals_reconciliation() -> None:
+    """GraphQL grouped buckets must validate internal pageInfo.hasNextPage and bucket total reconciliation."""
+    # Nested bucket continuation in endedListings must block collection completeness
+    nested_cont_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 2,
+                "endedListings": {
+                    "total": 2,
+                    "pageInfo": {"hasNextPage": True},
+                    "items": [
+                        {
+                            "itemId": "110000000001",
+                            "status": "ENDED",
+                            "quantitySold": 0,
+                        }
+                    ],
+                },
+            }
+        }
+    }
+    res_nested = normalize_graphql_seller_listing_search(nested_cont_payload)
+    assert res_nested.is_complete is False
+    assert res_nested.is_truncated is True
+    assert any(err["code"] == "PENDING_CONTINUATION" for err in res_nested.errors)
+
+    # Bucket declared total mismatch (declared 5, but items array has 1)
+    bucket_mismatch_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 5,
+                "endedListings": {
+                    "total": 5,
+                    "pageInfo": {"hasNextPage": False},
+                    "items": [
+                        {
+                            "itemId": "110000000001",
+                            "status": "ENDED",
+                            "quantitySold": 0,
+                        }
+                    ],
+                },
+            }
+        }
+    }
+    res_mismatch = normalize_graphql_seller_listing_search(bucket_mismatch_payload)
+    assert res_mismatch.is_complete is False
+    assert any(err["code"] == "TOTAL_RECORDS_MISMATCH" for err in res_mismatch.errors)
+
+
+def test_graphql_date_window_evidence_off_window_and_undated() -> None:
+    """GraphQL listings with off-window or undated endings must be appropriately qualified."""
+    # Listing with explicit ended_at outside lookback window (e.g. 100 days ago, window is 60 days)
+    off_window_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                        "itemEndDate": "2025-01-01T00:00:00.000Z",  # Off-window
+                    }
+                ],
+            }
+        }
+    }
+    res_off = normalize_graphql_seller_listing_search(
+        off_window_payload, window_days=60
+    )
+    assert res_off.selling_classification["110000000001"] == "unknown"
+    assert res_off.listings[0].sale_classification == SaleClassification.UNKNOWN
+
+    # Listing with no ended_at (undated): classified as unsold with medium evidence, but window_verified=False
+    undated_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "items": [
+                    {
+                        "itemId": "110000000002",
+                        "status": "ENDED",
+                        "quantitySold": 0,
+                    }
+                ],
+            }
+        }
+    }
+    res_undated = normalize_graphql_seller_listing_search(
+        undated_payload, window_days=60
+    )
+    assert res_undated.selling_classification["110000000002"] == "unsold"
+    assert res_undated.listings[0].evidence_level == ClassificationEvidence.MEDIUM
+    assert res_undated.window_verified is False
+    assert res_undated.reconciliation_ready is False
+
+
+def test_composite_cross_provider_account_and_window_evidence() -> None:
+    """Composite modern merger requires positive evidence of account identity and window bounds."""
+    # Matching accounts and verified dates
+    now_iso = datetime.now(timezone.utc).isoformat()
+    gql_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "accountId": "seller_verified",
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 1,
+                        "itemEndDate": now_iso,
+                    }
+                ],
+            }
+        }
+    }
+    gql_res = normalize_graphql_seller_listing_search(gql_payload, window_days=60)
+
+    orders_payload = {
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+        "accountId": "seller_verified",
+        "orders": [
+            {
+                "orderId": "ord-1",
+                "lineItems": [{"legacyItemId": "110000000001", "quantity": 1}],
+            }
+        ],
+    }
+    orders_res = normalize_rest_fulfillment_orders(orders_payload, window_days=60)
+
+    comp = merge_composite_modern_sold_unsold(gql_res, orders_res, window_days=60)
+    assert comp.is_complete is True
+    assert comp.account_verified is True
+    assert comp.window_verified is True
+    assert comp.reconciliation_ready is True
+
+    # Missing account in GraphQL leaves account_verified=False and reconciliation_ready=False
+    gql_no_acc_payload = {
+        "data": {
+            "sellerListingSearch": {
+                "total": 1,
+                "items": [
+                    {
+                        "itemId": "110000000001",
+                        "status": "ENDED",
+                        "quantitySold": 1,
+                        "itemEndDate": now_iso,
+                    }
+                ],
+            }
+        }
+    }
+    gql_no_acc = normalize_graphql_seller_listing_search(
+        gql_no_acc_payload, window_days=60
+    )
+    comp_unverified_acc = merge_composite_modern_sold_unsold(
+        gql_no_acc, orders_res, window_days=60
+    )
+    assert comp_unverified_acc.account_verified is False
+    assert comp_unverified_acc.reconciliation_ready is False
+
+
+def test_compare_sold_unsold_snapshots_unsupported_fields_separation() -> None:
+    """Snapshot comparison must separate supported_fields_parity from complete 10-field migration parity."""
+    # Baseline Trading XML has 8 fields, but lacks quantity_sold and ended_at (PARITY_UNSUPPORTED)
+    xml_data = cli_harness.get_synthetic_sold_unsold_xml()
+    xml_snap = normalize_trading_xml_sold_unsold(xml_data)
+
+    gql_data = cli_harness.get_synthetic_graphql_ended_listings()
+    gql_snap = normalize_graphql_seller_listing_search(gql_data)
+
+    orders_data = cli_harness.get_synthetic_rest_fulfillment_orders()
+    orders_snap = normalize_rest_fulfillment_orders(orders_data)
+
+    cand_snap = merge_composite_modern_sold_unsold(gql_snap, orders_snap)
+
+    report = compare_sold_unsold_snapshots(xml_snap, cand_snap)
+    # Supported fields match -> PASS
+    assert report["supported_fields_parity"] == "pass"
+    assert report["comparable_supported_fields_count"] == 8
+    assert report["unsupported_fields_count"] == 2
+    # Overall 10-field parity cannot pass due to unsupported fields -> INCONCLUSIVE
+    assert report["overall_status"] == "inconclusive"
+    assert report["is_inconclusive"] is True
+    # Migration readiness blocked
+    assert report["migration_readiness"] == "blocked"
+    assert report["migration_readiness_reason"] == "UNSUPPORTED_FIELDS_IN_BASELINE"
+
+    # Verify sanitized output
+    sanitized = sanitize_sold_unsold_parity_report(report)
+    assert sanitized["supported_fields_parity"] == "pass"
+    assert sanitized["overall_status"] == "inconclusive"
+    assert sanitized["migration_readiness"] == "blocked"
+    assert "quantity_sold, ended_at" in sanitized["migration_readiness_reason"]
+
+    # Verify markdown rendering
+    md = render_sold_unsold_parity_markdown(report)
+    assert "**Supported Fields Parity:** `PASS`" in md
+    assert "**Overall Status:** `INCONCLUSIVE`" in md
+    assert "**Migration Readiness:** `BLOCKED`" in md
