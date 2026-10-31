@@ -157,7 +157,7 @@ The validation harness includes 6 built-in probes for safe schema and contract d
 | **5. Token Requirements** | User Access Token with `sell.fulfillment` scopes **[OFFICIAL SPEC]**. |
 | **6. Required Scopes** | `https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly` or `sell.fulfillment` **[OFFICIAL SPEC]**. Already optionally supported in `ha-ebay`! |
 | **7. Entitlement / Approval** | Public Sell API; no partner gating **[OFFICIAL SPEC]**. |
-| **8. Pagination & Date Window** | Orders filtered by date range (last 90 days); cursor pagination **[OFFICIAL SPEC]**. |
+| **8. Pagination & Date Window** | Orders default to last 90 days (up to 2 years via date filters); limit/offset pagination (default limit 50, max 200 items/page, returning integer `total`) **[OFFICIAL SPEC]** **[CODE AUDITED]**. |
 | **9. Call Limits & Polling** | 2,000,000 calls/day standard Sell limit **[OFFICIAL SPEC]**. |
 | **10. HA Entities Dependent** | `sensor.ebay_seller_orders_awaiting_shipment`, `sensor.ebay_seller_orders_paid`, `event.ebay_seller_ops_activity` (`order_paid`, `order_shipped`, `listing_sold`), blueprint `notify_when_order_overdue.yaml`. |
 | **11. Verified Limitations** | Unsold items with 0 bids/sales do not generate orders, so they cannot be read from the Fulfillment API; they require `sellerListingSearch` ended-listing filtering. |

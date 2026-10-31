@@ -14,7 +14,7 @@ The integration does **not** treat all feature domains as legacy Trading XML. Di
 | **Bidding** (`FeatureKey.BIDDING`) | `TRADING_XML` | `GetMyeBayBuying` (`BidList`) | Yes (Candidate: GraphQL `userBiddingActivity`) |
 | **Seller Listings** (`FeatureKey.SELLER_LISTINGS`) | `TRADING_XML` | `GetMyeBaySelling` (`ActiveList`) | Yes (Candidate: GraphQL `activeSellerListings`) |
 | **Offers** (`FeatureKey.OFFERS`) | `TRADING_XML` | `GetBestOffers` (active offer counts per item) | Yes (Candidate: GraphQL `sellerNegotiationHistory`; validation complete, cutover blocked) |
-| **Sold / Unsold** (`FeatureKey.SOLD_UNSOLD`) | `TRADING_XML` | `GetMyeBaySelling` (`SoldList`, `UnsoldList`) | Yes (Candidate: REST / GraphQL) |
+| **Sold / Unsold** (`FeatureKey.SOLD_UNSOLD`) | `TRADING_XML` | `GetMyeBaySelling` (`SoldList`, `UnsoldList`) | Yes (Candidate: GraphQL `sellerListingSearch` + REST Sell Fulfillment `getOrders`; validation complete, cutover blocked) |
 | **Fulfillment Orders** (`FeatureKey.ORDERS`) | `REST` | `/sell/fulfillment/v1/order` & dispute APIs | **No** (Already modern REST; XML is not a fallback) |
 | **Seller Standards** (`FeatureKey.SELLER_STANDARDS`) | `REST` | `/sell/analytics/v1/seller_standards_profile` | **No** (Already modern REST; XML is not a fallback) |
 | **Messages** (`FeatureKey.MESSAGES`) | `REST` | Commerce Message REST client | **No** (Already modern REST; XML is not a fallback) |
@@ -130,7 +130,7 @@ flowchart TD
     I -- Yes --> E
 ```
 
-### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5)
+### Phase 1: Research, Normalization & Parity Validation (Completed for M1, M4, M5, M6, M7)
 - Define modern queries, data models, and fail-closed normalization parsers.
 - Build private, opt-in CLI parity test tools (`scripts/validate_*_parity.py`).
 - Implement exhaustive offline test suites covering partial errors, duplicate IDs, and contradictory pagination.

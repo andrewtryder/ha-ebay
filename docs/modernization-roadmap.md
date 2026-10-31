@@ -116,3 +116,19 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Fail-closed empty snapshot handling: empty collections evaluate record fields as unverified, reporting inconclusive status rather than false-positive pass claims.
   - Preserved privacy protections: zero tokens, secrets, client credentials, buyer usernames, or private offer prices in reports; listing IDs in active offer count maps are pseudonymized with deterministic SHA-256 hashes (`item_<sha256_12>`).
   - Milestone status: **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Next planned workstream: **Milestone 7 (Sold/Unsold Listing Classification Package)**.
+
+### 8. Sold & Unsold Listing Classification Modernization (Milestone 7)
+- **Authoritative API Research & Contract Discovery**:
+  - Researched modern eBay data sources for sold and unsold listing classification: GraphQL `sellerListingSearch(status: [ENDED])` candidate probes vs. REST Sell Fulfillment API `getOrders` (`GET /sell/fulfillment/v1/order`).
+  - Corrected official documentation: REST Sell Fulfillment API uses limit/offset pagination with `limit` (default 50, max 200) and `offset` query parameters, returning an integer `total`, rather than cursor-based pagination. Default lookback is 90 days, with historical retrieval up to 2 years via ISO date filters.
+  - Established critical operational boundary: Ended listings in GraphQL `sellerListingSearch` are **not** automatically classified as unsold; an ended listing can be sold (auction win or fixed-price purchase) or unsold (ended without sales). Only `quantitySold == 0` confirms unsold status, while `quantitySold > 0` confirms sold status.
+  - Identified REST Sell Fulfillment limitation: `getOrders` only captures completed sales (line items mapped to `legacyItemId`); it generates zero records for unsold listings, so orders alone cannot verify unsold inventory.
+  - Designed composite modern model merging GraphQL ended listings with REST Sell Fulfillment orders for complete outcome classification.
+- **Read-Only Sold & Unsold Parity Validation Module & Offline Harness**:
+  - Added [`custom_components/ebay/parsers/sold_unsold_parity.py`](../custom_components/ebay/parsers/sold_unsold_parity.py) and CLI harness [`scripts/validate_sold_unsold_parity.py`](../scripts/validate_sold_unsold_parity.py).
+  - Built typed, immutable models (`NormalizedListingClassification`, `SoldUnsoldCollectionResult`) and candidate read-only GraphQL probes.
+  - Implemented fail-closed Trading XML normalizer and multi-page merger (`merge_trading_xml_sold_unsold_pages`) supporting up to 25 pages with loop detection, contradictory total reconciliation, and "sold" precedence over "unsold" when an item appears in both lists.
+  - Evaluates all monitored classification fields (`sold_items_count`, `unsold_items_count`, `sold_item_ids`, `unsold_item_ids`, `selling_classification`, `item_id`, `lifecycle_state`, `sale_classification`, `quantity_sold`, `ended_at`) across the 6-state parity taxonomy.
+  - Anti-false-positive rule: Empty collections evaluate record fields as unverified and report inconclusive status.
+  - Strict privacy protections: Default-deny report schema, deterministic SHA-256 item pseudonymization (`item_<sha256_12>`), allowlisted symbolic error codes, and generic diagnostic messages.
+  - Milestone status: **Read-only validation package completed; production migration blocked pending live entitlement and parity evidence.** Next planned workstream: **Milestone 8 (Remaining Trading XML Operations)**.
