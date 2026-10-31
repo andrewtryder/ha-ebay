@@ -204,12 +204,19 @@ The validation harness includes 6 built-in probes for safe schema and contract d
   - Production coordinators unchanged (Trading XML GetUser authoritative; zero cutover)
              │
              ▼
-[Milestone 9: Account Identity & Multiple Accounts Foundation] (CURRENT)
+[Milestone 9: Account Identity & Multiple Accounts Foundation] -> MERGED (PR #103)
   - Canonical AccountIdentity model: custom_components/ebay/account_identity.py
   - Same-application multi-account support enabled and tested
   - Duplicate detection matrix (Cases A–E) & reauth account switching protections
   - Backward-compatible version 5 ConfigEntry migration preserving legacy unique IDs
   - Zero modern provider cutover; 100% production isolation
+             │
+             ▼
+[Milestone 10: Guided BYO OAuth Architecture & Onboarding Specification] (CURRENT)
+  - Architecture Decision Record: docs/one-click-oauth-architecture.md
+  - Permanent adoption of user-owned developer keyset baseline (BYO)
+  - Actionable specification for Home Assistant in-flow guided onboarding wizard
+  - Hard NO-GO on embedded secrets or maintainer-hosted broker proxies
              │
              ▼
 [Future Production Cutover]:
