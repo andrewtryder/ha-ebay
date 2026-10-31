@@ -11,7 +11,12 @@ import xml.etree.ElementTree as ET
 import aiohttp
 import pytest
 
-from custom_components.ebay.api import EbayApiClient, EbayApiError, EbayPartialFailure
+from custom_components.ebay.api import (
+    EbayApiClient,
+    EbayApiError,
+    EbayAuthError,
+    EbayPartialFailure,
+)
 from custom_components.ebay.clients.resilience import (
     BoundedRetryPolicy,
     EndpointFamily,
@@ -150,15 +155,20 @@ class _FakeResponse:
         status: int = 200,
         headers: dict[str, str] | None = None,
         json_data: Any = None,
+        json_payload: Any = None,
+        text: str | None = None,
     ) -> None:
         self.status = status
         self.headers = headers or {}
-        self._json_data = json_data or {}
+        self._json_data = json_data if json_data is not None else (json_payload or {})
+        self._text = text
 
     async def json(self, content_type: str | None = None) -> Any:
         return self._json_data
 
     async def text(self) -> str:
+        if self._text is not None:
+            return self._text
         if self._json_data:
             import json
 
@@ -172,6 +182,17 @@ class _FakeContext:
 
     async def __aenter__(self) -> _FakeResponse:
         return self._response
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _FakeBoomContext:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self) -> Any:
+        raise self._exc
 
     async def __aexit__(self, *args: object) -> None:
         return None
@@ -672,3 +693,348 @@ def test_rate_limiting_diagnostics_defaults() -> None:
         "trading_cooldown_remaining_seconds": 0.0,
         "last_retry_count": 0,
     }
+
+
+# --- 9. Bounded Retry Production Boundary Regression Tests ---
+
+
+@pytest.mark.asyncio
+async def test_rest_bounded_retry_500_then_success() -> None:
+    """REST GET retries on transient 500 and succeeds, incrementing retry count."""
+    session = Mock()
+    resp_500 = _FakeResponse(status=500, json_payload={"error": "server error"})
+    resp_200 = _FakeResponse(status=200, json_payload={"orders": [{"orderId": "123"}]})
+    session.get = Mock(side_effect=[_FakeContext(resp_500), _FakeContext(resp_200)])
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    data = await client._async_rest_get_once(
+        "https://api.ebay.com/sell/fulfillment/v1/order",
+        partial_category="orders",
+    )
+    assert data == {"orders": [{"orderId": "123"}]}
+    assert client._last_retry_count == 1
+    assert client.get_rate_limiting_diagnostics()["last_retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_bounded_retry_timeout_then_success() -> None:
+    """REST GET retries on TimeoutError and recovers."""
+    session = Mock()
+    resp_200 = _FakeResponse(status=200, json_payload={"data": "ok"})
+    boom = _FakeBoomContext(TimeoutError("socket timeout"))
+    session.get = Mock(side_effect=[boom, _FakeContext(resp_200)])
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    data = await client._async_rest_get_once(
+        "https://api.ebay.com/test",
+        partial_category="test",
+    )
+    assert data == {"data": "ok"}
+    assert client._last_retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rest_bounded_retry_repeated_503_exhausts_and_fails() -> None:
+    """REST GET exhausts bounded retries (2 retries, 3 attempts) and raises partial failure."""
+    session = Mock()
+    resp_503 = _FakeResponse(status=503, json_payload={"error": "service unavailable"})
+    session.get = Mock(
+        side_effect=[
+            _FakeContext(resp_503),
+            _FakeContext(resp_503),
+            _FakeContext(resp_503),
+        ]
+    )
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayPartialFailure) as exc_info:
+        await client._async_rest_get_once(
+            "https://api.ebay.com/test",
+            partial_category="orders",
+        )
+    assert exc_info.value.failure is not None
+    assert exc_info.value.failure.http_status == 503
+    assert client._last_retry_count == 2
+    assert session.get.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_rest_401_raises_immediately_without_retrying_in_once() -> None:
+    """HTTP 401 raises EbayAuthError immediately in _async_rest_get_once without multiplying retries."""
+    session = Mock()
+    resp_401 = _FakeResponse(status=401, text="Unauthorized")
+    session.get = Mock(return_value=_FakeContext(resp_401))
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(return_value="expired_token")
+
+    with pytest.raises(EbayAuthError):
+        await client._async_rest_get_once(
+            "https://api.ebay.com/test",
+            partial_category="test",
+        )
+    assert session.get.call_count == 1
+    assert getattr(client, "_last_retry_count", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_403_permanent_failure_no_retry() -> None:
+    """HTTP 403 fails immediately without bounded retry attempts."""
+    session = Mock()
+    resp_403 = _FakeResponse(status=403, json_payload={"error": "forbidden"})
+    session.get = Mock(return_value=_FakeContext(resp_403))
+
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayPartialFailure):
+        await client._async_rest_get_once(
+            "https://api.ebay.com/test",
+            partial_category="orders",
+        )
+    assert session.get.call_count == 1
+    assert getattr(client, "_last_retry_count", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_trading_bounded_retry_502_then_success() -> None:
+    """Trading API retries on 502 and parses valid XML on second attempt."""
+    session = Mock()
+    resp_502 = _FakeResponse(status=502, text="Bad Gateway")
+    resp_200 = _FakeResponse(
+        status=200,
+        text="""<GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+            <Ack>Success</Ack>
+        </GetMyeBaySellingResponse>""",
+    )
+    session.post = Mock(side_effect=[_FakeContext(resp_502), _FakeContext(resp_200)])
+
+    policy = BoundedRetryPolicy(base_delay=0.01, sleep_func=AsyncMock())
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        retry_policy=policy,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    root = await client._async_call_trading_api_once("GetMyeBaySelling", "<xml/>")
+    assert root is not None
+    assert client._last_retry_count == 1
+    assert session.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_trading_429_missing_retry_after_records_default_cooldown() -> None:
+    """Trading 429 without Retry-After header records a safe 60s default cooldown."""
+    session = Mock()
+    resp_429 = _FakeResponse(status=429, text="Rate Limited")  # no headers
+    session.post = Mock(return_value=_FakeContext(resp_429))
+
+    tracker = RateLimitTracker()
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+        rate_limit_tracker=tracker,
+    )
+    client.async_get_access_token = AsyncMock(return_value="valid_token")
+
+    with pytest.raises(EbayApiError, match="HTTP 429"):
+        await client._async_call_trading_api_once("GetMyeBaySelling", "<xml/>")
+
+    assert tracker.is_throttled(EndpointFamily.TRADING, "test_client")
+    remaining = tracker.cooldown_remaining(EndpointFamily.TRADING, "test_client")
+    assert remaining >= 55.0  # safe default is 60.0s
+
+
+def test_parse_retry_after_storage_bound_vs_polling_wait() -> None:
+    """Server cooldown up to 24h is stored truthfully in tracker."""
+    assert parse_retry_after("3600") == 3600.0
+    tracker = RateLimitTracker()
+    tracker.record_throttled(EndpointFamily.REST, 3600.0)
+    assert tracker.cooldown_remaining(EndpointFamily.REST) > 3500.0
+
+
+def test_shared_keyset_tracker_registry_isolation_and_lifecycle() -> None:
+    """HA-instance registry shares tracker for same keyset, isolates others, and tracks ref count."""
+    from custom_components.ebay import (
+        async_get_rate_limit_tracker,
+        async_release_rate_limit_tracker,
+    )
+    from custom_components.ebay.const import DOMAIN
+
+    hass = Mock()
+    hass.data = {}
+
+    # Account 1 and Account 2 share developer keyset on production
+    t1 = async_get_rate_limit_tracker(hass, "production", "shared_app_id")
+    t2 = async_get_rate_limit_tracker(hass, "production", "shared_app_id")
+    assert t1 is t2
+
+    # Account 3 has a different developer keyset on production
+    t3 = async_get_rate_limit_tracker(hass, "production", "other_app_id")
+    assert t3 is not t1
+
+    # Account 4 uses shared keyset but in sandbox environment
+    t4 = async_get_rate_limit_tracker(hass, "sandbox", "shared_app_id")
+    assert t4 is not t1
+
+    # Throttling t1 affects t2
+    t1.record_throttled(EndpointFamily.REST, 60.0)
+    assert t2.is_throttled(EndpointFamily.REST)
+    assert not t3.is_throttled(EndpointFamily.REST)
+    assert not t4.is_throttled(EndpointFamily.REST)
+
+    # Release ref counts
+    async_release_rate_limit_tracker(hass, "production", "shared_app_id")
+    assert len(hass.data[DOMAIN]["rate_limit_trackers"]) == 3
+    async_release_rate_limit_tracker(hass, "production", "shared_app_id")
+    # Cleaned up from registry when ref_count reaches 0
+    assert len(hass.data[DOMAIN]["rate_limit_trackers"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_truncated_pagination_preserves_confirmed_items_and_separates_success_stamp() -> (
+    None
+):
+    """Truncated pagination retains previously confirmed items and only updates attempt timestamp."""
+    from custom_components.ebay.const import SECTION_BUYING
+
+    session = Mock()
+    client = EbayApiClient(
+        session,
+        environment="production",
+        client_id="test_client",
+        client_secret="test_secret",
+        runame="test_runame",
+        refresh_token="test_refresh",
+        site_id="0",
+    )
+
+    # Cycle 1: Complete fetch with 3 watched items
+    full_watched = {
+        "item_1": {"title": "Item 1", "current_price": 10.0},
+        "item_2": {"title": "Item 2", "current_price": 20.0},
+        "item_3": {"title": "Item 3", "current_price": 30.0},
+    }
+    client._fetch_buying_pages = AsyncMock(
+        return_value=(full_watched, {}, False, False)
+    )
+
+    p1 = await client.async_fetch_sections(
+        {SECTION_BUYING},
+        buying_enabled=True,
+        selling_enabled=False,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=1800,
+    )
+    assert len(p1["watched"]) == 3
+    assert p1["summary"]["watched_items"] == 3
+    assert SECTION_BUYING in p1["section_last_success"]
+    success_stamp_1 = p1["section_last_success"][SECTION_BUYING]
+
+    # Cycle 2: Truncated fetch with only 1 item returned
+    partial_watched = {"item_1": {"title": "Item 1 Updated", "current_price": 12.0}}
+    client._fetch_buying_pages = AsyncMock(
+        return_value=(partial_watched, {}, True, False)  # watched_truncated = True
+    )
+
+    p2 = await client.async_fetch_sections(
+        {SECTION_BUYING},
+        previous=p1,
+        buying_enabled=True,
+        selling_enabled=False,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=1800,
+    )
+    # Critical: All 3 items preserved, item_1 updated!
+    assert len(p2["watched"]) == 3
+    assert p2["watched"]["item_1"]["current_price"] == 12.0
+    assert "item_2" in p2["watched"]
+    assert "item_3" in p2["watched"]
+    assert p2["summary"]["watched_items"] == 3
+    assert "buying_truncated" in p2["partial_failures"]
+    # Success stamp must NOT advance
+    assert p2["section_last_success"][SECTION_BUYING] == success_stamp_1
+    # Attempt stamp MUST advance
+    assert p2["section_last_attempt"][SECTION_BUYING] >= success_stamp_1
+
+    # Cycle 3: Genuine untruncated fetch with 0 items
+    client._fetch_buying_pages = AsyncMock(
+        return_value=({}, {}, False, False)  # watched_truncated = False
+    )
+
+    p3 = await client.async_fetch_sections(
+        {SECTION_BUYING},
+        previous=p2,
+        buying_enabled=True,
+        selling_enabled=False,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=1800,
+    )
+    # Legitimate 0 count!
+    assert len(p3["watched"]) == 0
+    assert p3["summary"]["watched_items"] == 0
+    assert "buying_truncated" not in p3["partial_failures"]
+    assert p3["section_last_success"][SECTION_BUYING] > success_stamp_1

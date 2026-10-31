@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,55 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def async_get_rate_limit_tracker(
+    hass: HomeAssistant, environment: str, client_id: str
+) -> Any:
+    """Return the shared RateLimitTracker for the developer keyset in this HA instance."""
+    from .clients.resilience import RateLimitTracker
+
+    if not hasattr(hass, "data") or not isinstance(getattr(hass, "data", None), dict):
+        return RateLimitTracker()
+
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if not isinstance(domain_data, dict):
+        return RateLimitTracker()
+    trackers = domain_data.setdefault("rate_limit_trackers", {})
+    if not isinstance(trackers, dict):
+        trackers = {}
+        domain_data["rate_limit_trackers"] = trackers
+
+    safe_hash = hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:12]
+    key = f"{environment}:{safe_hash}"
+    if key not in trackers:
+        trackers[key] = {
+            "tracker": RateLimitTracker(),
+            "ref_count": 1,
+        }
+    else:
+        trackers[key]["ref_count"] += 1
+    return trackers[key]["tracker"]
+
+
+def async_release_rate_limit_tracker(
+    hass: HomeAssistant, environment: str, client_id: str
+) -> None:
+    """Release a reference to the keyset tracker; clean up when ref_count reaches 0."""
+    if not hasattr(hass, "data") or not isinstance(getattr(hass, "data", None), dict):
+        return
+    domain_data = hass.data.get(DOMAIN)
+    if not isinstance(domain_data, dict):
+        return
+    trackers = domain_data.get("rate_limit_trackers")
+    if not isinstance(trackers, dict):
+        return
+    safe_hash = hashlib.sha256(client_id.encode("utf-8")).hexdigest()[:12]
+    key = f"{environment}:{safe_hash}"
+    if key in trackers:
+        trackers[key]["ref_count"] -= 1
+        if trackers[key]["ref_count"] <= 0:
+            trackers.pop(key, None)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up eBay from a config entry."""
     from homeassistant.const import Platform
@@ -65,6 +115,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         oauth_session = config_entry_oauth2_flow.OAuth2Session(
             hass, entry, implementation
         )
+    tracker = async_get_rate_limit_tracker(
+        hass,
+        entry.data[CONF_ENVIRONMENT],
+        entry.data[CONF_CLIENT_ID],
+    )
     client = EbayApiClient(
         async_get_clientsession(hass),
         environment=entry.data[CONF_ENVIRONMENT],
@@ -74,6 +129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
         site_id=entry.data[CONF_SITE_ID],
         oauth_session=oauth_session,
+        rate_limit_tracker=tracker,
     )
     coordinator = EbayDataUpdateCoordinator(hass, entry, client, options)
     coordinator._loaded_config = _loaded_config_snapshot(entry, options)
@@ -123,9 +179,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, entry.entry_id, coordinator.inactive_item_sensors
     )
     coordinator._fired_ending_soon_dirty = False
-    return await hass.config_entries.async_unload_platforms(
+    unload_ok = await hass.config_entries.async_unload_platforms(
         entry, [Platform(platform) for platform in PLATFORMS]
     )
+    if unload_ok:
+        async_release_rate_limit_tracker(
+            hass,
+            entry.data[CONF_ENVIRONMENT],
+            entry.data[CONF_CLIENT_ID],
+        )
+    return unload_ok
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

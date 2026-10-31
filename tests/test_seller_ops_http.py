@@ -25,6 +25,7 @@ from custom_components.ebay.api import (
     merge_partial_failure_details,
     sanitize_ebay_rest_errors,
 )
+from custom_components.ebay.clients.resilience import EndpointFamily
 from custom_components.ebay.seller_ops import (
     FEEDBACK_ITEMS_MAX_PAGES,
     FEEDBACK_ITEMS_PAGE_LIMIT,
@@ -80,7 +81,8 @@ def _client(
     def _get(*args: Any, **kwargs: Any) -> _Context:
         if capture is not None:
             capture.append({"args": args, "kwargs": kwargs})
-        return _Context(queue.pop(0))
+        res = queue.pop(0) if len(queue) > 1 else queue[0]
+        return _Context(res)
 
     session.get = Mock(side_effect=_get)
     client = EbayApiClient(
@@ -226,7 +228,8 @@ def test_rest_429_soft_fails_transient_after_bounded_sleep() -> None:
                 partial_category="orders",
             )
         )
-    sleep.assert_awaited_once_with(5)
+    sleep.assert_not_called()
+    assert client.rate_limit_tracker.is_throttled(EndpointFamily.REST)
     assert exc_info.value.failure is not None
     assert exc_info.value.failure.classification == "transient"
     assert client._last_api_failure is not None

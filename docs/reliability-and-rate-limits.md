@@ -21,10 +21,10 @@ eBay does not operate a single global 5,000-call quota pool. Limits vary signifi
 
 | Endpoint Family | Underlying Protocol | Official Baseline Quota | Observed Error Behavior | Throttling Action |
 |---|---|---|---|---|
-| **Trading API** | SOAP / XML (`/ws/api.dll`) | Keyset-level daily call limit (historically 5,000/day for default keysets, expandable upon application review). | HTTP 429, or HTTP 200 with XML `Ack=Failure` and `ErrorCode` 518 ("Call usage limit reached") or 17 ("Daily limit exceeded"). | Recorded in `RateLimitTracker` under `EndpointFamily.TRADING`. Backoff/cooldown applied; fast-fail if cooldown > 2.0s. |
-| **REST APIs** | JSON over HTTPS (`/sell/fulfillment`, `/sell/finances`, `/sell/analytics`, `/commerce/feedback`, etc.) | Resource-specific rate limits (often expressed per minute / hour per developer application or user token). | HTTP 429 with standard `Retry-After` header (delta-seconds or HTTP-date). | Recorded in `RateLimitTracker` under `EndpointFamily.REST`. Respects `Retry-After` (capped at 30s); fast-fail if cooldown > 2.0s. |
+| **Trading API** | SOAP / XML (`/ws/api.dll`) | Keyset-level daily call limit (historically 5,000/day for default keysets, expandable upon application review). | HTTP 429, or HTTP 200 with XML `Ack=Failure` and `ErrorCode` 518 ("Call usage limit reached") or 17 ("Daily limit exceeded"). | Recorded in `RateLimitTracker` under `EndpointFamily.TRADING`. Shared keyset cooldown applied; fast-fail if cooldown > 2.0s. |
+| **REST APIs** | JSON over HTTPS (`/sell/fulfillment`, `/sell/finances`, `/sell/analytics`, `/commerce/feedback`, etc.) | Resource-specific rate limits (often expressed per minute / hour per developer application or user token). REST-family cooldown protects against cascading 429s. | HTTP 429 with standard `Retry-After` header (delta-seconds or HTTP-date). | Recorded in `RateLimitTracker` under `EndpointFamily.REST`. Respects server `Retry-After` (stored up to 24 hours); fast-fail if cooldown > 2.0s. |
 | **GraphQL API** | JSON over HTTPS (`/commerce/user/graphql`) | Read-only validation queries only; not cut over in production. | HTTP 429 or execution throttled extension. | Recorded in `RateLimitTracker` under `EndpointFamily.GRAPHQL`. |
-| **OAuth Services** | Form POST (`/identity/v1/oauth2/token`) | Per-application token exchange and refresh rate limits. | HTTP 429 or `invalid_grant` / `invalid_request`. | Bounded retries for transient errors; reauth flow triggered on permanent invalid grant. |
+| **OAuth Services** | Form POST (`/identity/v1/oauth2/token`) | Per-application token exchange and refresh rate limits. Independent token handling with 30s timeout. | HTTP 429 or `invalid_grant` / `invalid_request`. | Bounded retries for transient errors; reauth flow triggered on permanent invalid grant. |
 
 ---
 
@@ -34,7 +34,7 @@ eBay does not operate a single global 5,000-call quota pool. Limits vary signifi
 
 Coordinator polling cadence is user-configurable via `CONF_POLL_INTERVAL` (default: **30 minutes**). Per-section intervals allow finer scheduling where supported:
 - **Full Refresh**: Traverses enabled sections (Buying, Selling, Analytics, Fulfillment, Seller Standards, Feedback, Messages, Account Privileges, Finances).
-- **Page Traversal**: Paginated sections (e.g., Active Selling, Watchlist, Bidding) traverse up to `MAX_PAGES` (default 5 pages, 100-200 entries/page).
+- **Page Traversal**: Paginated sections (e.g., Active Selling, Watchlist, Bidding) traverse up to `MAX_PAGES` (default 20 pages, 100-200 entries/page, defined in `custom_components/ebay/parsers/xml.py`).
 - **Request Volume**: A standard 30-minute poll of Buying + Selling typically executes 2-4 Trading API calls. Enabling optional REST sections adds 1-2 calls per section, well within standard daily limits.
 - **Manual Refresh Cooldown**: `MANUAL_REFRESH_COOLDOWN_SECONDS` prevents rapid manual triggers from amplifying API usage.
 
@@ -44,44 +44,53 @@ Coordinator polling cadence is user-configurable via `CONF_POLL_INTERVAL` (defau
 
 ### Bounded Retry Policy (`BoundedRetryPolicy`)
 
-Located in [`custom_components/ebay/clients/resilience.py`](file:///Users/atr/code/ha-ebay/custom_components/ebay/clients/resilience.py):
-- **Max Retries**: 2 retries (up to 3 attempts total).
+Located in [`custom_components/ebay/clients/resilience.py`](../custom_components/ebay/clients/resilience.py):
+- **Max Retries**: 2 retries (up to 3 attempts total) on confirmed read-only production REST and Trading requests.
 - **Deterministic Backoff**: Exponential progression ($0.5 \times 2^{\text{attempt}}$: 0.5s, 1.0s, 2.0s, capped at 10.0s).
-- **Transient Eligibility**: Only HTTP 429, 500, 502, 503, 504 and transport errors (`TimeoutError`, `ClientConnectorError`, `ServerDisconnectedError`, `ClientPayloadError`, `ClientOSError`) are eligible for retry. Permanent 4xx errors (400, 401, 403, 404) are never retried.
+- **Transient Retry Eligibility**: Only transient HTTP 500, 502, 503, 504 and transient transport errors (`TimeoutError`, `ClientConnectorError`, `ServerDisconnectedError`, `ClientPayloadError`, `ClientOSError`) are retried.
+- **No Immediate Retry on 429**: HTTP 429 rate limits are never retried in an immediate loop; they are recorded in `RateLimitTracker` and fail fast as partial failures to prevent quota exhaustion and request amplification.
+- **No Auth Retry Multipliers**: HTTP 401 raises `EbayAuthError` immediately without retrying, allowing the outer client caller to perform a single token refresh under lock.
+- **Permanent Errors Not Retried**: Permanent 4xx errors (400, 403, 404) fail immediately without retry.
+- **Bounded Request Timeout Budget**: All requests enforce an overall total timeout budget (`total_timeout = 35.0s`), capping per-attempt timeouts to remaining budget time.
 - **Non-blocking Waits**: All delays use cancellation-aware asynchronous sleeping (`await asyncio.sleep(delay)`).
 
-### Rate-Limit Tracker (`RateLimitTracker`)
+### Shared-Keyset Rate-Limit Tracker Registry (`RateLimitTracker`)
 
 Tracks observed provider throttling without assuming theoretical usage:
 - **Thread/Async-Safe**: In-memory monotonic timestamps.
-- **Family & Client Scoping**: Keys are formatted as `<family>:<client_id>` or `<family>`. Accounts sharing keysets share cooldowns where appropriate, while independent accounts remain isolated.
+- **HA-Instance Shared Keyset Registry**: Managed in `hass.data[DOMAIN]["rate_limit_trackers"]`, keyed by safe hash `f"{environment}:{sha256(client_id)[:12]}"`. Multiple Home Assistant config entries sharing the same developer application keyset share the cooldown state, preventing cascading 429s across accounts.
+- **Strict Keyset & Environment Isolation**: Production and Sandbox environments never share cooldowns. Different developer application keysets maintain distinct trackers. No OAuth tokens, credentials, or response data are ever shared across accounts.
+- **Reference-Counted Lifecycle**: Trackers are ref-counted per configured entry and cleanly purged when the last entry using that keyset unloads.
 - **Fast-Fail on Active Cooldown**: If an endpoint family has an active cooldown > 2.0s, outgoing requests fast-fail immediately with `EbayPartialFailure` (REST) or `EbayApiError` (Trading) without hitting the network, preventing request amplification. If cooldown $\le 2.0$s, the client waits the remaining time before proceeding.
 
-### `Retry-After` Header Parsing
+### `Retry-After` Header Parsing & Dual-Horizon Semantics
 
 The function `parse_retry_after()` supports both:
 1. **Delta-seconds**: Integer or float values (e.g., `"30"` $\rightarrow$ 30.0s).
 2. **RFC 7231 / RFC 9110 HTTP-dates**: Full date strings (e.g., `"Sun, 06 Nov 1994 08:49:37 GMT"` $\rightarrow$ computed offset against `time.time()`).
-3. **Caps**: Excessive server delays are capped at 30.0s to prevent polling tasks from stalling. Negative values clamp to 0.0s; unparseable strings fall back to safe defaults.
+3. **Dual-Horizon Semantics**: Server cooldown storage is bounded up to 24 hours (`DEFAULT_MAX_COOLDOWN = 86400.0s`) to ensure long server-mandated cooldowns are remembered truthfully. The active polling wait budget is strictly separated: any cooldown > 2.0s fails fast as a partial failure without stalling Home Assistant polling. Negative values clamp to 0.0s; missing or unparseable headers fall back to a safe 60.0s default.
 
 ---
 
-## 5. Preservation of Last-Good Data
+## 5. Preservation of Last-Good Data & Pagination Integrity
 
-A critical requirement in Home Assistant is that temporary API outages or rate limits must **never** cause entities to drop to 0 or disappear.
+A critical requirement in Home Assistant is that temporary API outages, rate limits, or truncated pagination must **never** cause entities to drop to 0, disappear, or be erroneously pruned.
 
 In `custom_components/ebay/section_fetch.py`:
-1. **Sold / Unsold Classification**: If `async_fetch_sold_unsold_classification()` fails due to transient API errors, the prior `selling_classification` dictionary, `sold_items_count`, and `unsold_items_count` are retained from `previous`. `truncated_collections["sold_unsold"]` is flagged.
-2. **Listing Views**: If `_fetch_seller_list_views()` fails, each item in `selling` retains its prior `views` count from `previous_selling`.
-3. **Best Offers**: If `GetBestOffers` fails, each item in `selling` retains its prior `offers` count from `previous_selling`.
-4. **Traffic Analytics**: If `async_fetch_analytics_views()` fails or partially returns, items in `selling` retain their prior `analytics_views_30d` metrics.
-5. **Seller-Ops Collections**: Orders, payment disputes, seller standards, feedback, and messages retain prior payload dictionaries upon partial failure.
+1. **Truncated Pagination Merging**: If pagination truncates before reading all items (e.g. `watched_truncated` or `selling_truncated` is True), previously confirmed items missing from the partial pages are preserved (`retained = dict(base[collection]); retained.update(fetched)`). Collections are never replaced by a truncated subset, preventing false drops in counts.
+2. **Success Stamping Separation**: When a section experiences truncated pagination or partial failure, only `section_last_attempt` is updated; `section_last_success` is **not** stamped until a complete, untruncated fetch succeeds.
+3. **Genuine Empty Collections**: When a fetch completes with 0 items and is not truncated (`total_pages == 1`, `truncated == False`), counts cleanly update to 0, genuine empty states are reported, and entity lifecycles proceed normally.
+4. **Sold / Unsold Classification**: If `async_fetch_sold_unsold_classification()` fails due to transient API errors, the prior `selling_classification` dictionary, `sold_items_count`, and `unsold_items_count` are retained from `previous`. `truncated_collections["sold_unsold"]` is flagged.
+5. **Listing Views**: If `_fetch_seller_list_views()` fails, each item in `selling` retains its prior `views` count from `previous_selling`.
+6. **Best Offers**: If `GetBestOffers` fails, each item in `selling` retains its prior `offers` count from `previous_selling`.
+7. **Traffic Analytics**: If `async_fetch_analytics_views()` fails or partially returns, items in `selling` retain their prior `analytics_views_30d` metrics.
+8. **Seller-Ops Collections**: Orders, payment disputes, seller standards, feedback, and messages retain prior payload dictionaries upon partial failure.
 
 ---
 
 ## 6. Event Suppression & Churn Prevention
 
-The domain event detection layer in [`custom_components/ebay/events.py`](file:///Users/atr/code/ha-ebay/custom_components/ebay/events.py) evaluates payload diffs between consecutive polls:
+The domain event detection layer in [`custom_components/ebay/events.py`](../custom_components/ebay/events.py) evaluates payload diffs between consecutive polls:
 
 - **Incomplete / Partial Refresh Detection**: If a section experienced truncation (`_collection_truncated`) or reported partial failures (e.g., `selling`, `selling_truncated`, `buying`, `buying_truncated`, `sold_unsold_classification`), the suppression flag `suppress_incomplete` is set to `True`.
 - **Suppressed Transitions**:

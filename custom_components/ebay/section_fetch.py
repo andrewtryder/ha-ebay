@@ -284,6 +284,7 @@ class SectionFetchMixin:
             account_privileges_enabled,
             finances_enabled,
         )
+        self._last_retry_count = 0
         base = _payload_shell(previous)
         watched: dict[str, dict[str, Any]] = dict(base["watched"])
         bidding: dict[str, dict[str, Any]] = dict(base["bidding"])
@@ -347,18 +348,34 @@ class SectionFetchMixin:
 
         if SECTION_BUYING in sections and buying_enabled:
             (
-                watched,
-                bidding,
+                fetched_watched,
+                fetched_bidding,
                 watched_truncated,
                 bidding_truncated,
             ) = await self._fetch_buying_pages()
             truncated_collections["watched"] = watched_truncated
             truncated_collections["bidding"] = bidding_truncated
-            if watched_truncated or bidding_truncated:
+            if watched_truncated:
                 partial_failures.append("buying_truncated")
+                retained_watched = dict(base.get("watched") or {})
+                retained_watched.update(fetched_watched)
+                watched = retained_watched
+            else:
+                watched = fetched_watched
+
+            if bidding_truncated:
+                if "buying_truncated" not in partial_failures:
+                    partial_failures.append("buying_truncated")
+                retained_bidding = dict(base.get("bidding") or {})
+                retained_bidding.update(fetched_bidding)
+                bidding = retained_bidding
+            else:
+                bidding = fetched_bidding
+
+            buying_success = not (watched_truncated or bidding_truncated)
             _stamp_section_attempt(
                 SECTION_BUYING,
-                success=True,
+                success=buying_success,
                 section_last_attempt=section_last_attempt,
                 section_last_success=section_last_success,
                 section_last_fetched=section_last_fetched,
@@ -366,10 +383,15 @@ class SectionFetchMixin:
 
         if SECTION_SELLING in sections and selling_enabled:
             previous_selling = dict(base["selling"])
-            selling, selling_truncated = await self._fetch_selling_pages()
+            fetched_selling, selling_truncated = await self._fetch_selling_pages()
             truncated_collections["selling"] = selling_truncated
             if selling_truncated:
                 partial_failures.append("selling_truncated")
+                retained_selling = dict(previous_selling)
+                retained_selling.update(fetched_selling)
+                selling = retained_selling
+            else:
+                selling = fetched_selling
             fetch_now = datetime.now(timezone.utc)
             if _should_fetch_sold_unsold(
                 previous_selling,
@@ -476,9 +498,15 @@ class SectionFetchMixin:
                         and "offers" in previous_selling[item_id]
                     ):
                         selling[item_id]["offers"] = previous_selling[item_id]["offers"]
+            selling_success = not (
+                selling_truncated
+                or truncated_collections.get("sold_unsold", False)
+                or truncated_collections.get("seller_list_views", False)
+                or truncated_collections.get("active_offers", False)
+            )
             _stamp_section_attempt(
                 SECTION_SELLING,
-                success=True,
+                success=selling_success,
                 section_last_attempt=section_last_attempt,
                 section_last_success=section_last_success,
                 section_last_fetched=section_last_fetched,

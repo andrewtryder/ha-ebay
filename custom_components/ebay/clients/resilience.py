@@ -18,7 +18,8 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_BASE_DELAY = 0.5
 DEFAULT_MAX_DELAY = 10.0
 DEFAULT_TOTAL_TIMEOUT = 35.0
-DEFAULT_RETRY_AFTER_CAP = 30.0
+DEFAULT_MAX_COOLDOWN = 86400.0  # 24 hours server cooldown storage bound
+DEFAULT_RETRY_AFTER_CAP = DEFAULT_MAX_COOLDOWN
 
 
 class FailureType(StrEnum):
@@ -112,7 +113,7 @@ class RateLimitTracker:
         self._throttle_counts[key] = self._throttle_counts.get(key, 0) + 1
         _LOGGER.debug(
             "Rate limit cooldown recorded for %s: duration=%.1fs total_events=%d",
-            key,
+            family,
             delay,
             self._throttle_counts[key],
         )
@@ -128,14 +129,33 @@ class RateLimitTracker:
         self, family: str | EndpointFamily, scope_key: str | None = None
     ) -> float:
         """Return remaining cooldown seconds, or 0.0 if not throttled."""
-        key = self._key(family, scope_key)
-        until = self._cooldowns.get(key, 0.0)
-        remaining = until - time.monotonic()
-        if remaining <= 0.0:
-            if key in self._cooldowns:
-                self._cooldowns.pop(key, None)
+        family_str = str(family).lower()
+        now = time.monotonic()
+
+        # Clean expired cooldowns
+        expired = [k for k, until in self._cooldowns.items() if until <= now]
+        for k in expired:
+            self._cooldowns.pop(k, None)
+
+        if not self._cooldowns:
             return 0.0
-        return remaining
+
+        if scope_key:
+            exact_key = f"{family_str}:{scope_key}"
+            until = max(
+                self._cooldowns.get(exact_key, 0.0),
+                self._cooldowns.get(family_str, 0.0),
+            )
+            return max(0.0, until - now)
+
+        matching_untils = [
+            until
+            for k, until in self._cooldowns.items()
+            if k == family_str or k.startswith(f"{family_str}:")
+        ]
+        if not matching_untils:
+            return 0.0
+        return max(0.0, max(matching_untils) - now)
 
     def clear(self) -> None:
         """Clear all cooldowns (used in tests and entry teardown)."""
@@ -193,12 +213,6 @@ class BoundedRetryPolicy:
         """Return whether a transport exception is eligible for bounded retry."""
         if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
             return True
-        if isinstance(exc, aiohttp.ClientConnectorError):
-            return True
-        if isinstance(exc, aiohttp.ServerDisconnectedError):
-            return True
-        if isinstance(exc, aiohttp.ClientPayloadError):
-            return True
-        if isinstance(exc, aiohttp.ClientOSError):
+        if isinstance(exc, aiohttp.ClientError):
             return True
         return False

@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import pytest
 
+from custom_components.ebay.clients.resilience import EndpointFamily
 from custom_components.ebay.api import (
     ANALYTICS_BATCH_SIZE,
     API_WARNINGS_STATE_ATTR_MAX,
@@ -370,6 +371,8 @@ def test_trading_api_http_errors_and_malformed_xml() -> None:
     with pytest.raises(EbayApiError, match="HTTP 429"):
         asyncio.run(client.async_call_trading_api("GetMyeBayBuying", "<xml/>"))
 
+    client.rate_limit_tracker.clear()
+
     session.post.return_value = _Context(_Response(status=500, text="oops"))
     with pytest.raises(EbayApiError, match="HTTP 500"):
         asyncio.run(client.async_call_trading_api("GetMyeBayBuying", "<xml/>"))
@@ -533,7 +536,8 @@ def test_analytics_http_429_is_transient_partial_failure() -> None:
         pytest.raises(EbayPartialFailure, match="analytics_views") as exc_info,
     ):
         asyncio.run(client.async_get_traffic_report(["1"]))
-    sleep.assert_awaited_once_with(5)
+    sleep.assert_not_called()
+    assert client.rate_limit_tracker.is_throttled(EndpointFamily.REST)
     assert exc_info.value.failure is not None
     assert exc_info.value.failure.classification == "transient"
     assert client._last_api_failure is not None

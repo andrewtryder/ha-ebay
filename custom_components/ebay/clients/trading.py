@@ -38,7 +38,12 @@ from ..parsers.xml import (
     extract_trading_warnings,
 )
 from .errors import EbayApiError, EbayAuthError, EbayParseError
-from .resilience import EndpointFamily, RateLimitTracker, parse_retry_after
+from .resilience import (
+    BoundedRetryPolicy,
+    EndpointFamily,
+    RateLimitTracker,
+    parse_retry_after,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,39 +90,54 @@ class TradingClientMixin:
         elif cooldown > 0.0:
             await asyncio.sleep(cooldown)
 
-        access_token = await self.async_get_access_token()
+        policy = getattr(self, "retry_policy", None) or BoundedRetryPolicy()
+        deadline = time.monotonic() + policy.total_timeout
+        max_retries = policy.max_retries
         page = _page_number_from_xml(xml_body)
-        headers = {
-            "Content-Type": "text/xml;charset=UTF-8",
-            "X-EBAY-API-COMPATIBILITY-LEVEL": COMPATIBILITY_LEVEL,
-            "X-EBAY-API-CALL-NAME": call_name,
-            "X-EBAY-API-SITEID": self.site_id,
-            "X-EBAY-API-IAF-TOKEN": access_token,
-        }
         start = time.monotonic()
-        try:
-            async with self._session.post(
-                self._endpoints.trading,
-                headers=headers,
-                data=xml_body.encode("utf-8"),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                body = await response.text()
-                if response.status in {401, 403}:
-                    _LOGGER.debug(
-                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
-                        call_name,
-                        page,
-                        response.status,
-                        _duration_ms(start),
-                    )
-                    raise EbayAuthError(
-                        f"eBay Trading API auth failed with HTTP {response.status}"
-                    )
-                if response.status == 429:
-                    retry_after_hdr = response.headers.get("Retry-After")
-                    if retry_after_hdr is not None:
-                        delay = parse_retry_after(retry_after_hdr, default_delay=5.0)
+
+        for attempt in range(max_retries + 1):
+            remaining_budget = deadline - time.monotonic()
+            if remaining_budget <= 0.0:
+                raise EbayApiError(
+                    f"eBay Trading API request timed out for {call_name}",
+                    status=504,
+                )
+
+            attempt_timeout = aiohttp.ClientTimeout(
+                total=max(0.1, min(30.0, remaining_budget))
+            )
+            access_token = await self.async_get_access_token()
+            headers = {
+                "Content-Type": "text/xml;charset=UTF-8",
+                "X-EBAY-API-COMPATIBILITY-LEVEL": COMPATIBILITY_LEVEL,
+                "X-EBAY-API-CALL-NAME": call_name,
+                "X-EBAY-API-SITEID": self.site_id,
+                "X-EBAY-API-IAF-TOKEN": access_token,
+            }
+
+            try:
+                async with self._session.post(
+                    self._endpoints.trading,
+                    headers=headers,
+                    data=xml_body.encode("utf-8"),
+                    timeout=attempt_timeout,
+                ) as response:
+                    body = await response.text()
+                    if response.status in {401, 403}:
+                        _LOGGER.debug(
+                            "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
+                            call_name,
+                            page,
+                            response.status,
+                            _duration_ms(start),
+                        )
+                        raise EbayAuthError(
+                            f"eBay Trading API auth failed with HTTP {response.status}"
+                        )
+                    if response.status == 429:
+                        retry_after_hdr = response.headers.get("Retry-After")
+                        delay = parse_retry_after(retry_after_hdr, default_delay=60.0)
                         tracker.record_throttled(
                             EndpointFamily.TRADING, delay, client_id
                         )
@@ -127,23 +147,76 @@ class TradingClientMixin:
                             delay,
                             _duration_ms(start),
                         )
-                    raise EbayApiError(
-                        f"eBay Trading API failed with HTTP {response.status}",
-                        status=429,
-                    )
-                if response.status >= 400:
-                    _LOGGER.debug(
-                        "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
-                        call_name,
-                        page,
-                        response.status,
-                        _duration_ms(start),
-                    )
-                    raise EbayApiError(
-                        f"eBay Trading API failed with HTTP {response.status}"
-                    )
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            raise EbayApiError("eBay Trading API request failed") from exc
+                        raise EbayApiError(
+                            f"eBay Trading API failed with HTTP {response.status}",
+                            status=429,
+                        )
+                    if response.status in {500, 502, 503, 504}:
+                        if attempt < max_retries and (time.monotonic() < deadline):
+                            self._last_retry_count = (
+                                getattr(self, "_last_retry_count", 0) + 1
+                            )
+                            delay = policy.compute_backoff(attempt)
+                            if time.monotonic() + delay < deadline:
+                                _LOGGER.debug(
+                                    "Trading API call 5xx call=%s status=%d attempt=%d retrying in %.2fs",
+                                    call_name,
+                                    response.status,
+                                    attempt + 1,
+                                    delay,
+                                )
+                                await policy.async_wait(delay)
+                                continue
+                        _LOGGER.debug(
+                            "Trading API call 5xx exhausted call=%s page=%s status=%s duration_ms=%.1f",
+                            call_name,
+                            page,
+                            response.status,
+                            _duration_ms(start),
+                        )
+                        raise EbayApiError(
+                            f"eBay Trading API failed with HTTP {response.status}",
+                            status=response.status,
+                        )
+                    if response.status >= 400:
+                        _LOGGER.debug(
+                            "Trading API call failed call=%s page=%s status=%s duration_ms=%.1f",
+                            call_name,
+                            page,
+                            response.status,
+                            _duration_ms(start),
+                        )
+                        raise EbayApiError(
+                            f"eBay Trading API failed with HTTP {response.status}",
+                            status=response.status,
+                        )
+                    # Status is 200 OK: break out of loop to parse XML
+                    break
+            except (EbayAuthError, EbayApiError, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                if policy.is_transient_exception(exc):
+                    if attempt < max_retries and (time.monotonic() < deadline):
+                        self._last_retry_count = (
+                            getattr(self, "_last_retry_count", 0) + 1
+                        )
+                        delay = policy.compute_backoff(attempt)
+                        if time.monotonic() + delay < deadline:
+                            _LOGGER.debug(
+                                "Trading API transient transport error call=%s exc=%s attempt=%d retrying in %.2fs",
+                                call_name,
+                                type(exc).__name__,
+                                attempt + 1,
+                                delay,
+                            )
+                            await policy.async_wait(delay)
+                            continue
+                raise EbayApiError("eBay Trading API request failed") from exc
+        else:
+            raise EbayApiError(
+                f"eBay Trading API request budget exhausted for {call_name}",
+                status=504,
+            )
         try:
             root = ET.fromstring(body)
         except ET.ParseError as exc:
@@ -164,7 +237,7 @@ class TradingClientMixin:
                 _duration_ms(start),
             )
             if _rate_limit_error(root):
-                tracker.record_throttled(EndpointFamily.TRADING, 30.0, client_id)
+                tracker.record_throttled(EndpointFamily.TRADING, 60.0, client_id)
                 raise EbayApiError(
                     f"eBay Trading API returned Ack={ack!r} (rate limited)",
                     status=429,
