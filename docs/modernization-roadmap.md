@@ -210,8 +210,13 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
 - Milestone status: **Implementation completed and merged in PR #106 (`2fa1985ececcac07e42a9bc3afb627bbef87b741`).** Next planned workstream: **Milestone 12 (End-to-End Home Assistant Testing & Release)**.
 
 ### 14. End-to-End Home Assistant Testing & Release Verification (Milestone 12)
+- **Four-Tier Verification Hierarchy**:
+  1. **Isolated Unit & Contract Tests**: Hundreds of granular unit tests verifying Trading XML parsing, REST endpoints, `BoundedRetryPolicy`, error-handling classes, token deduplication, schema migrations, and event suppression in strict isolation.
+  2. **Home Assistant Component Integration Tests**: Harness-level tests in [`tests/test_end_to_end_integration.py`](../tests/test_end_to_end_integration.py) verifying coordinator execution, 5-platform forwarding (`sensor`, `binary_sensor`, `button`, `calendar`, `event`), shared-keyset tracker registries, rate-limit propagation, options reload, token-rotation reload suppression, and schema migration v1 through v5.
+  3. **Genuine Production Application Setup-to-Entity Lifecycle Tests**: End-to-end integration test (`test_e2e_production_setup_entry_to_entities_and_update_lifecycle`) exercising the integration through Home Assistant's real `hass.config_entries.async_setup` and `async_unload` lifecycle, mocking the eBay HTTP boundary with deterministic XML responses, verifying coordinator first refresh, asserting entity state creation across all 5 platforms, triggering full coordinator refresh with updated responses, confirming state machine updates and unique ID preservation without duplicate entities, and tearing down cleanly.
+  4. **Manual Live Maintainer Verification**: Explicit 10-part manual validation procedure documented in [`docs/manual-live-validation.md`](manual-live-validation.md) for maintainers with real eBay accounts. Every step is strictly observation-only (zero bids, zero mutations, zero artificial 429 floods), segregates live-safe checks from disposable-instance checks, forbids exposing raw `.storage` tokens, and is marked `[UNVERIFIED - PENDING MAINTAINER LIVE RUN]`.
 - **Comprehensive End-to-End Testing Across All Platforms**:
-  - Implemented 15 comprehensive tests in [`tests/test_end_to_end_integration.py`](../tests/test_end_to_end_integration.py) covering all 5 Home Assistant entity platforms (`sensor`, `binary_sensor`, `button`, `calendar`, `event`).
+  - Implemented 17 comprehensive tests in [`tests/test_end_to_end_integration.py`](../tests/test_end_to_end_integration.py) covering all 5 Home Assistant entity platforms (`sensor`, `binary_sensor`, `button`, `calendar`, `event`).
   - Proved full lifecycle integrity: setup, options reload, token-rotation reload suppression, clean unload, and entry removal with tracker purging.
   - Verified that missing scopes trigger proper setup failure and diagnostic reporting without crashing Home Assistant.
   - Verified failure-safe coordinator first-refresh error handling and automatic rate-limit tracker cleanup.
@@ -223,14 +228,17 @@ This document tracks the multi-milestone engineering roadmap for modernizing eBa
   - Proved that independent keysets maintain completely isolated rate-limit trackers.
   - Proved strict environment isolation between Production and Sandbox entries.
 - **Pagination & Data Integrity Regression Verification**:
-  - Implemented mandatory regression scenario: complete 10-item refresh $\to$ truncated 2-item refresh $\to$ genuine complete empty refresh.
-  - Proved that truncated refreshes preserve prior confirmed items, retain summary item counts, update `section_last_attempt` while preserving `section_last_success`, and suppress false removal/disappearance events.
+  - Implemented mandatory 3-cycle regression scenario across all 3 item collections: watched items (10), bidding items (10), and active seller listings (10).
+  - Cycle sequence: 10 complete $\to$ 2 truncated $\to$ genuine complete empty refresh.
+  - Proved that truncated refreshes preserve prior confirmed items across buying, bidding, and selling, retain summary item counts (`watched_items`, `bidding_items`, `active_selling_items`), update `section_last_attempt` while preserving `section_last_success`, and suppress false removal, outbid, or sale events.
   - Proved that genuine complete empty responses cleanly transition item sets without stale ghosts.
+  - Proved Account A and Account B data isolation during concurrent collection cycles.
 - **Security & Diagnostics Privacy Audit**:
   - Verified that client secrets, access tokens, refresh tokens, and raw RuNames are excluded or redacted from exported diagnostics.
   - Verified that `EbayAuthError` string representation and repr never leak OAuth access or refresh tokens.
-- **Migration Policy Safety & Default Invariants**:
-  - Audited all 8 readiness gates in [`custom_components/ebay/migration_policy.py`](../custom_components/ebay/migration_policy.py).
+- **Migration Policy Safety & Independent Verification of All 8 Readiness Gates**:
+  - Audited and independently verified all 8 readiness gates in [`custom_components/ebay/migration_policy.py`](../custom_components/ebay/migration_policy.py) via dedicated test: `fallback_available`, `account_identity_consistent`, `scopes_contract_established`, `api_permission_granted` (with error code `FORBIDDEN`), `schema_validated`, `response_complete`, `pagination_verified`, and `field_parity_verified`.
+  - Proved that empty evidence and syntax-only validation fail closed to `NOT_READY`.
   - Confirmed default production routing invariants: Trading XML authoritative for buying and selling listings, REST for orders and seller standards, and GraphQL Watchlist strictly blocked on `FORBIDDEN`.
 - **Maintainer Manual Live Validation Checklist**:
   - Created [`docs/manual-live-validation.md`](manual-live-validation.md) documenting an explicit 10-part manual validation procedure for maintainers with real eBay accounts.

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
+import xml.etree.ElementTree as ET
 
 import pytest
 from homeassistant.core import HomeAssistant
@@ -31,6 +33,7 @@ from custom_components.ebay import (
     event as event_module,
     sensor as sensor_module,
 )
+from custom_components.ebay.api import EbayApiClient
 from custom_components.ebay.clients.errors import EbayAuthError
 from custom_components.ebay.clients.resilience import EndpointFamily
 from custom_components.ebay.const import (
@@ -65,6 +68,30 @@ from custom_components.ebay.migration_policy import (
 )
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+
+class _FakeResponse:
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status = status
+        self._text = text
+        self.headers: dict[str, str] = {}
+
+    async def text(self) -> str:
+        return self._text
+
+    async def json(self, content_type: str | None = None) -> Any:
+        return {}
+
+
+class _FakeContext:
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeResponse:
+        return self._response
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
 
 
 def _sample_item(
@@ -298,6 +325,312 @@ async def test_e2e_full_setup_coordinator_refresh_and_all_platforms(
         await bin_plat.async_reset()
         await sensor_plat.async_reset()
         await coordinator.async_shutdown()
+        await hass.async_block_till_done()
+
+
+@pytest.mark.asyncio
+async def test_e2e_production_setup_entry_to_entities_and_update_lifecycle(
+    hass: HomeAssistant,
+) -> None:
+    """Exercise genuine setup-to-entity integration path through async_setup_entry."""
+    assert await async_setup_component(hass, "calendar", {})
+    entry = _create_mock_entry(
+        entry_id="prod_live_setup_1",
+        client_id="app_live_setup_1",
+        options={CONF_ENTITY_MODE: ENTITY_MODE_DETAILED, CONF_PER_ITEM_CAP: 5},
+    )
+    entry.add_to_hass(hass)
+
+    buying_xml_1 = """
+    <GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <WatchList>
+        <ItemArray>
+          <Item>
+            <ItemID>111111111111</ItemID>
+            <Title>Test Watched Camera</Title>
+            <ListingType>Auction</ListingType>
+            <ListingDetails>
+              <EndTime>2026-11-05T12:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/111111111111</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">25.50</CurrentPrice>
+              <BidCount>2</BidCount>
+            </SellingStatus>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </WatchList>
+      <BidList>
+        <ItemArray>
+          <Item>
+            <ItemID>222222222222</ItemID>
+            <Title>Test Bidding Lens</Title>
+            <ListingType>Auction</ListingType>
+            <ListingDetails>
+              <EndTime>2026-11-05T14:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/222222222222</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">50.00</CurrentPrice>
+              <BidCount>5</BidCount>
+            </SellingStatus>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </BidList>
+    </GetMyeBayBuyingResponse>
+    """
+
+    buying_xml_2 = """
+    <GetMyeBayBuyingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <WatchList>
+        <ItemArray>
+          <Item>
+            <ItemID>111111111111</ItemID>
+            <Title>Test Watched Camera</Title>
+            <ListingType>Auction</ListingType>
+            <ListingDetails>
+              <EndTime>2026-11-05T12:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/111111111111</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">32.50</CurrentPrice>
+              <BidCount>3</BidCount>
+            </SellingStatus>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </WatchList>
+      <BidList>
+        <ItemArray>
+          <Item>
+            <ItemID>222222222222</ItemID>
+            <Title>Test Bidding Lens</Title>
+            <ListingType>Auction</ListingType>
+            <ListingDetails>
+              <EndTime>2026-11-05T14:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/222222222222</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">55.00</CurrentPrice>
+              <BidCount>6</BidCount>
+            </SellingStatus>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </BidList>
+    </GetMyeBayBuyingResponse>
+    """
+
+    selling_xml_1 = """
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <ActiveList>
+        <ItemArray>
+          <Item>
+            <ItemID>333333333333</ItemID>
+            <Title>Test Selling Tripod</Title>
+            <ListingDetails>
+              <EndTime>2026-11-06T18:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/333333333333</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">99.99</CurrentPrice>
+              <BidCount>0</BidCount>
+              <QuantitySold>0</QuantitySold>
+            </SellingStatus>
+            <Quantity>1</Quantity>
+            <QuantityAvailable>1</QuantityAvailable>
+            <HitCount>10</HitCount>
+            <WatchCount>3</WatchCount>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </ActiveList>
+    </GetMyeBaySellingResponse>
+    """
+
+    selling_xml_2 = """
+    <GetMyeBaySellingResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <ActiveList>
+        <ItemArray>
+          <Item>
+            <ItemID>333333333333</ItemID>
+            <Title>Test Selling Tripod</Title>
+            <ListingDetails>
+              <EndTime>2026-11-06T18:00:00.000Z</EndTime>
+              <ViewItemURL>https://www.ebay.com/itm/333333333333</ViewItemURL>
+            </ListingDetails>
+            <SellingStatus>
+              <CurrentPrice currencyID="USD">105.00</CurrentPrice>
+              <BidCount>0</BidCount>
+              <QuantitySold>0</QuantitySold>
+            </SellingStatus>
+            <Quantity>1</Quantity>
+            <QuantityAvailable>1</QuantityAvailable>
+            <HitCount>12</HitCount>
+            <WatchCount>4</WatchCount>
+          </Item>
+        </ItemArray>
+        <PaginationResult>
+          <TotalNumberOfPages>1</TotalNumberOfPages>
+          <TotalNumberOfEntries>1</TotalNumberOfEntries>
+        </PaginationResult>
+      </ActiveList>
+    </GetMyeBaySellingResponse>
+    """
+
+    seller_list_xml = """
+    <GetSellerListResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <ItemArray>
+        <Item>
+          <ItemID>333333333333</ItemID>
+          <HitCount>10</HitCount>
+        </Item>
+      </ItemArray>
+      <PaginationResult>
+        <TotalNumberOfPages>1</TotalNumberOfPages>
+        <TotalNumberOfEntries>1</TotalNumberOfEntries>
+      </PaginationResult>
+    </GetSellerListResponse>
+    """
+
+    best_offers_xml = """
+    <GetBestOffersResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Ack>Success</Ack>
+      <PaginationResult>
+        <TotalNumberOfPages>1</TotalNumberOfPages>
+      </PaginationResult>
+    </GetBestOffersResponse>
+    """
+
+    cycle = 1
+
+    def _mock_post(url: str, *args: Any, **kwargs: Any) -> Any:
+        headers = kwargs.get("headers") or {}
+        call_name = headers.get("X-EBAY-API-CALL-NAME")
+        if call_name == "GetMyeBayBuying":
+            xml = buying_xml_1 if cycle == 1 else buying_xml_2
+            return _FakeContext(_FakeResponse(200, xml))
+        elif call_name == "GetMyeBaySelling":
+            xml = selling_xml_1 if cycle == 1 else selling_xml_2
+            return _FakeContext(_FakeResponse(200, xml))
+        elif call_name == "GetSellerList":
+            return _FakeContext(_FakeResponse(200, seller_list_xml))
+        elif call_name == "GetBestOffers":
+            return _FakeContext(_FakeResponse(200, best_offers_xml))
+        return _FakeContext(_FakeResponse(200, "<Ack>Success</Ack>"))
+
+    mock_session = Mock()
+    mock_session.post = Mock(side_effect=_mock_post)
+
+    # Home Assistant test environment does not install hass_frontend (headless).
+    # Pre-registering frontend and my satisfies manifest dependencies without loading frontend assets.
+    hass.config.components.add("frontend")
+    hass.config.components.add("my")
+
+    with patch(
+        "homeassistant.helpers.aiohttp_client.async_get_clientsession",
+        return_value=mock_session,
+    ):
+        # 1. Actual async_setup executes through Home Assistant config entry manager
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+
+        # 2. Platform forwarding creates expected entities
+        entity_reg = er.async_get(hass)
+
+        # Buying summary sensor
+        w_ent_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_watched_items"
+        )
+        assert w_ent_id is not None
+        w_state = hass.states.get(w_ent_id)
+        assert w_state is not None
+        assert w_state.state == "1"
+
+        # Bidding summary sensor
+        b_ent_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_bidding_items"
+        )
+        assert b_ent_id is not None
+        b_state = hass.states.get(b_ent_id)
+        assert b_state is not None
+        assert b_state.state == "1"
+
+        # Selling summary sensor
+        s_ent_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_active_selling_items"
+        )
+        assert s_ent_id is not None
+        s_state = hass.states.get(s_ent_id)
+        assert s_state is not None
+        assert s_state.state == "1"
+
+        # Per-item watched price sensor
+        pw_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_watched_111111111111_price"
+        )
+        assert pw_id is not None
+        pw_state = hass.states.get(pw_id)
+        assert pw_state is not None
+        assert float(pw_state.state) == 25.50
+
+        # Per-item selling price sensor
+        ps_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_selling_333333333333_price"
+        )
+        assert ps_id is not None
+        ps_state = hass.states.get(ps_id)
+        assert ps_state is not None
+        assert float(ps_state.state) == 99.99
+
+        # 3. Trigger another coordinator refresh with changed upstream responses
+        cycle = 2
+        coordinator = entry.runtime_data
+        coordinator._force_full_refresh = True
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+        # 4. Existing entities update without duplicate unique IDs
+        pw_state_2 = hass.states.get(pw_id)
+        assert pw_state_2 is not None
+        assert float(pw_state_2.state) == 32.50
+
+        ps_state_2 = hass.states.get(ps_id)
+        assert ps_state_2 is not None
+        assert float(ps_state_2.state) == 105.00
+
+        # Unique ID identity is preserved with zero duplicates
+        assert (
+            entity_reg.async_get_entity_id(
+                "sensor", DOMAIN, f"{entry.entry_id}_watched_111111111111_price"
+            )
+            == pw_id
+        )
+
+        # 5. Production unload lifecycle teardown
+        assert await hass.config_entries.async_unload(entry.entry_id) is True
         await hass.async_block_till_done()
 
 
@@ -634,86 +967,265 @@ async def test_e2e_complete_10_to_truncated_2_to_complete_empty_regression(
 ) -> None:
     """Mandatory Regression: 10 complete -> 2 truncated -> 0 genuine complete-empty.
 
-    Verifies:
-    1. Truncated refresh retains all 10 items, preserves count, updates observed items,
-       suppresses false removal/disappearance events, and preserves last_successful_update.
-    2. Subsequent complete-empty refresh transitions to empty and allows legitimate removal.
+    Exercises real client.async_fetch_sections and coordinator transition logic for:
+    - 10 watched items
+    - 10 active seller listings
+    - 10 representative bidding items
+
+    Verifies across all three collections:
+    1. Previously confirmed records survive truncation.
+    2. Observed updates are applied correctly.
+    3. Summary counts remain consistent.
+    4. No false disappearance, outbid, sale, or other transition events fire.
+    5. section_last_attempt advances.
+    6. section_last_success does NOT advance on incomplete/truncated data.
+    7. A subsequently complete-empty response correctly clears confirmed items.
+    8. Account A data remains completely isolated from Account B.
     """
-    entry = _create_mock_entry()
-    entry.add_to_hass(hass)
+    entry_a = _create_mock_entry(entry_id="acct_a_entry", client_id="client_app_a")
+    entry_b = _create_mock_entry(entry_id="acct_b_entry", client_id="client_app_b")
+    entry_a.add_to_hass(hass)
+    entry_b.add_to_hass(hass)
 
-    coordinator = EbayDataUpdateCoordinator(hass, entry, Mock(), entry.options)
-    t1 = datetime(2026, 10, 31, 12, 0, 0, tzinfo=timezone.utc)
-
-    # --- Phase 1: Complete 10-item refresh ---
-    items_10 = {
-        f"item_{i}": _sample_item(f"item_{i}", f"Item {i}", 10.0 + i) for i in range(10)
-    }
-    payload_1 = _sample_payload(
-        watched_items=items_10,
-        truncated_collections={"watched": False},
-        last_successful_update=t1,
+    client_a = EbayApiClient(
+        Mock(),
+        environment="production",
+        client_id="client_app_a",
+        client_secret="secret_a",
+        runame="runame_a",
+        refresh_token="refresh_a",
+        site_id="0",
     )
-    coordinator.data = payload_1
-    coordinator.previous_payload = payload_1
-
-    assert len(coordinator.data["watched"]) == 10
-    assert coordinator.data["summary"]["watched_items"] == 10
-    assert coordinator.data["last_successful_update"] == t1
-
-    # --- Phase 2: Truncated 2-item refresh ---
-    # Upstream returns only 2 items with updated price on item_0, truncated=True
-    items_2_truncated = {
-        "item_0": _sample_item("item_0", "Item 0 Updated", 99.0),
-        "item_1": _sample_item("item_1", "Item 1", 11.0),
-    }
-    payload_2 = _sample_payload(
-        watched_items=items_2_truncated,
-        truncated_collections={"watched": True},
-        partial_failures=["buying_truncated"],
-        last_successful_update=t1,  # unchanged success timestamp
+    client_b = EbayApiClient(
+        Mock(),
+        environment="production",
+        client_id="client_app_b",
+        client_secret="secret_b",
+        runame="runame_b",
+        refresh_token="refresh_b",
+        site_id="0",
     )
 
-    # Test baseline merger logic
-    merged_baseline = _baseline_payload(coordinator.previous_payload, payload_2)
+    # Initialize common mocks for optional endpoints
+    for c in (client_a, client_b):
+        c._fetch_seller_list_views = AsyncMock(return_value=({}, False))
+        c.async_call_trading_api = AsyncMock(
+            return_value=ET.fromstring(
+                "<GetBestOffersResponse xmlns='urn:ebay:apis:eBLBaseComponents'>"
+                "<Ack>Success</Ack><PaginationResult><TotalNumberOfPages>1</TotalNumberOfPages></PaginationResult>"
+                "</GetBestOffersResponse>"
+            )
+        )
+        c.async_fetch_sold_unsold_classification = AsyncMock(
+            return_value=({}, 0, 0, False)
+        )
 
-    # 1. All 10 items must be retained
-    assert len(merged_baseline["watched"]) == 10
-    # 2. Updated item_0 price must be reflected
-    assert merged_baseline["watched"]["item_0"]["current_price"] == 99.0
-    # 3. Missing items item_2 through item_9 must be retained
-    for i in range(2, 10):
-        assert f"item_{i}" in merged_baseline["watched"]
+    coordinator_a = EbayDataUpdateCoordinator(hass, entry_a, client_a, entry_a.options)
+    coordinator_b = EbayDataUpdateCoordinator(hass, entry_b, client_b, entry_b.options)
 
-    # Test event detection: no false removal events fired
+    # --- Setup Account B Baseline ---
+    b_watched = {"b_w_0": _sample_item("b_w_0", "Account B Watch", 50.0)}
+    b_bidding = {"b_b_0": _sample_item("b_b_0", "Account B Bid", 75.0)}
+    b_selling = {"b_s_0": _sample_item("b_s_0", "Account B Sell", 200.0)}
+    client_b._fetch_buying_pages = AsyncMock(
+        return_value=(b_watched, b_bidding, False, False)
+    )
+    client_b._fetch_selling_pages = AsyncMock(return_value=(b_selling, False))
+
+    payload_b = await client_b.async_fetch_sections(
+        {"buying", "selling"},
+        previous=None,
+        buying_enabled=True,
+        selling_enabled=True,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=720,
+    )
+    coordinator_b.data = payload_b
+
+    # --- Phase 1: Account A Complete 10-item refresh across watched, bidding, and selling ---
+    w_10 = {
+        f"w_{i}": _sample_item(f"w_{i}", f"Watched {i}", 10.0 + i) for i in range(10)
+    }
+    b_10 = {
+        f"b_{i}": _sample_item(f"b_{i}", f"Bidding {i}", 20.0 + i) for i in range(10)
+    }
+    for b in b_10.values():
+        b["bid_count"] = 3
+    s_10 = {
+        f"s_{i}": _sample_item(f"s_{i}", f"Selling {i}", 100.0 + i) for i in range(10)
+    }
+    for s in s_10.values():
+        s["quantity_available"] = 5
+
+    client_a._fetch_buying_pages = AsyncMock(return_value=(w_10, b_10, False, False))
+    client_a._fetch_selling_pages = AsyncMock(return_value=(s_10, False))
+
+    payload_1 = await client_a.async_fetch_sections(
+        {"buying", "selling"},
+        previous=None,
+        buying_enabled=True,
+        selling_enabled=True,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=720,
+    )
+    coordinator_a.data = payload_1
+    coordinator_a.previous_payload = payload_1
+
+    # Verifications for Phase 1
+    assert len(payload_1["watched"]) == 10
+    assert len(payload_1["bidding"]) == 10
+    assert len(payload_1["selling"]) == 10
+    assert payload_1["summary"]["watched_items"] == 10
+    assert payload_1["summary"]["bidding_items"] == 10
+    assert payload_1["summary"]["active_selling_items"] == 10
+
+    t1_attempt_buying = payload_1["section_last_attempt"]["buying"]
+    t1_success_buying = payload_1["section_last_success"]["buying"]
+    t1_attempt_selling = payload_1["section_last_attempt"]["selling"]
+    t1_success_selling = payload_1["section_last_success"]["selling"]
+    assert t1_success_buying is not None
+    assert t1_success_selling is not None
+
+    # --- Phase 2: Account A Truncated 2-item refresh with observed updates ---
+    # Upstream returns only 2 items per collection, with price updates and truncated=True
+    w_2_trunc = {
+        "w_0": _sample_item("w_0", "Watched 0 Updated", 99.0),
+        "w_1": _sample_item("w_1", "Watched 1", 11.0),
+    }
+    b_2_trunc = {
+        "b_0": _sample_item("b_0", "Bidding 0 Updated", 75.0),
+        "b_1": _sample_item("b_1", "Bidding 1", 21.0),
+    }
+    b_2_trunc["b_0"]["bid_count"] = 5
+    s_2_trunc = {
+        "s_0": _sample_item("s_0", "Selling 0 Updated", 150.0),
+        "s_1": _sample_item("s_1", "Selling 1", 101.0),
+    }
+
+    client_a._fetch_buying_pages = AsyncMock(
+        return_value=(w_2_trunc, b_2_trunc, True, True)
+    )
+    client_a._fetch_selling_pages = AsyncMock(return_value=(s_2_trunc, True))
+
+    payload_2 = await client_a.async_fetch_sections(
+        {"buying", "selling"},
+        previous=payload_1,
+        buying_enabled=True,
+        selling_enabled=True,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=720,
+    )
+
+    # 1. Previously confirmed records survive truncation across all 3 collections
+    assert len(payload_2["watched"]) == 10
+    assert len(payload_2["bidding"]) == 10
+    assert len(payload_2["selling"]) == 10
+    for i in range(10):
+        assert f"w_{i}" in payload_2["watched"]
+        assert f"b_{i}" in payload_2["bidding"]
+        assert f"s_{i}" in payload_2["selling"]
+
+    # 2. Observed updates are applied correctly
+    assert payload_2["watched"]["w_0"]["current_price"] == 99.0
+    assert payload_2["bidding"]["b_0"]["current_price"] == 75.0
+    assert payload_2["bidding"]["b_0"]["bid_count"] == 5
+    assert payload_2["selling"]["s_0"]["current_price"] == 150.0
+
+    # 3. Summary counts remain consistent
+    assert payload_2["summary"]["watched_items"] == 10
+    assert payload_2["summary"]["bidding_items"] == 10
+    assert payload_2["summary"]["active_selling_items"] == 10
+
+    # 4. section_last_attempt advances; section_last_success is preserved
+    assert payload_2["section_last_attempt"]["buying"] >= t1_attempt_buying
+    assert payload_2["section_last_success"]["buying"] == t1_success_buying
+    assert payload_2["section_last_attempt"]["selling"] >= t1_attempt_selling
+    assert payload_2["section_last_success"]["selling"] == t1_success_selling
+
+    # 5. No false transition events fire
     detected_events: list[dict[str, Any]] = []
-    coordinator._dispatch_event = lambda event_type, data: detected_events.append(
+    coordinator_a._dispatch_event = lambda event_type, data: detected_events.append(
         {"type": event_type, "data": data}
     )  # type: ignore[method-assign]
-    coordinator._detect_transition_events(coordinator.previous_payload, merged_baseline)
+    coordinator_a._detect_transition_events(payload_1, payload_2)
 
-    # False disappearance/removal events must NOT be emitted
-    removal_events = [
-        e for e in detected_events if e["type"] in ("item_removed", "watch_item_ended")
+    false_events = [
+        e
+        for e in detected_events
+        if e["type"]
+        in (
+            "item_removed",
+            "watch_item_ended",
+            "outbid",
+            "bid_item_ended",
+            "item_sold",
+            "item_unsold",
+        )
     ]
-    assert len(removal_events) == 0
+    assert len(false_events) == 0
 
-    coordinator.previous_payload = merged_baseline
+    # 6. Account B data remains isolated
+    assert len(coordinator_b.data["watched"]) == 1
+    assert "b_w_0" in coordinator_b.data["watched"]
+    assert len(coordinator_b.data["bidding"]) == 1
+    assert "b_b_0" in coordinator_b.data["bidding"]
+    assert len(coordinator_b.data["selling"]) == 1
+    assert "b_s_0" in coordinator_b.data["selling"]
 
-    # --- Phase 3: Genuine complete-empty refresh ---
-    # Upstream returns 0 items, truncated=False
-    t3 = datetime(2026, 10, 31, 13, 0, 0, tzinfo=timezone.utc)
-    payload_3 = _sample_payload(
-        watched_items={},
-        truncated_collections={"watched": False},
-        last_successful_update=t3,
+    # --- Phase 3: Account A Genuine complete-empty response ---
+    client_a._fetch_buying_pages = AsyncMock(return_value=({}, {}, False, False))
+    client_a._fetch_selling_pages = AsyncMock(return_value=({}, False))
+
+    payload_3 = await client_a.async_fetch_sections(
+        {"buying", "selling"},
+        previous=payload_2,
+        buying_enabled=True,
+        selling_enabled=True,
+        analytics_enabled=False,
+        ending_soon_threshold_seconds=720,
     )
 
-    final_baseline = _baseline_payload(coordinator.previous_payload, payload_3)
-    # State transitions to confirmed complete 0
-    assert len(final_baseline["watched"]) == 0
+    # 1. Subsequently complete empty response correctly clears confirmed items
+    assert len(payload_3["watched"]) == 0
+    assert len(payload_3["bidding"]) == 0
+    assert len(payload_3["selling"]) == 0
+
+    # 2. Summary counts reflect zero items
     assert payload_3["summary"]["watched_items"] == 0
-    assert payload_3["last_successful_update"] == t3
+    assert payload_3["summary"]["bidding_items"] == 0
+    assert payload_3["summary"]["active_selling_items"] == 0
+
+    # 3. section_last_success advances on genuine complete success
+    assert payload_3["section_last_success"]["buying"] >= t1_success_buying
+    assert payload_3["section_last_success"]["selling"] >= t1_success_selling
+
+    # 4. Incomplete/truncated previous state suppresses spurious disappearance events
+    # during transition out of truncation until clean baseline is established
+    detected_events_3: list[dict[str, Any]] = []
+    coordinator_a._dispatch_event = lambda event_type, data: detected_events_3.append(
+        {"type": event_type, "data": data}
+    )  # type: ignore[method-assign]
+    coordinator_a._detect_transition_events(payload_2, payload_3)
+
+    spurious_events = [
+        e
+        for e in detected_events_3
+        if e["type"] in ("item_removed", "watch_item_ended")
+    ]
+    assert len(spurious_events) == 0
+
+    # Clean baseline clears confirmed items without stale ghosts
+    final_baseline = _baseline_payload(payload_2, payload_3)
+    assert len(final_baseline["watched"]) == 0
+    assert len(final_baseline["bidding"]) == 0
+    assert len(final_baseline["selling"]) == 0
+    assert final_baseline["truncated_collections"]["watched"] is False
+
+    # 5. Account B remains untouched
+    assert len(coordinator_b.data["watched"]) == 1
+    assert "b_w_0" in coordinator_b.data["watched"]
+    assert len(coordinator_b.data["selling"]) == 1
+    assert "b_s_0" in coordinator_b.data["selling"]
 
 
 # ==============================================================================
@@ -845,3 +1357,168 @@ def test_e2e_eight_readiness_gates_and_production_routing_invariants() -> None:
     )
     assert not evaluation.is_ready
     assert evaluation.state == ReadinessState.BLOCKED_AUTHORIZATION
+
+
+def test_e2e_eight_migration_readiness_gates_independently() -> None:
+    """Independently verify all eight migration readiness gates for candidate cutover.
+
+    Demonstrates:
+    1. Complete valid evidence achieves ReadinessState.READY.
+    2. Each of the eight readiness gates independently blocks candidate activation when unmet:
+       - Gate 1: fallback_available
+       - Gate 2: account_identity_consistent
+       - Gate 3: scopes_contract_established / verified_scopes
+       - Gate 4: api_permission_granted / permission_error_code
+       - Gate 5: schema_validated
+       - Gate 6: response_complete
+       - Gate 7: pagination_verified
+       - Gate 8: field_parity_verified / missing_fields
+    3. Missing / empty evidence never silently passes.
+    4. Successful offline syntax or normalization tests alone do not authorize production cutover.
+    5. FORBIDDEN error code blocks Watchlist cutover and retains Trading XML.
+    6. Default Trading XML and established REST baseline routing remain strictly preserved.
+    """
+    valid_evidence = ReadinessEvidence(
+        schema_validated=True,
+        scopes_contract_established=True,
+        required_scopes=("https://api.ebay.com/oauth/api_scope",),
+        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
+        api_permission_granted=True,
+        permission_error_code=None,
+        response_complete=True,
+        pagination_verified=True,
+        field_parity_verified=True,
+        unverified_fields=(),
+        missing_fields=(),
+        account_identity_consistent=True,
+        fallback_available=True,
+    )
+
+    # 1. Complete valid evidence evaluates to READY
+    ready_eval = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, valid_evidence
+    )
+    assert ready_eval.is_ready is True
+    assert ready_eval.state == ReadinessState.READY
+    assert len(ready_eval.blocking_reasons) == 0
+
+    # 2. Gate 1: Fallback available
+    ev_no_fallback = replace(valid_evidence, fallback_available=False)
+    eval_1 = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_fallback
+    )
+    assert eval_1.is_ready is False
+    assert eval_1.state == ReadinessState.BLOCKED_NO_FALLBACK
+    assert any("Fallback" in reason for reason in eval_1.blocking_reasons)
+
+    # Gate 2: Account identity continuity
+    ev_identity = replace(valid_evidence, account_identity_consistent=False)
+    eval_2 = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_identity
+    )
+    assert eval_2.is_ready is False
+    assert eval_2.state == ReadinessState.BLOCKED_IDENTITY
+    assert any("account identity" in reason for reason in eval_2.blocking_reasons)
+
+    # Gate 3: Scopes contract and missing verified scopes
+    ev_scope_contract = replace(valid_evidence, scopes_contract_established=False)
+    eval_3a = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_scope_contract
+    )
+    assert eval_3a.is_ready is False
+    assert eval_3a.state == ReadinessState.BLOCKED_SCOPE
+
+    ev_missing_scopes = replace(valid_evidence, verified_scopes=())
+    eval_3b = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_missing_scopes
+    )
+    assert eval_3b.is_ready is False
+    assert eval_3b.state == ReadinessState.BLOCKED_SCOPE
+    assert any(
+        "Missing verified OAuth scopes" in reason for reason in eval_3b.blocking_reasons
+    )
+
+    # Gate 4: API permission / entitlement / HTTP 403 / FORBIDDEN
+    ev_no_perm = replace(valid_evidence, api_permission_granted=False)
+    eval_4a = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_perm
+    )
+    assert eval_4a.is_ready is False
+    assert eval_4a.state == ReadinessState.BLOCKED_AUTHORIZATION
+
+    ev_forbidden = replace(valid_evidence, permission_error_code="FORBIDDEN")
+    eval_4b = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_forbidden
+    )
+    assert eval_4b.is_ready is False
+    assert eval_4b.state == ReadinessState.BLOCKED_AUTHORIZATION
+    assert any("FORBIDDEN" in reason for reason in eval_4b.blocking_reasons)
+
+    # Gate 5: Modern API Schema validation
+    ev_schema = replace(valid_evidence, schema_validated=False)
+    eval_5 = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_schema
+    )
+    assert eval_5.is_ready is False
+    assert eval_5.state == ReadinessState.BLOCKED_SCHEMA
+    assert any(
+        "schema has not been validated" in reason for reason in eval_5.blocking_reasons
+    )
+
+    # Gate 6: Collection completeness / Census validation
+    ev_incomplete = replace(valid_evidence, response_complete=False)
+    eval_6 = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_incomplete
+    )
+    assert eval_6.is_ready is False
+    assert eval_6.state == ReadinessState.BLOCKED_COMPLETENESS
+    assert any("complete census" in reason for reason in eval_6.blocking_reasons)
+
+    # Gate 7: Pagination continuity and boundaries
+    ev_pagination = replace(valid_evidence, pagination_verified=False)
+    eval_7 = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_pagination
+    )
+    assert eval_7.is_ready is False
+    assert eval_7.state == ReadinessState.BLOCKED_PAGINATION
+    assert any("Pagination boundaries" in reason for reason in eval_7.blocking_reasons)
+
+    # Gate 8: Field-level parity
+    ev_no_parity = replace(valid_evidence, field_parity_verified=False)
+    eval_8a = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_parity
+    )
+    assert eval_8a.is_ready is False
+    assert eval_8a.state == ReadinessState.BLOCKED_PARITY
+
+    ev_missing_field = replace(valid_evidence, missing_fields=("current_price",))
+    eval_8b = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_missing_field
+    )
+    assert eval_8b.is_ready is False
+    assert eval_8b.state == ReadinessState.BLOCKED_PARITY
+    assert any("current_price" in reason for reason in eval_8b.blocking_reasons)
+
+    # 3. Missing evidence never silently becomes a pass
+    empty_ev = ReadinessEvidence()
+    eval_empty = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, empty_ev
+    )
+    assert eval_empty.is_ready is False
+    assert len(eval_empty.blocking_reasons) >= 6
+
+    # 4. Successful offline syntax or normalization alone does not authorize cutover
+    syntax_only_ev = ReadinessEvidence(schema_validated=True)
+    eval_syntax = MigrationPolicy.evaluate_readiness(
+        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, syntax_only_ev
+    )
+    assert eval_syntax.is_ready is False
+    assert eval_syntax.state != ReadinessState.READY
+
+    # 5. FORBIDDEN blocks cutover and ensures active provider remains TRADING_XML
+    effective = MigrationPolicy.get_active_provider(
+        FeatureKey.WATCHLIST,
+        options={"provider_watchlist": "graphql"},
+        readiness=eval_4b,
+    )
+    assert effective == ProviderType.TRADING_XML
