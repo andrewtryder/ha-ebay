@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.9.0](https://github.com/andrewtryder/ha-ebay/compare/v0.8.3...v0.9.0) (2026-11-01)
+
+
+### Features
+
+* add read-only eBay GraphQL transport ([#94](https://github.com/andrewtryder/ha-ebay/issues/94)) ([60f656f](https://github.com/andrewtryder/ha-ebay/commit/60f656fb3bf1c40ca3e445820b704cee585115d0))
+* audit and validate remaining legacy eBay API dependencies ([#102](https://github.com/andrewtryder/ha-ebay/issues/102)) ([e34298f](https://github.com/andrewtryder/ha-ebay/commit/e34298f1b11ced92b6f94a5a4d6f8e79c9cfd803))
+* establish safe multi-account identity and config entry isolation ([#103](https://github.com/andrewtryder/ha-ebay/issues/103)) ([ee7b769](https://github.com/andrewtryder/ha-ebay/commit/ee7b769fa84113b5d5189ae4168cffd729821ed4))
+* **graphql:** add opt-in Watchlist XML vs GraphQL parity test harness ([#95](https://github.com/andrewtryder/ha-ebay/issues/95)) ([14ce43f](https://github.com/andrewtryder/ha-ebay/commit/14ce43f3a4997a77aef43eba080f869d6056ebb4))
+* **graphql:** add read-only Active Seller Listings contract and parity validation harness ([#98](https://github.com/andrewtryder/ha-ebay/issues/98)) ([4ac5c80](https://github.com/andrewtryder/ha-ebay/commit/4ac5c808b21c232b90f982e3f215f1ac301fa264))
+* **graphql:** prepare read-only Auction API contract and bidding parity validation ([#97](https://github.com/andrewtryder/ha-ebay/issues/97)) ([4c2f394](https://github.com/andrewtryder/ha-ebay/commit/4c2f39424527866f05062f79882087f7a165394b))
+* harden eBay polling reliability and quota handling ([#106](https://github.com/andrewtryder/ha-ebay/issues/106)) ([2fa1985](https://github.com/andrewtryder/ha-ebay/commit/2fa1985ececcac07e42a9bc3afb627bbef87b741))
+* simplify eBay OAuth onboarding in Home Assistant ([43c5041](https://github.com/andrewtryder/ha-ebay/commit/43c5041d6598199000837f14a9df30e41e15e0b9))
+* simplify eBay OAuth onboarding in Home Assistant ([501cda4](https://github.com/andrewtryder/ha-ebay/commit/501cda4792379b47155987bd22656660d93d965a))
+* simplify eBay OAuth setup with guided onboarding ([#105](https://github.com/andrewtryder/ha-ebay/issues/105)) ([49ad7f8](https://github.com/andrewtryder/ha-ebay/commit/49ad7f8f4114e449066f6d17caf5d2e4e482135b))
+* validate modern eBay offers and negotiation history ([#100](https://github.com/andrewtryder/ha-ebay/issues/100)) ([4fb48dd](https://github.com/andrewtryder/ha-ebay/commit/4fb48ddbb8bb95e8652ad813d5ac506105c0b6f4))
+* validate modern eBay sold and unsold listing classification ([#101](https://github.com/andrewtryder/ha-ebay/issues/101)) ([823dce0](https://github.com/andrewtryder/ha-ebay/commit/823dce063dbd2dde77fb39cdbf9d03a2e7cc41a3))
+
+
+### Bug Fixes
+
+* **oauth:** address PR [#92](https://github.com/andrewtryder/ha-ebay/issues/92) review feedback on reauth reloads and failure handling ([2d85b41](https://github.com/andrewtryder/ha-ebay/commit/2d85b41e193954dbee1745fd70765e1da229f78f))
+
 ## [0.8.3](https://github.com/andrewtryder/ha-ebay/compare/v0.8.2...v0.8.3) (2026-10-01)
 
 
