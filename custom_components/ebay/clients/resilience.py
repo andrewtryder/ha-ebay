@@ -43,7 +43,6 @@ class EndpointFamily(StrEnum):
 
     TRADING = "trading"
     REST = "rest"
-    GRAPHQL = "graphql"
     OAUTH = "oauth"
 
 

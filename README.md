@@ -47,7 +47,7 @@ You need an eBay Developer Program application with:
 Start the integration setup in Home Assistant first, copy the callback URL it provides
 on the setup screen, and register that URL in the matching eBay application keyset.
 
-See the illustrated **[eBay OAuth setup guide](docs/ebay-oauth-setup.md)** for the complete walkthrough.
+See the **[OAuth and Account Setup Guide](docs/oauth-and-accounts.md)** for the complete walkthrough.
 
 Production credentials must be used with Production, and Sandbox credentials with Sandbox.
 Multiple distinct eBay user accounts can share the same developer application keyset, but a single eBay user account cannot be added multiple times under the same environment.
@@ -172,8 +172,8 @@ Import-ready blueprints cover several of these flows; see
     fully operational.
   - Existing users should **not** delete/re-add the integration or attempt reauthorization to
     troubleshoot this experimental GraphQL limitation.
-  - Detailed contract findings and parity matrices are documented in
-    **[docs/graphql-api-validation.md](docs/graphql-api-validation.md)**.
+  - Detailed architectural findings and API contracts are documented in
+    **[docs/api-architecture.md](docs/api-architecture.md)**.
 
 ## Removal
 
@@ -210,11 +210,9 @@ See **[PRIVACY.md](PRIVACY.md)** for the project privacy statement.
   scopes, an invalid Site ID, repeated partial failures, or consistently truncated collections.
 - **Partial data:** enable the diagnostic entities and download integration diagnostics for
   technical detail beyond Repairs. Diagnostics may include a sanitized `last_api_failure`.
-- **GraphQL Watchlist / `FORBIDDEN` error:** experimental GraphQL Watchlist queries are not used in
-  production and currently return `FORBIDDEN` pending eBay scope/entitlement verification. Do not
-  delete, re-add, or reauthorize your account to resolve this; production Watchlist monitoring
-  continues using Trading XML and remains operational. See
-  **[docs/graphql-api-validation.md](docs/graphql-api-validation.md)**.
+- **API Architecture & Reliability:** production Watchlist, Bidding, and Selling monitoring
+  use Trading XML and remain fully operational. See **[docs/api-architecture.md](docs/api-architecture.md)**
+  and **[docs/reliability-and-rate-limits.md](docs/reliability-and-rate-limits.md)**.
 
 Report reproducible problems through **[GitHub Issues](https://github.com/andrewtryder/ha-ebay/issues)**.
 Do not include client secrets, OAuth codes, access tokens, or refresh tokens.
@@ -222,9 +220,7 @@ Do not include client secrets, OAuth codes, access tokens, or refresh tokens.
 ## Development
 
 See **[docs/development.md](docs/development.md)** for the development environment, test commands,
-Home Assistant source-mount workflow, and HACS testing process.
-
-For end-to-end maintainer testing against live eBay accounts prior to production releases, see the **[Manual Live Validation Checklist](docs/manual-live-validation.md)**.
+Home Assistant source-mount workflow, HACS testing process, and the Manual Live Validation Checklist.
 
 ## Trademark
 

@@ -17,12 +17,13 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
-    API_WARNINGS_STATE_ATTR_MAX,
     EbayApiClient,
     EbayAuthError,
     EbayError,
-    enabled_sections_for_options,
 )
+from .clients.errors import API_WARNINGS_STATE_ATTR_MAX
+from .parsers.xml import _duration_ms
+from .sections import enabled_sections_for_options
 from .const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_ANALYTICS_ENABLED,
@@ -74,11 +75,6 @@ COLLECTION_BY_EVENT_KIND = {
 
 _BASELINE_COLLECTIONS = ("watched", "bidding", "selling")
 _BASELINE_ID_LISTS = ("sold_item_ids", "unsold_item_ids")
-
-
-def _duration_ms(start: float) -> float:
-    """Return elapsed monotonic time in milliseconds."""
-    return (time.monotonic() - start) * 1000
 
 
 def _parse_section_timestamp(value: Any) -> datetime | None:
@@ -204,6 +200,22 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
                 self._event_callbacks.pop(kind, None)
 
         return unsubscribe
+
+    @property
+    def truncated_collection_names(self) -> list[str]:
+        """Return sorted names of currently truncated collections."""
+        truncated = (self.data or {}).get("truncated_collections") or {}
+        return sorted(name for name, is_truncated in truncated.items() if is_truncated)
+
+    @property
+    def partial_failure_categories(self) -> list[str]:
+        """Return list of active partial failure categories."""
+        data = self.data or {}
+        return list(
+            data.get("partial_failures")
+            or data.get("summary", {}).get("partial_failures")
+            or []
+        )
 
     def async_add_timer_listener(
         self, update_callback: Callable[[], None]
@@ -547,7 +559,7 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
         """Persist fired ending-soon keys when the in-memory set changed."""
         if not getattr(self, "_fired_ending_soon_dirty", False):
             return
-        from .ending_soon_store import async_save_ending_soon_fired
+        from .storage import async_save_ending_soon_fired
 
         await async_save_ending_soon_fired(
             self.hass, self.entry.entry_id, self._fired_ending_soon
@@ -556,7 +568,7 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
 
     def _prune_fired_ending_soon(self, now: datetime) -> None:
         """Drop fired keys after listing end_time plus retention window."""
-        from .ending_soon_store import prune_ending_soon_fired_keys
+        from .storage import prune_ending_soon_fired_keys
 
         pruned = prune_ending_soon_fired_keys(self._fired_ending_soon, now)
         if pruned != self._fired_ending_soon:

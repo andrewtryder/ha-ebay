@@ -23,7 +23,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import API_WARNINGS_STATE_ATTR_MAX, SOLD_UNSOLD_DURATION_DAYS
+from .clients.errors import API_WARNINGS_STATE_ATTR_MAX
+from .parsers.trading_builders import SOLD_UNSOLD_DURATION_DAYS
 from .const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
     CONF_BUYING_ENABLED,
@@ -40,7 +41,7 @@ from .const import (
     REFRESH_RESULT_UNKNOWN,
 )
 from .coordinator import EbayDataUpdateCoordinator, SelectedItemKey
-from .inactive_item_store import async_save_inactive_item_sensors
+from .storage import async_save_inactive_item_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -567,11 +568,17 @@ def summary_sensors_for_options(
 
 
 def _truncated_collection_names(coordinator: EbayDataUpdateCoordinator) -> list[str]:
+    val = getattr(coordinator, "truncated_collection_names", None)
+    if isinstance(val, list):
+        return val
     truncated = (coordinator.data or {}).get("truncated_collections") or {}
     return sorted(name for name, is_truncated in truncated.items() if is_truncated)
 
 
 def _partial_failure_categories(coordinator: EbayDataUpdateCoordinator) -> list[str]:
+    val = getattr(coordinator, "partial_failure_categories", None)
+    if isinstance(val, list):
+        return val
     data = coordinator.data or {}
     return list(
         data.get("partial_failures")

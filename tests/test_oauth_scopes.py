@@ -6,7 +6,8 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
-from custom_components.ebay.api import (
+from custom_components.ebay.api import EbayApiClient
+from custom_components.ebay.clients.scopes import (
     CORE_SCOPE,
     DEFAULT_SCOPE,
     SCOPE_ACCOUNT_READONLY,
@@ -15,7 +16,6 @@ from custom_components.ebay.api import (
     SCOPE_FINANCES,
     SCOPE_FULFILLMENT_READONLY,
     SCOPE_PAYMENT_DISPUTE,
-    EbayApiClient,
     has_core_scope,
     join_scopes,
     missing_scopes_for_options,
@@ -32,6 +32,9 @@ from custom_components.ebay.const import (
     CONF_MESSAGES_ENABLED,
     CONF_SELLER_STANDARDS_ENABLED,
     CONF_SELLING_ENABLED,
+    SECTION_ACCOUNT_PRIVILEGES,
+    SECTION_ANALYTICS,
+    SECTION_FINANCES,
 )
 
 
@@ -245,7 +248,6 @@ def test_seller_ops_missing_scope_skips_fetch() -> None:
 
 def test_analytics_unknown_site_becomes_partial_failure() -> None:
     """Analytics is skipped for unknown site IDs without calling traffic report."""
-    from custom_components.ebay.api import SECTION_ANALYTICS
 
     class Client(EbayApiClient):
         def __init__(self) -> None:
@@ -292,7 +294,6 @@ def test_analytics_unknown_site_becomes_partial_failure() -> None:
 
 def test_analytics_missing_scope_classified_when_selling_enabled() -> None:
     """Runtime refresh reports analytics_views_missing_scope when scope absent."""
-    from custom_components.ebay.api import SECTION_ANALYTICS
     from custom_components.ebay.const import CONF_ANALYTICS_ENABLED
 
     class Client(EbayApiClient):
@@ -356,7 +357,6 @@ def test_scopes_for_options_account_privileges_and_finances() -> None:
 
 def test_finances_unsupported_marketplace_skips_fetch() -> None:
     """FR and similar marketplaces soft-fail finances without calling the API."""
-    from custom_components.ebay.api import SECTION_FINANCES
 
     class Client(EbayApiClient):
         def __init__(self) -> None:
@@ -390,7 +390,6 @@ def test_finances_unsupported_marketplace_skips_fetch() -> None:
 
 
 def test_account_privileges_fetch_when_enabled() -> None:
-    from custom_components.ebay.api import SECTION_ACCOUNT_PRIVILEGES
 
     class Client(EbayApiClient):
         def __init__(self) -> None:

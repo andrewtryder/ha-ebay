@@ -41,6 +41,7 @@ from .const import (
 )
 from .marketplace import capability_supported
 from .parsers.payload import summarize_payload
+from .parsers.xml import _duration_ms
 from .parsers.trading_builders import (
     BEST_OFFERS_CALL_NAME,
     BEST_OFFERS_MAX_PAGES,
@@ -65,11 +66,6 @@ from .sections import (
 from .seller_ops import empty_seller_ops
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _duration_ms(start: float) -> float:
-    """Return elapsed monotonic time in milliseconds."""
-    return (time.monotonic() - start) * 1000
 
 
 def _copy_seller_ops(seller_ops: dict[str, Any]) -> dict[str, Any]:

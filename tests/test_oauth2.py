@@ -27,7 +27,8 @@ from custom_components.ebay.account_identity import (
     AccountIdentity,
     AccountIdentityProvenance,
 )
-from custom_components.ebay.api import CORE_SCOPE, DEFAULT_SCOPE, build_consent_url
+from custom_components.ebay.clients.endpoints import build_consent_url
+from custom_components.ebay.clients.scopes import CORE_SCOPE, DEFAULT_SCOPE
 from custom_components.ebay.config_flow import EbayConfigFlow
 from custom_components.ebay.const import (
     CONF_ACCOUNT_IDENTITY,

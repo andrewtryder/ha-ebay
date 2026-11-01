@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import data_entry_flow
@@ -10,7 +10,6 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.storage import Store
 
 from .const import (
     CONF_ACCOUNT_PRIVILEGES_ENABLED,
@@ -26,14 +25,9 @@ from .const import (
 )
 from .sections import PARTIAL_FAILURE_SECTION, TRUNCATION_COLLECTION_SECTION
 from .seller_ops import SITE_ID_TO_MARKETPLACE, is_known_site_id
-
-REPAIR_STREAKS_STORAGE_VERSION = 1
-
-
-class RepairStreaksStoreData(TypedDict):
-    """Persisted repair streak counters for a config entry."""
-
-    streaks: dict[str, int]
+from .storage import (
+    async_save_repair_streaks,
+)
 
 
 FEATURE_LABELS = {
@@ -94,49 +88,6 @@ def parse_issue_suffix(entry_id: str, issue_id: str) -> str | None:
     if not issue_id.startswith(prefix):
         return None
     return issue_id[len(prefix) :]
-
-
-def repair_streaks_store(
-    hass: HomeAssistant, entry_id: str
-) -> Store[RepairStreaksStoreData]:
-    """Return the storage helper for an entry's repair streaks."""
-    return Store(
-        hass,
-        REPAIR_STREAKS_STORAGE_VERSION,
-        f"{DOMAIN}.{entry_id}.repair_streaks",
-    )
-
-
-async def async_load_repair_streaks(
-    hass: HomeAssistant, entry_id: str
-) -> dict[str, int]:
-    """Load persisted repair streak counters for a config entry."""
-    data = await repair_streaks_store(hass, entry_id).async_load()
-    if not isinstance(data, dict):
-        return {}
-    raw = data.get("streaks")
-    if not isinstance(raw, dict):
-        return {}
-    streaks: dict[str, int] = {}
-    for key, value in raw.items():
-        try:
-            streaks[str(key)] = int(value)
-        except (TypeError, ValueError):
-            continue
-    return streaks
-
-
-async def async_save_repair_streaks(
-    hass: HomeAssistant, entry_id: str, streaks: dict[str, int]
-) -> None:
-    """Persist repair streak counters for a config entry."""
-    payload: RepairStreaksStoreData = {"streaks": dict(streaks)}
-    await repair_streaks_store(hass, entry_id).async_save(payload)
-
-
-async def async_remove_repair_streaks(hass: HomeAssistant, entry_id: str) -> None:
-    """Remove persisted repair streak counters for a config entry."""
-    await repair_streaks_store(hass, entry_id).async_remove()
 
 
 @callback
