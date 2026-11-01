@@ -219,18 +219,27 @@ def ebay_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def parse_ebay_time(value: str | None) -> datetime | None:
-    """Parse an eBay timestamp."""
-    if not value:
+def parse_ebay_time(value: Any) -> datetime | None:
+    """Parse an eBay timestamp or datetime into a UTC-aware datetime."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not value or not isinstance(value, str):
         return None
-    normalized = value.replace("Z", "+00:00")
+    text = value.strip()
+    if not text:
+        return None
+    normalized = (
+        text[:-1] + "+00:00" if text.endswith("Z") else text.replace("Z", "+00:00")
+    )
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def seconds_until(value: datetime | str | None) -> int | None:

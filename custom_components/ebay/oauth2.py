@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import time
@@ -19,7 +18,9 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 from yarl import URL
 
-from .api import CORE_SCOPE, endpoints_for
+from .clients.endpoints import endpoints_for
+from .clients.http import basic_auth_header as _basic_auth_header
+from .clients.scopes import CORE_SCOPE
 from .const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -37,7 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DEVELOPER_CONSOLE_URL = "https://developer.ebay.com/my/keys"
 OAUTH_SETUP_GUIDE_URL = (
-    "https://github.com/andrewtryder/ha-ebay/blob/main/docs/ebay-oauth-setup.md"
+    "https://github.com/andrewtryder/ha-ebay/blob/main/docs/oauth-and-accounts.md"
 )
 PRIVACY_POLICY_URL = "https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md"
 
@@ -185,11 +186,6 @@ def normalize_new_token(token: dict[str, Any]) -> dict[str, Any]:
     normalized["expires_in"] = int(normalized["expires_in"])
     normalized["expires_at"] = time.time() + normalized["expires_in"]
     return normalized
-
-
-def _basic_auth_header(client_id: str, client_secret: str) -> str:
-    basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-    return f"Basic {basic}"
 
 
 async def _log_oauth_error(status: int, resp: Any) -> str | None:

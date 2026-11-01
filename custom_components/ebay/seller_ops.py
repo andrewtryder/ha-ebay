@@ -15,6 +15,7 @@ from .marketplace import (
 from .marketplace import (
     marketplace_id_for_site as marketplace_id_for_site,  # noqa: PLC0414
 )
+from .parsers.xml import parse_ebay_time
 
 SHIPMENT_DUE_SOON_HOURS = 24
 ORDERS_LOOKBACK_DAYS = 30
@@ -113,20 +114,7 @@ def empty_seller_ops() -> dict[str, Any]:
 
 
 def _parse_ebay_datetime(value: Any) -> datetime | None:
-    if not value or not isinstance(value, str):
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parse_ebay_time(value)
 
 
 def _date_only_utc(value: datetime) -> datetime:

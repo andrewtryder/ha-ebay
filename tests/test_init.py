@@ -57,7 +57,7 @@ def _mock_identity_verification() -> Any:
 
 
 def _entry_data(**overrides: Any) -> dict[str, Any]:
-    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.clients.scopes import DEFAULT_SCOPE
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
 
     data = {
@@ -106,19 +106,19 @@ def _patch_setup(*, coordinator: Mock, client: Any = None) -> ExitStack:
     )
     stack.enter_context(
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         )
     )
     stack.enter_context(
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         )
     )
     stack.enter_context(
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         )
     )
@@ -264,7 +264,7 @@ def test_async_setup_entry_requires_core_oauth_scope() -> None:
 
 
 def test_async_setup_entry_accepts_core_only_oauth_scopes() -> None:
-    from custom_components.ebay.api import CORE_SCOPE
+    from custom_components.ebay.clients.scopes import CORE_SCOPE
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
 
     hass = Mock()
@@ -415,15 +415,15 @@ def test_async_unload_cancels_timers_and_unloads_platforms() -> None:
 
     with (
         patch(
-            "custom_components.ebay.repairs.async_save_repair_streaks",
+            "custom_components.ebay.storage.async_save_repair_streaks",
             new_callable=AsyncMock,
         ) as save_streaks,
         patch(
-            "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+            "custom_components.ebay.storage.async_save_ending_soon_fired",
             new_callable=AsyncMock,
         ) as save_ending_soon,
         patch(
-            "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+            "custom_components.ebay.storage.async_save_inactive_item_sensors",
             new_callable=AsyncMock,
         ) as save_inactive,
         patch(
@@ -456,15 +456,15 @@ def test_async_remove_entry_clears_issues_and_streaks() -> None:
             "custom_components.ebay.repairs.async_delete_entry_issues"
         ) as delete_issues,
         patch(
-            "custom_components.ebay.repairs.async_remove_repair_streaks",
+            "custom_components.ebay.storage.async_remove_repair_streaks",
             new_callable=AsyncMock,
         ) as remove_streaks,
         patch(
-            "custom_components.ebay.ending_soon_store.async_remove_ending_soon_fired",
+            "custom_components.ebay.storage.async_remove_ending_soon_fired",
             new_callable=AsyncMock,
         ) as remove_ending_soon,
         patch(
-            "custom_components.ebay.inactive_item_store.async_remove_inactive_item_sensors",
+            "custom_components.ebay.storage.async_remove_inactive_item_sensors",
             new_callable=AsyncMock,
         ) as remove_inactive,
     ):
@@ -486,7 +486,7 @@ def test_options_listener_reloads_entry() -> None:
 
 def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
     """Legacy entries with only refresh_token still construct a client."""
-    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.clients.scopes import DEFAULT_SCOPE
     from custom_components.ebay.const import CONF_OAUTH_SCOPES
 
     hass = Mock()
@@ -517,15 +517,15 @@ def test_legacy_refresh_token_entry_setup_without_token_blob() -> None:
             return_value=coordinator,
         ),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -545,7 +545,7 @@ def test_update_listener_skips_token_only_refresh_and_reloads_on_credential_reau
     """Token-only refresh triggers 0 reloads; credential reauth with unchanged options triggers 1."""
     from homeassistant import config_entries
 
-    from custom_components.ebay.api import CORE_SCOPE
+    from custom_components.ebay.clients.scopes import CORE_SCOPE
     from custom_components.ebay.config_flow import EbayConfigFlow
 
     hass = Mock()
@@ -641,7 +641,7 @@ def test_update_listener_reauth_with_pending_options_reloads_once() -> None:
     """Staging pending options triggers 0 reloads; completing reauth triggers 1 reload."""
     from homeassistant import config_entries
 
-    from custom_components.ebay.api import scopes_for_options
+    from custom_components.ebay.clients.scopes import scopes_for_options
     from custom_components.ebay.config_flow import EbayConfigFlow
     from custom_components.ebay.const import CONF_OAUTH_SCOPES, CONF_PENDING_OPTIONS
 
@@ -980,7 +980,7 @@ def test_update_listener_explicit_reauth_with_unchanged_credentials_and_options_
     """Explicit successful reauth with identical credentials/options increments reauth_generation and reloads once."""
     from homeassistant import config_entries
 
-    from custom_components.ebay.api import DEFAULT_SCOPE
+    from custom_components.ebay.clients.scopes import DEFAULT_SCOPE
     from custom_components.ebay.config_flow import EbayConfigFlow
     from custom_components.ebay.const import CONF_REAUTH_GENERATION
 

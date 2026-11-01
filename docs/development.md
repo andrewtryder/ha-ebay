@@ -181,26 +181,23 @@ After Home Assistant restarts, hard-refresh the browser before adding the HACS i
 
 The HACS test mode needs the GitHub repository to be public, or HACS needs access to the private repository through a configured GitHub token.
 
-## Release process
+## Manual Live-Validation Checklist
 
-Release Please owns the release version. It updates `version.txt` as the primary version file and mirrors the same version into `custom_components/ebay/manifest.json`.
+Before cutting a major or minor release, perform this minimal smoke test on a live or disposable Home Assistant instance:
 
-**Squash-merge only** for feature and fix PRs, with the squash commit title matching the semantic PR title. Regular merge commits can repeat the PR's conventional commit title in the merge commit body, which makes Release Please list the same change twice in the generated changelog. Do not rewrite historical changelog entries to undo past duplicates.
-
-Home Assistant `2026.10.0+` loads local custom integration brand assets from:
-
-```text
-custom_components/ebay/brand/
-```
-
-Regenerate those assets with:
-
-```bash
-uv run python scripts/prepare_brand_assets.py
-```
-
-On macOS/Linux, make scripts executable after checkout if needed:
-
-```bash
-chmod +x .devcontainer/*.sh
-```
+1. **Guided BYO OAuth Onboarding**:
+   - Complete setup via both Automatic Callback and Manual Authorization fallback.
+   - Verify keyset validation rejects malformed App IDs or whitespace.
+2. **Account Identity & Multi-Account**:
+   - Verify unique ID assignment (`{environment}_{account_id}`).
+   - Attempt onboarding the same account a second time to verify duplicate rejection.
+   - Onboard a second distinct account sharing the same keyset to verify cross-account isolation.
+3. **Core Buying & Selling**:
+   - Verify watched items and bidding entities populate with correct states and attributes.
+   - Verify active seller listings and order counts.
+4. **Lifecycle & State Restoration**:
+   - Reload the integration entry and restart Home Assistant.
+   - Verify entity unique IDs remain unchanged and state machine restores seamlessly.
+5. **Diagnostics & Privacy Audit**:
+   - Download the integration diagnostics JSON from Home Assistant.
+   - Verify that all OAuth client secrets, refresh tokens, auth codes, and buyer postal addresses are fully redacted.

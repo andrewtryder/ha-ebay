@@ -1807,15 +1807,15 @@ async def test_tracker_lifecycle_first_refresh_failure_cleans_up() -> None:
     with (
         patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -1863,15 +1863,15 @@ async def test_tracker_lifecycle_platform_setup_failure_cleans_up() -> None:
     with (
         patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -1935,15 +1935,15 @@ async def test_tracker_lifecycle_two_entries_same_keyset_one_fails_setup() -> No
     with (
         patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -1963,15 +1963,15 @@ async def test_tracker_lifecycle_two_entries_same_keyset_one_fails_setup() -> No
     with (
         patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         patch(
@@ -1990,15 +1990,15 @@ async def test_tracker_lifecycle_two_entries_same_keyset_one_fails_setup() -> No
     # Unload entry1
     with (
         patch(
-            "custom_components.ebay.repairs.async_save_repair_streaks",
+            "custom_components.ebay.storage.async_save_repair_streaks",
             new=AsyncMock(),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+            "custom_components.ebay.storage.async_save_ending_soon_fired",
             new=AsyncMock(),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+            "custom_components.ebay.storage.async_save_inactive_item_sensors",
             new=AsyncMock(),
         ),
     ):
@@ -2046,15 +2046,15 @@ async def test_tracker_lifecycle_repeated_reloads_no_leaks() -> None:
         with (
             patch("homeassistant.helpers.aiohttp_client.async_get_clientsession"),
             patch(
-                "custom_components.ebay.repairs.async_load_repair_streaks",
+                "custom_components.ebay.storage.async_load_repair_streaks",
                 new=AsyncMock(return_value={}),
             ),
             patch(
-                "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+                "custom_components.ebay.storage.async_load_ending_soon_fired",
                 new=AsyncMock(return_value=set()),
             ),
             patch(
-                "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+                "custom_components.ebay.storage.async_load_inactive_item_sensors",
                 new=AsyncMock(return_value={}),
             ),
             patch(
@@ -2071,15 +2071,15 @@ async def test_tracker_lifecycle_repeated_reloads_no_leaks() -> None:
 
         with (
             patch(
-                "custom_components.ebay.repairs.async_save_repair_streaks",
+                "custom_components.ebay.storage.async_save_repair_streaks",
                 new=AsyncMock(),
             ),
             patch(
-                "custom_components.ebay.ending_soon_store.async_save_ending_soon_fired",
+                "custom_components.ebay.storage.async_save_ending_soon_fired",
                 new=AsyncMock(),
             ),
             patch(
-                "custom_components.ebay.inactive_item_store.async_save_inactive_item_sensors",
+                "custom_components.ebay.storage.async_save_inactive_item_sensors",
                 new=AsyncMock(),
             ),
         ):

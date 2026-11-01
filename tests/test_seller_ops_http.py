@@ -11,10 +11,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from custom_components.ebay.api import (
-    EBAY_XML_NS,
-    GET_USER_CALL_NAME,
-    EbayApiClient,
+from custom_components.ebay.api import EbayApiClient
+from custom_components.ebay.clients.errors import (
     EbayApiError,
     EbayAuthError,
     EbayPartialFailure,
@@ -26,6 +24,8 @@ from custom_components.ebay.api import (
     sanitize_ebay_rest_errors,
 )
 from custom_components.ebay.clients.resilience import EndpointFamily
+from custom_components.ebay.const import EBAY_XML_NS
+from custom_components.ebay.parsers.trading_builders import GET_USER_CALL_NAME
 from custom_components.ebay.seller_ops import (
     FEEDBACK_ITEMS_MAX_PAGES,
     FEEDBACK_ITEMS_PAGE_LIMIT,
@@ -745,22 +745,26 @@ def test_merge_partial_failure_details_keeps_active_newest() -> None:
 
 
 def test_build_and_merge_partial_failure_detail_helpers() -> None:
-    from custom_components.ebay.api import (
-        _copy_seller_ops,
+    from custom_components.ebay.clients.errors import (
         _error_text_blob,
         _is_unsupported_error,
-        _parse_optional_datetime,
-        _parse_section_dt_map,
+        build_partial_failure_detail,
+        merge_partial_failure_details,
+    )
+    from custom_components.ebay.models import ApiFailure
+    from custom_components.ebay.parsers.trading_builders import _parse_optional_datetime
+    from custom_components.ebay.parsers.xml import (
         _to_bool,
         _to_float,
         _to_int,
-        build_partial_failure_detail,
         format_seconds,
-        merge_partial_failure_details,
         parse_ebay_time,
         seconds_until,
     )
-    from custom_components.ebay.models import ApiFailure
+    from custom_components.ebay.section_fetch import (
+        _copy_seller_ops,
+        _parse_section_dt_map,
+    )
     from custom_components.ebay.seller_ops import empty_seller_ops
 
     failure = ApiFailure(

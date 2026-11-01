@@ -86,6 +86,9 @@ def _summary_bool_on(
 def _partial_failure_categories(
     coordinator: EbayDataUpdateCoordinator,
 ) -> list[str]:
+    val = getattr(coordinator, "partial_failure_categories", None)
+    if isinstance(val, list):
+        return val
     data = coordinator.data or {}
     return list(
         data.get("partial_failures")
@@ -97,6 +100,9 @@ def _partial_failure_categories(
 def _truncated_collection_names(
     coordinator: EbayDataUpdateCoordinator,
 ) -> list[str]:
+    val = getattr(coordinator, "truncated_collection_names", None)
+    if isinstance(val, list):
+        return val
     truncated = (coordinator.data or {}).get("truncated_collections") or {}
     return sorted(name for name, is_truncated in truncated.items() if is_truncated)
 

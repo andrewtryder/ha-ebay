@@ -761,7 +761,7 @@ def test_diagnostic_last_successful_update_parses_string() -> None:
 
 
 def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:
-    from custom_components.ebay.api import _seller_ops_summary_keys
+    from custom_components.ebay.section_fetch import _seller_ops_summary_keys
     from custom_components.ebay.seller_ops import empty_seller_ops
 
     summary = _seller_ops_summary_keys(empty_seller_ops())
@@ -773,7 +773,9 @@ def test_unfetched_seller_ops_summary_uses_none_not_zero() -> None:
 
 
 def test_sold_unsold_window_days_attribute() -> None:
-    from custom_components.ebay.api import SOLD_UNSOLD_DURATION_DAYS
+    from custom_components.ebay.parsers.trading_builders import (
+        SOLD_UNSOLD_DURATION_DAYS,
+    )
     from custom_components.ebay.sensor import EbaySummarySensor
 
     coordinator = _SelectionCoordinator(
@@ -801,7 +803,9 @@ def test_sold_unsold_window_days_attribute() -> None:
 def test_should_fetch_sold_unsold_on_disappearance_or_stale() -> None:
     from datetime import datetime, timedelta, timezone
 
-    from custom_components.ebay.api import _should_fetch_sold_unsold
+    from custom_components.ebay.parsers.trading_builders import (
+        _should_fetch_sold_unsold,
+    )
 
     now = datetime.now(timezone.utc)
     assert _should_fetch_sold_unsold({"a": {}}, {}, None, now=now) is True
