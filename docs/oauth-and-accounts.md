@@ -62,21 +62,21 @@ To reliably support multiple eBay accounts on a single Home Assistant instance, 
 
 ### Why Canonical Identity is Required
 - eBay usernames are user-mutable (changeable once every 30 days). Using a username as the sole unique identifier leads to broken entity IDs or duplicate entries upon username changes.
-- eBay User IDs (numeric, e.g. `123456789`) are immutable across the account lifecycle.
+- eBay accounts are uniquely and immutably identified by their durable encrypted account token (`EIASToken`) returned via authenticated Trading `GetUser`.
 - Multiple environments (Production vs. Sandbox) must never collide even if identical usernames are registered.
 
 ### Identity Model
 Each config entry computes a canonical identity structure:
 1. **Environment**: `production` or `sandbox`.
-2. **Canonical Account ID**: The immutable numeric eBay user ID retrieved via Trading `GetUser`.
+2. **Canonical Account ID**: The immutable `EIASToken` retrieved via authenticated Trading `GetUser` (`AccountIdentifierType.EIASTOKEN`).
 3. **Username**: The current display username (used for friendly names, fallback logging, and diagnostics).
-4. **Unique ID**: Formatted as `{environment}_{canonical_account_id}`.
+4. **Unique ID**: Formatted as `{environment}:{canonical_account_id}`.
 
 ### Duplicate Detection Matrix
 When a new account is added or reauthorized:
-- **Same environment + same canonical ID**: Rejected as a duplicate during setup; updates credentials atomically during reauth.
+- **Same environment + same canonical ID (`EIASToken`)**: Rejected as a duplicate during setup; updates credentials atomically during reauth.
 - **Same environment + different canonical ID**: Permitted (creates a second distinct config entry).
-- **Different environment + same user ID**: Permitted (completely isolated configs and entity registries).
+- **Different environment + same account ID**: Permitted (completely isolated configs and entity registries).
 
 ---
 
@@ -87,7 +87,7 @@ When a new account is added or reauthorized:
 - **Shared Developer Keyset**: Multiple family or business accounts can all share the same App ID, Cert ID, and RuName. Each account completes its own OAuth consent flow using its respective eBay user login.
 - **Isolated State & Coordinators**: Each account runs an isolated `EbayDataUpdateCoordinator`, separate token storage, distinct poll timers, and separate repair issues.
 - **Entity Unique IDs**: All entities include the unique config entry ID / canonical account ID in their unique IDs (e.g., `sensor.ebay_buyer_orders_<unique_id>`), guaranteeing zero naming conflicts.
-- **Rate Limit Budget**: Different user accounts sharing an App ID share the application-level daily call limit (typically 5,000,000 Trading calls/day and 250,000 REST calls/day), which is more than sufficient for normal polling.
+- **Rate Limit Budget**: Different user accounts sharing an App ID share the application-level daily call limit (typically 5,000 Trading API calls/day for default keysets, expandable upon application review with eBay, along with resource-specific REST limits). A shared rate-limit tracker (`RateLimitTracker`) in Home Assistant coordinates cooldowns per keyset to prevent cascading 429 rate-limit responses across accounts.
 
 ---
 

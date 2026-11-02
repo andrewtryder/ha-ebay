@@ -111,7 +111,7 @@ The integration polls eBay over the cloud (no local discovery). Cadence by secti
 
 | Section | Cadence |
 |---------|---------|
-| Buying, selling, active orders | Configured poll interval (default 15 minutes) |
+| Buying, selling, active orders | Configured poll interval (default 30 minutes) |
 | Messages | Twice the poll interval |
 | Feedback, analytics | Hourly |
 | Seller standards | Daily |

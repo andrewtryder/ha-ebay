@@ -90,7 +90,7 @@ While Trading XML powers core buying and selling censuses, modern eBay REST APIs
 
 To avoid request bursts and respect eBay API rate limits, polling is split into independent **sections**:
 
-- **Core Buying** (`watched`, `bidding`): Evaluated every poll interval (default: 15–30 minutes). Can be accelerated during active bidding.
+- **Core Buying** (`watched`, `bidding`): Evaluated every poll interval (default: 30 minutes). Can be accelerated during active bidding.
 - **Core Selling** (`active_selling`, `sold`, `unsold`): Polled periodically.
 - **Seller Operations** (`orders`, `finances`, `analytics`, `standards`): Polled on a staggered schedule or only when enabled by user options.
 - **High-Priority Auctions**: Watched items ending in under 12 hours or active bids can be polled at an expedited cadence if configured.
