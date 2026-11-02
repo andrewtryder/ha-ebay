@@ -145,7 +145,7 @@ def test_successful_update_clears_last_error_and_sets_baseline(
 
 
 def test_summary_api_warnings_are_capped_for_state_attributes() -> None:
-    from custom_components.ebay.api import API_WARNINGS_STATE_ATTR_MAX
+    from custom_components.ebay.clients.errors import API_WARNINGS_STATE_ATTR_MAX
 
     now = datetime.now(timezone.utc)
     warnings = [

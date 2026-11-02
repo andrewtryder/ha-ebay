@@ -14,27 +14,34 @@ from zoneinfo import ZoneInfo
 import aiohttp
 import pytest
 
-from custom_components.ebay.clients.resilience import EndpointFamily
-from custom_components.ebay.api import (
-    ANALYTICS_BATCH_SIZE,
+from custom_components.ebay.api import EbayApiClient
+from custom_components.ebay.clients.errors import (
     API_WARNINGS_STATE_ATTR_MAX,
-    BEST_OFFERS_CALL_NAME,
-    EBAY_XML_NS,
-    EbayApiClient,
     EbayApiError,
     EbayAuthError,
     EbayParseError,
     EbayPartialFailure,
+    build_api_failure,
+    classify_rest_status,
+)
+from custom_components.ebay.clients.resilience import EndpointFamily
+from custom_components.ebay.models import FailureClassification
+from custom_components.ebay.clients.rest_apis import analytics_date_range_filter
+from custom_components.ebay.const import EBAY_XML_NS
+from custom_components.ebay.parsers.trading_builders import (
+    BEST_OFFERS_CALL_NAME,
+    build_get_my_ebay_buying_xml,
+)
+from custom_components.ebay.parsers.trading_items import parse_selling_container
+from custom_components.ebay.parsers.xml import (
+    ANALYTICS_BATCH_SIZE,
     _to_bool,
     _to_float,
     _to_int,
-    analytics_date_range_filter,
-    build_get_my_ebay_buying_xml,
     chunk_item_ids,
     dedupe_trading_warnings,
     extract_trading_warnings,
     parse_ebay_time,
-    parse_selling_container,
 )
 
 
@@ -190,7 +197,7 @@ def test_analytics_partial_intermediate_batch_failure_keeps_successes() -> None:
 def test_analytics_batch_failure_debug_log_includes_batch_context(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.clients.analytics")
+    caplog.set_level(logging.DEBUG, logger="custom_components.ebay.clients.rest_apis")
 
     class Client(EbayApiClient):
         def __init__(self) -> None:
@@ -442,7 +449,7 @@ def test_malformed_fields_and_missing_containers() -> None:
 
 
 def test_duplicate_item_ids_keep_last() -> None:
-    from custom_components.ebay.api import _dict_by_item_id
+    from custom_components.ebay.parsers.payload import _dict_by_item_id
 
     items = [
         {"item_id": "1", "title": "first"},
@@ -614,7 +621,7 @@ def test_analytics_request_filter_uses_pacific_date_range() -> None:
     )
     now = datetime(2024, 1, 2, 5, 0, tzinfo=timezone.utc)
     with patch(
-        "custom_components.ebay.clients.analytics.analytics_date_range_filter",
+        "custom_components.ebay.clients.rest_apis.analytics_date_range_filter",
         return_value=analytics_date_range_filter(now=now),
     ):
         asyncio.run(client.async_get_traffic_report(["1", "2"]))
@@ -643,3 +650,69 @@ def test_analytics_auth_error_propagates_from_batch_fetch() -> None:
 
     with pytest.raises(EbayAuthError, match="analytics auth failed"):
         asyncio.run(Client().async_fetch_analytics_views(["1"]))
+
+
+# (status, error_payload, partial_category, expected_classification)
+_CLASSIFY_CASES: list[tuple[int, dict[str, Any] | None, str, FailureClassification]] = [
+    (204, None, "orders", "unknown"),
+    (400, None, "feedback", "malformed_request"),
+    (401, None, "orders", "unknown"),
+    (403, None, "orders", "permission"),
+    (
+        403,
+        {"errors": [{"message": "Account is not eligible for this API"}]},
+        "feedback",
+        "unsupported",
+    ),
+    (404, None, "finances", "unknown"),
+    (429, None, "orders", "transient"),
+    (500, None, "messages", "transient"),
+]
+
+
+@pytest.mark.parametrize(
+    ("status", "error_payload", "partial_category", "expected"),
+    _CLASSIFY_CASES,
+    ids=[str(case[0]) + ("-elig" if case[1] else "") for case in _CLASSIFY_CASES],
+)
+def test_classify_rest_status_table(
+    status: int,
+    error_payload: dict[str, Any] | None,
+    partial_category: str,
+    expected: FailureClassification,
+) -> None:
+    assert classify_rest_status(status, error_payload, partial_category) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "error_payload", "partial_category", "classification"),
+    [
+        (204, None, "orders", "unknown"),
+        (400, None, "feedback", "malformed_request"),
+        (401, None, "orders", "unknown"),
+        (403, None, "orders", "permission"),
+        (404, None, "finances", "unknown"),
+        (429, None, "orders", "transient"),
+        (500, None, "messages", "transient"),
+    ],
+    ids=["204", "400", "401", "403", "404", "429", "500"],
+)
+def test_build_api_failure_table(
+    status: int,
+    error_payload: dict[str, Any] | None,
+    partial_category: str,
+    classification: FailureClassification,
+) -> None:
+    failure = build_api_failure(
+        "test.op",
+        "https://api.ebay.com/sell/fulfillment/v1/order",
+        status,
+        error_payload,
+        partial_category,
+        classification,
+    )
+    assert failure.http_status == status
+    assert failure.classification == classification
+    assert failure.mapped_category == partial_category
+    assert failure.endpoint_key == "/sell/fulfillment/v1/order"
+    assert failure.operation == "test.op"

@@ -362,7 +362,7 @@ def test_diagnostic_sensors_disabled_by_default() -> None:
 
 
 def test_api_warning_count_uses_full_list_while_attrs_are_capped() -> None:
-    from custom_components.ebay.api import API_WARNINGS_STATE_ATTR_MAX
+    from custom_components.ebay.clients.errors import API_WARNINGS_STATE_ATTR_MAX
 
     warnings = [
         {"code": str(index), "short_message": f"w{index}", "long_message": None}

@@ -46,9 +46,13 @@ _LOGGER = logging.getLogger(__name__)
 TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 
 
-def _basic_auth_header(client_id: str, client_secret: str) -> str:
+def basic_auth_header(client_id: str, client_secret: str) -> str:
+    """Build an HTTP Basic Authorization header value."""
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     return f"Basic {basic}"
+
+
+_basic_auth_header = basic_auth_header
 
 
 class RestClientMixin:

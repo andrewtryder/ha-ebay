@@ -112,11 +112,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from homeassistant.helpers import config_entry_oauth2_flow
     from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-    from .api import EbayApiClient, has_core_scope
+    from .api import EbayApiClient
+    from .clients.scopes import has_core_scope
     from .coordinator import EbayDataUpdateCoordinator
-    from .ending_soon_store import async_load_ending_soon_fired
-    from .inactive_item_store import async_load_inactive_item_sensors
-    from .repairs import async_load_repair_streaks
+    from .storage import (
+        async_load_ending_soon_fired,
+        async_load_inactive_item_sensors,
+        async_load_repair_streaks,
+    )
 
     if not has_core_scope(entry.data.get(CONF_OAUTH_SCOPES)):
         raise ConfigEntryAuthFailed(
@@ -190,9 +193,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     from homeassistant.const import Platform
 
-    from .ending_soon_store import async_save_ending_soon_fired
-    from .inactive_item_store import async_save_inactive_item_sensors
-    from .repairs import async_save_repair_streaks
+    from .storage import (
+        async_save_ending_soon_fired,
+        async_save_inactive_item_sensors,
+        async_save_repair_streaks,
+    )
 
     coordinator = entry.runtime_data
     if hasattr(coordinator, "async_shutdown"):
@@ -226,9 +231,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Clean up repairs and persisted state when a config entry is removed."""
-    from .ending_soon_store import async_remove_ending_soon_fired
-    from .inactive_item_store import async_remove_inactive_item_sensors
-    from .repairs import async_delete_entry_issues, async_remove_repair_streaks
+    from .repairs import async_delete_entry_issues
+    from .storage import (
+        async_remove_ending_soon_fired,
+        async_remove_inactive_item_sensors,
+        async_remove_repair_streaks,
+    )
 
     async_delete_entry_issues(hass, entry)
     await async_remove_repair_streaks(hass, entry.entry_id)

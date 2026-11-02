@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 from typing import Any
@@ -59,13 +58,6 @@ from custom_components.ebay.coordinator import (
     _baseline_payload,
 )
 from custom_components.ebay.diagnostics import async_get_config_entry_diagnostics
-from custom_components.ebay.migration_policy import (
-    FeatureKey,
-    MigrationPolicy,
-    ProviderType,
-    ReadinessEvidence,
-    ReadinessState,
-)
 
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
@@ -717,15 +709,15 @@ async def test_e2e_unload_and_remove_cleans_up(hass: HomeAssistant) -> None:
             "custom_components.ebay.repairs.async_delete_entry_issues"
         ) as mock_delete,
         patch(
-            "custom_components.ebay.repairs.async_remove_repair_streaks",
+            "custom_components.ebay.storage.async_remove_repair_streaks",
             new=AsyncMock(),
         ) as mock_streaks,
         patch(
-            "custom_components.ebay.ending_soon_store.async_remove_ending_soon_fired",
+            "custom_components.ebay.storage.async_remove_ending_soon_fired",
             new=AsyncMock(),
         ) as mock_ending,
         patch(
-            "custom_components.ebay.inactive_item_store.async_remove_inactive_item_sensors",
+            "custom_components.ebay.storage.async_remove_inactive_item_sensors",
             new=AsyncMock(),
         ) as mock_inactive,
     ):
@@ -762,15 +754,15 @@ async def test_e2e_first_refresh_failure_releases_tracker(hass: HomeAssistant) -
             side_effect=ConfigEntryNotReady("API down"),
         ),
         patch(
-            "custom_components.ebay.repairs.async_load_repair_streaks",
+            "custom_components.ebay.storage.async_load_repair_streaks",
             new=AsyncMock(return_value={}),
         ),
         patch(
-            "custom_components.ebay.ending_soon_store.async_load_ending_soon_fired",
+            "custom_components.ebay.storage.async_load_ending_soon_fired",
             new=AsyncMock(return_value=set()),
         ),
         patch(
-            "custom_components.ebay.inactive_item_store.async_load_inactive_item_sensors",
+            "custom_components.ebay.storage.async_load_inactive_item_sensors",
             new=AsyncMock(return_value={}),
         ),
         pytest.raises(ConfigEntryNotReady),
@@ -1280,245 +1272,3 @@ def test_e2e_auth_error_privacy_no_leaks() -> None:
     assert err.failed_token == secret_token
     assert secret_token not in str(err)
     assert secret_token not in repr(err)
-
-
-# ==============================================================================
-# Suite 6: Modern API Migration Safety & Readiness Audit
-# ==============================================================================
-
-
-def test_e2e_eight_readiness_gates_and_production_routing_invariants() -> None:
-    """Audit migration policy readiness gates and authoritative baseline routing."""
-    # 1. XML Baseline Domains
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.WATCHLIST)
-        == ProviderType.TRADING_XML
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.BIDDING)
-        == ProviderType.TRADING_XML
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.SELLER_LISTINGS)
-        == ProviderType.TRADING_XML
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.OFFERS)
-        == ProviderType.TRADING_XML
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.SOLD_UNSOLD)
-        == ProviderType.TRADING_XML
-    )
-
-    # 2. Modern REST Baseline Domains (Trading XML is NOT a fallback)
-    assert MigrationPolicy.get_default_provider(FeatureKey.ORDERS) == ProviderType.REST
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.SELLER_STANDARDS)
-        == ProviderType.REST
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.MESSAGES) == ProviderType.REST
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.ANALYTICS) == ProviderType.REST
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.FINANCES) == ProviderType.REST
-    )
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.ACCOUNT_PRIVILEGES)
-        == ProviderType.REST
-    )
-
-    # 3. Hybrid Baseline Domain
-    assert (
-        MigrationPolicy.get_default_provider(FeatureKey.FEEDBACK) == ProviderType.HYBRID
-    )
-
-    # 4. GraphQL Watchlist is Blocked (FORBIDDEN)
-    evidence = ReadinessEvidence(
-        schema_validated=True,
-        scopes_contract_established=True,
-        required_scopes=("https://api.ebay.com/oauth/api_scope",),
-        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
-        api_permission_granted=False,
-        permission_error_code="FORBIDDEN",
-        response_complete=True,
-        pagination_verified=True,
-        field_parity_verified=True,
-        account_identity_consistent=True,
-        fallback_available=True,
-    )
-    evaluation = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST,
-        ProviderType.GRAPHQL,
-        evidence=evidence,
-    )
-    assert not evaluation.is_ready
-    assert evaluation.state == ReadinessState.BLOCKED_AUTHORIZATION
-
-
-def test_e2e_eight_migration_readiness_gates_independently() -> None:
-    """Independently verify all eight migration readiness gates for candidate cutover.
-
-    Demonstrates:
-    1. Complete valid evidence achieves ReadinessState.READY.
-    2. Each of the eight readiness gates independently blocks candidate activation when unmet:
-       - Gate 1: fallback_available
-       - Gate 2: account_identity_consistent
-       - Gate 3: scopes_contract_established / verified_scopes
-       - Gate 4: api_permission_granted / permission_error_code
-       - Gate 5: schema_validated
-       - Gate 6: response_complete
-       - Gate 7: pagination_verified
-       - Gate 8: field_parity_verified / missing_fields
-    3. Missing / empty evidence never silently passes.
-    4. Successful offline syntax or normalization tests alone do not authorize production cutover.
-    5. FORBIDDEN error code blocks Watchlist cutover and retains Trading XML.
-    6. Default Trading XML and established REST baseline routing remain strictly preserved.
-    """
-    valid_evidence = ReadinessEvidence(
-        schema_validated=True,
-        scopes_contract_established=True,
-        required_scopes=("https://api.ebay.com/oauth/api_scope",),
-        verified_scopes=("https://api.ebay.com/oauth/api_scope",),
-        api_permission_granted=True,
-        permission_error_code=None,
-        response_complete=True,
-        pagination_verified=True,
-        field_parity_verified=True,
-        unverified_fields=(),
-        missing_fields=(),
-        account_identity_consistent=True,
-        fallback_available=True,
-    )
-
-    # 1. Complete valid evidence evaluates to READY
-    ready_eval = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, valid_evidence
-    )
-    assert ready_eval.is_ready is True
-    assert ready_eval.state == ReadinessState.READY
-    assert len(ready_eval.blocking_reasons) == 0
-
-    # 2. Gate 1: Fallback available
-    ev_no_fallback = replace(valid_evidence, fallback_available=False)
-    eval_1 = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_fallback
-    )
-    assert eval_1.is_ready is False
-    assert eval_1.state == ReadinessState.BLOCKED_NO_FALLBACK
-    assert any("Fallback" in reason for reason in eval_1.blocking_reasons)
-
-    # Gate 2: Account identity continuity
-    ev_identity = replace(valid_evidence, account_identity_consistent=False)
-    eval_2 = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_identity
-    )
-    assert eval_2.is_ready is False
-    assert eval_2.state == ReadinessState.BLOCKED_IDENTITY
-    assert any("account identity" in reason for reason in eval_2.blocking_reasons)
-
-    # Gate 3: Scopes contract and missing verified scopes
-    ev_scope_contract = replace(valid_evidence, scopes_contract_established=False)
-    eval_3a = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_scope_contract
-    )
-    assert eval_3a.is_ready is False
-    assert eval_3a.state == ReadinessState.BLOCKED_SCOPE
-
-    ev_missing_scopes = replace(valid_evidence, verified_scopes=())
-    eval_3b = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_missing_scopes
-    )
-    assert eval_3b.is_ready is False
-    assert eval_3b.state == ReadinessState.BLOCKED_SCOPE
-    assert any(
-        "Missing verified OAuth scopes" in reason for reason in eval_3b.blocking_reasons
-    )
-
-    # Gate 4: API permission / entitlement / HTTP 403 / FORBIDDEN
-    ev_no_perm = replace(valid_evidence, api_permission_granted=False)
-    eval_4a = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_perm
-    )
-    assert eval_4a.is_ready is False
-    assert eval_4a.state == ReadinessState.BLOCKED_AUTHORIZATION
-
-    ev_forbidden = replace(valid_evidence, permission_error_code="FORBIDDEN")
-    eval_4b = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_forbidden
-    )
-    assert eval_4b.is_ready is False
-    assert eval_4b.state == ReadinessState.BLOCKED_AUTHORIZATION
-    assert any("FORBIDDEN" in reason for reason in eval_4b.blocking_reasons)
-
-    # Gate 5: Modern API Schema validation
-    ev_schema = replace(valid_evidence, schema_validated=False)
-    eval_5 = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_schema
-    )
-    assert eval_5.is_ready is False
-    assert eval_5.state == ReadinessState.BLOCKED_SCHEMA
-    assert any(
-        "schema has not been validated" in reason for reason in eval_5.blocking_reasons
-    )
-
-    # Gate 6: Collection completeness / Census validation
-    ev_incomplete = replace(valid_evidence, response_complete=False)
-    eval_6 = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_incomplete
-    )
-    assert eval_6.is_ready is False
-    assert eval_6.state == ReadinessState.BLOCKED_COMPLETENESS
-    assert any("complete census" in reason for reason in eval_6.blocking_reasons)
-
-    # Gate 7: Pagination continuity and boundaries
-    ev_pagination = replace(valid_evidence, pagination_verified=False)
-    eval_7 = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_pagination
-    )
-    assert eval_7.is_ready is False
-    assert eval_7.state == ReadinessState.BLOCKED_PAGINATION
-    assert any("Pagination boundaries" in reason for reason in eval_7.blocking_reasons)
-
-    # Gate 8: Field-level parity
-    ev_no_parity = replace(valid_evidence, field_parity_verified=False)
-    eval_8a = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_no_parity
-    )
-    assert eval_8a.is_ready is False
-    assert eval_8a.state == ReadinessState.BLOCKED_PARITY
-
-    ev_missing_field = replace(valid_evidence, missing_fields=("current_price",))
-    eval_8b = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, ev_missing_field
-    )
-    assert eval_8b.is_ready is False
-    assert eval_8b.state == ReadinessState.BLOCKED_PARITY
-    assert any("current_price" in reason for reason in eval_8b.blocking_reasons)
-
-    # 3. Missing evidence never silently becomes a pass
-    empty_ev = ReadinessEvidence()
-    eval_empty = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, empty_ev
-    )
-    assert eval_empty.is_ready is False
-    assert len(eval_empty.blocking_reasons) >= 6
-
-    # 4. Successful offline syntax or normalization alone does not authorize cutover
-    syntax_only_ev = ReadinessEvidence(schema_validated=True)
-    eval_syntax = MigrationPolicy.evaluate_readiness(
-        FeatureKey.WATCHLIST, ProviderType.GRAPHQL, syntax_only_ev
-    )
-    assert eval_syntax.is_ready is False
-    assert eval_syntax.state != ReadinessState.READY
-
-    # 5. FORBIDDEN blocks cutover and ensures active provider remains TRADING_XML
-    effective = MigrationPolicy.get_active_provider(
-        FeatureKey.WATCHLIST,
-        options={"provider_watchlist": "graphql"},
-        readiness=eval_4b,
-    )
-    assert effective == ProviderType.TRADING_XML

@@ -616,7 +616,7 @@ def test_transient_failures_do_not_increment_repair_streaks(
 
 
 def test_repair_streaks_store_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
-    from custom_components.ebay.repairs import (
+    from custom_components.ebay.storage import (
         async_load_repair_streaks,
         async_remove_repair_streaks,
         async_save_repair_streaks,
@@ -642,7 +642,7 @@ def test_repair_streaks_store_round_trip(monkeypatch: pytest.MonkeyPatch) -> Non
             stores.pop(self.key, None)
 
     monkeypatch.setattr(
-        "custom_components.ebay.repairs.Store",
+        "custom_components.ebay.storage.Store",
         _MemStore,
     )
 
@@ -672,7 +672,7 @@ def test_parse_issue_suffix_and_load_defensive() -> None:
 def test_load_repair_streaks_skips_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from custom_components.ebay.repairs import async_load_repair_streaks
+    from custom_components.ebay.storage import async_load_repair_streaks
 
     hass = Mock()
 
@@ -685,14 +685,14 @@ def test_load_repair_streaks_skips_invalid(
         async def async_load(self) -> dict[str, Any]:
             return {"streaks": {"ok": 2, "bad": object()}}
 
-    monkeypatch.setattr("custom_components.ebay.repairs.Store", _MemStore)
+    monkeypatch.setattr("custom_components.ebay.storage.Store", _MemStore)
     assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {"ok": 2}
 
 
 def test_load_repair_streaks_non_dict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from custom_components.ebay.repairs import async_load_repair_streaks
+    from custom_components.ebay.storage import async_load_repair_streaks
 
     hass = Mock()
     payloads: list[Any] = [None, {"streaks": []}]
@@ -709,7 +709,7 @@ def test_load_repair_streaks_non_dict(
             index["i"] += 1
             return value
 
-    monkeypatch.setattr("custom_components.ebay.repairs.Store", _MemStore)
+    monkeypatch.setattr("custom_components.ebay.storage.Store", _MemStore)
     assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {}
     assert asyncio.run(async_load_repair_streaks(hass, "entry-1")) == {}
 

@@ -11,28 +11,37 @@ from typing import Any
 import pytest
 
 from custom_components.ebay.api import (
-    BEST_OFFERS_CALL_NAME,
-    DEFAULT_SCOPE,
-    EBAY_XML_NS,
-    MAX_PAGES,
-    READ_ONLY_CALL_NAME,
-    SELLER_LIST_CALL_NAME,
-    SELLING_CALL_NAME,
     EbayApiClient,
     EbayApiError,
     EbayAuthError,
-    active_offers_by_item_id,
-    analytics_views_by_item_id,
-    build_get_best_offers_xml,
+)
+from custom_components.ebay.clients.endpoints import (
     extract_authorization_code,
     extract_oauth_callback_params,
+)
+from custom_components.ebay.clients.scopes import DEFAULT_SCOPE
+from custom_components.ebay.const import EBAY_XML_NS
+from custom_components.ebay.oauth_errors import OAuth2TokenRequestError
+from custom_components.ebay.parsers.payload import summarize_payload
+from custom_components.ebay.parsers.trading_builders import (
+    BEST_OFFERS_CALL_NAME,
+    READ_ONLY_CALL_NAME,
+    SELLER_LIST_CALL_NAME,
+    SELLING_CALL_NAME,
+    SOLD_UNSOLD_DURATION_DAYS,
+    build_get_best_offers_xml,
+    build_get_my_ebay_selling_list_xml,
+    parse_sold_unsold_classification,
+)
+from custom_components.ebay.parsers.trading_items import (
+    active_offers_by_item_id,
+    analytics_views_by_item_id,
     pagination_total_pages,
     parse_container,
     parse_selling_container,
     seller_list_views_by_item_id,
-    summarize_payload,
 )
-from custom_components.ebay.oauth_errors import OAuth2TokenRequestError
+from custom_components.ebay.parsers.xml import MAX_PAGES
 
 
 def _root(xml: str) -> ET.Element:
@@ -821,8 +830,6 @@ def test_fetch_data_paginates_best_offers() -> None:
 
 
 def test_parse_sold_unsold_classification_prefers_sold() -> None:
-    from custom_components.ebay.api import parse_sold_unsold_classification
-
     root = _root(
         f"""
         <GetMyeBaySellingResponse xmlns="{EBAY_XML_NS}">
@@ -851,11 +858,6 @@ def test_parse_sold_unsold_classification_prefers_sold() -> None:
 
 
 def test_build_selling_list_xml_includes_duration() -> None:
-    from custom_components.ebay.api import (
-        SOLD_UNSOLD_DURATION_DAYS,
-        build_get_my_ebay_selling_list_xml,
-    )
-
     sold_xml = build_get_my_ebay_selling_list_xml("SoldList", page=2)
     assert "<SoldList>" in sold_xml
     assert "<Include>true</Include>" in sold_xml

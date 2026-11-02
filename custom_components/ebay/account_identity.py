@@ -8,7 +8,7 @@ isolation across accounts using the same or different developer applications.
 from __future__ import annotations
 
 import asyncio
-import base64
+import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -20,6 +20,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 
 from .clients.endpoints import endpoints_for
+from .clients.http import basic_auth_header as _basic_auth_header
 from .clients.trading import COMPATIBILITY_LEVEL
 from .const import (
     CONF_ACCOUNT_IDENTITY,
@@ -30,15 +31,22 @@ from .const import (
     CONF_SITE_ID,
     EBAY_XML_NS,
 )
-from .parsers.identity_parity import (
-    pseudonymize_identifier,
-)
 from .parsers.trading_builders import build_get_user_xml
 
 _LOGGER = logging.getLogger(__name__)
 
 # Timeout for user-initiated account identity verification
 DEFAULT_IDENTITY_VERIFICATION_TIMEOUT = 15.0
+
+
+def pseudonymize_identifier(val: str | None, prefix: str = "user") -> str:
+    """Return a deterministic, privacy-preserving 12-char SHA-256 pseudonym."""
+    if not val:
+        return ""
+    digest = hashlib.sha256(
+        f"ebay_parity_salt:{val.strip()}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{prefix}_{digest}"
 
 
 class AccountIdentifierType(StrEnum):
@@ -277,12 +285,6 @@ def get_entry_account_identity(entry: ConfigEntry) -> AccountIdentity:
         failure_reason=IdentityFailureReason.NONE,
         reauth_generation=reauth_gen,
     )
-
-
-def _basic_auth_header(client_id: str, client_secret: str) -> str:
-    """Return standard HTTP Basic Auth header value."""
-    creds = f"{client_id}:{client_secret}".encode()
-    return f"Basic {base64.b64encode(creds).decode()}"
 
 
 def is_displayable_username(username: str | None) -> bool:
