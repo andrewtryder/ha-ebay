@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/andrewtryder/ha-ebay/compare/v0.9.0...v1.0.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* Consolidate eBay integration architecture, prune dead exploratory scaffolding, streamline storage and clients into unified modules, and establish the v1.0.0 production baseline.
+
+### Features
+
+* consolidate codebase and finalize v1.0.0 architecture ([#108](https://github.com/andrewtryder/ha-ebay/issues/108)) ([0aa04a7](https://github.com/andrewtryder/ha-ebay/commit/0aa04a79c126640fed477ff0fbc498c139033dd1))
+
 ## [0.9.0](https://github.com/andrewtryder/ha-ebay/compare/v0.8.3...v0.9.0) (2026-11-01)
 
 
