@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/andrewtryder/ha-ebay/compare/v1.0.2...v1.1.0) (2026-11-03)
+
+
+### Features
+
+* **sensor:** disable per-item sensors by default and add item summary attributes ([#115](https://github.com/andrewtryder/ha-ebay/issues/115)) ([482b3e3](https://github.com/andrewtryder/ha-ebay/commit/482b3e323edbb8a6423ed35bd79324f48379722a))
+
 ## [1.0.2](https://github.com/andrewtryder/ha-ebay/compare/v1.0.1...v1.0.2) (2026-11-03)
 
 
