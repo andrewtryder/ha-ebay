@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/andrewtryder/ha-ebay/compare/v1.0.0...v1.0.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* repair Home Assistant onboarding translations and setup UX ([#110](https://github.com/andrewtryder/ha-ebay/issues/110)) ([58f8cc0](https://github.com/andrewtryder/ha-ebay/commit/58f8cc09c446e4a03484bf9f7a2ce1526abbffcd))
+
 ## [1.0.0](https://github.com/andrewtryder/ha-ebay/compare/v0.9.0...v1.0.0) (2026-11-02)
 
 
