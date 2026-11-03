@@ -545,8 +545,9 @@ def test_redirect_guidance_step_shows_copyable_urls(
 
     result = asyncio.run(flow.async_step_redirect_guidance())
 
-    assert result["type"] == "form"
+    assert result["type"] == "menu"
     assert result["step_id"] == "redirect_guidance"
+    assert result["menu_options"] == ["credentials"]
     assert (
         result["description_placeholders"]["callback_url"]
         == "https://my.home-assistant.io/redirect/oauth"
@@ -596,8 +597,9 @@ def test_prepare_application_alias_shows_redirect_guidance(
 
     result = asyncio.run(flow.async_step_prepare_application())
 
-    assert result["type"] == "form"
+    assert result["type"] == "menu"
     assert result["step_id"] == "redirect_guidance"
+    assert result["menu_options"] == ["credentials"]
 
 
 def test_authorization_method_alias_shows_user_menu(
@@ -795,8 +797,9 @@ def test_reauth_bypasses_introductory_guidance_and_preserves_keys(
 
     # Reauth confirm step
     result_confirm = asyncio.run(flow.async_step_reauth_confirm())
-    assert result_confirm["type"] == "form"
+    assert result_confirm["type"] == "menu"
     assert result_confirm["step_id"] == "reauth_confirm"
+    assert result_confirm["menu_options"] == ["credentials"]
 
     # Confirming reauth leads directly to credentials without showing user or redirect_guidance
     result_creds = asyncio.run(flow.async_step_reauth_confirm({}))
@@ -1328,8 +1331,9 @@ def test_reauth_confirm_credentials_form_serializes_and_validates(
     monkeypatch.setattr(flow, "_get_reauth_entry", lambda: entry)
 
     confirm = asyncio.run(flow.async_step_reauth(entry.data))
-    assert confirm["type"] == "form"
+    assert confirm["type"] == "menu"
     assert confirm["step_id"] == "reauth_confirm"
+    assert confirm["menu_options"] == ["credentials"]
 
     credentials = asyncio.run(flow.async_step_reauth_confirm({}))
     assert credentials["type"] == "form"

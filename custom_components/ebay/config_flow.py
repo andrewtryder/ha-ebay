@@ -107,9 +107,9 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         """Display exact callback URLs and RuName setup instructions."""
         if user_input is not None:
             return await self.async_step_credentials()
-        return self.async_show_form(
+        return self.async_show_menu(
             step_id="redirect_guidance",
-            data_schema=vol.Schema({}),
+            menu_options=["credentials"],
             description_placeholders=self._setup_description_placeholders(),
         )
 
@@ -378,10 +378,13 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Confirm before collecting credentials for reauth."""
-        if user_input is None:
-            return self.async_show_form(step_id="reauth_confirm")
-        self._oauth_mode = OAUTH_MODE_CALLBACK
-        return await self.async_step_credentials()
+        if user_input is not None:
+            self._oauth_mode = OAUTH_MODE_CALLBACK
+            return await self.async_step_credentials()
+        return self.async_show_menu(
+            step_id="reauth_confirm",
+            menu_options=["credentials"],
+        )
 
     async def async_step_manual(
         self, user_input: dict[str, Any] | None = None
@@ -431,11 +434,11 @@ class EbayConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=
 
     def _manual_form(self, errors: dict[str, str]) -> config_entries.ConfigFlowResult:
         """Return the manual OAuth fallback form."""
+        placeholders = self._setup_description_placeholders()
+        placeholders["consent_url"] = self._consent_url or ""
         return self.async_show_form(
             step_id="manual",
-            description_placeholders={
-                "consent_url": self._consent_url or "",
-            },
+            description_placeholders=placeholders,
             data_schema=vol.Schema({vol.Required("authorization_code"): str}),
             errors=errors,
         )

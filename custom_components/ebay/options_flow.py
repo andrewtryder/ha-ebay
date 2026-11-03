@@ -232,6 +232,8 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
                 except ValueError:
                     errors["base"] = "invalid_price_target"
         if not pinned:
+            if user_input is not None:
+                return await self.async_step_price_targets()
             return self.async_show_form(
                 step_id="price_target_add",
                 data_schema=vol.Schema({}),
@@ -345,9 +347,9 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         self._ensure_draft()
         if user_input is not None:
             return await self.async_step_init()
-        return self.async_show_form(
+        return self.async_show_menu(
             step_id="diagnostics",
-            data_schema=vol.Schema({}),
+            menu_options=["init"],
         )
 
     async def async_step_save(
@@ -367,6 +369,8 @@ class EbayOptionsFlow(config_entries.OptionsFlow):
         errors = validate_price_options(draft)
         errors.update(validate_pinned_item_options(draft))
         if errors:
+            if user_input is not None:
+                return await self.async_step_init()
             return self.async_show_form(
                 step_id="save",
                 data_schema=vol.Schema({}),
