@@ -22,7 +22,7 @@ Requires Home Assistant `2026.10.0+`.
 - Directional and threshold-based watched-price events
 - Calendars for watched, bidding, and selling end times
 - Bounded recent activity on grouped event entities
-- Optional per-item sensors with configurable selection and caps
+- Clean entity footprint: summary sensors (`active_selling_items`, `watched_items`, `bidding_items`) include a rich `items` list attribute for Lovelace dashboard cards; individual per-item sensors are disabled by default to prevent entity pollution and can be enabled individually or automatically via pinned item IDs in Options
 - Manual refresh and disabled-by-default diagnostic health sensors
 
 ## Installation
@@ -162,8 +162,7 @@ Import-ready blueprints cover several of these flows; see
 - Read-only: no bids, purchases, listing changes, messages, or shipping actions
 - Marketplace capabilities differ (for example analytics/traffic report); unsupported
   markets soft-fail without breaking the rest of the integration
-- Per-item sensors are capped; items outside the selection enter a grace period before
-  cleanup (or use the cleanup button to remove them immediately)
+- Per-item sensors are disabled by default to avoid polluting your entity registry and recorder; you can enable individual sensors under the eBay device page or pin item IDs in Options to enable them automatically. Summary sensors provide a clean, capped `items` attribute list (with title, price, bids, end time, and item URL) for Lovelace dashboards. Items outside selection enter a grace period before cleanup (or use the cleanup button to remove them immediately)
 - Recent activity on event entities is memory-only and resets on restart or reload
 - Optional features need matching OAuth scopes; enabling them triggers reauthorization
 - **GraphQL Watchlist is experimental and blocked (`FORBIDDEN`):**

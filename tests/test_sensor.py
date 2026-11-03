@@ -66,6 +66,10 @@ class _SelectionCoordinator:
         self.selected_item_keys = set(selected)
         return self.selected_item_keys
 
+    @property
+    def pinned_item_ids(self) -> set[str]:
+        return _pinned_ids(self.options.get("pinned_item_ids", ""))
+
     def register_item_entity_cleanup(self, cleanup: Callable[..., Any] | None) -> None:
         self._item_entity_cleanup = cleanup
 
@@ -235,8 +239,40 @@ def test_item_sensor_uses_title_name_monetary_and_end_time() -> None:
 
     assert seconds.device_class is None
     assert seconds.native_unit_of_measurement == "s"
+    # Unpinned item sensors are disabled by default
     assert seconds.entity_registry_enabled_default is False
-    assert ending.entity_registry_enabled_default is not False
+    assert ending.entity_registry_enabled_default is False
+    assert price.entity_registry_enabled_default is False
+
+    # Pinned items remain enabled by default (except redundant seconds_left)
+    pinned_coordinator = _SelectionCoordinator(
+        options={
+            **DEFAULT_OPTIONS,
+            "entity_mode": ENTITY_MODE_DETAILED,
+            "per_item_cap": 5,
+            "pinned_item_ids": ["001"],
+        },
+        data=coordinator.data,
+    )
+    pinned_price = EbayItemSensor(
+        pinned_coordinator, entry, "watched", "001", "price", "current_price", None
+    )
+    pinned_ending = EbayItemSensor(
+        pinned_coordinator, entry, "watched", "001", "end_time", "end_time", None
+    )
+    pinned_seconds = EbayItemSensor(
+        pinned_coordinator,
+        entry,
+        "watched",
+        "001",
+        "seconds_left",
+        "seconds_left",
+        "s",
+    )
+    assert pinned_price.entity_registry_enabled_default is True
+    assert pinned_ending.entity_registry_enabled_default is True
+    assert pinned_seconds.entity_registry_enabled_default is False
+
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["watched"]
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["selling"]
     assert ("end_time", "end_time", None) in ITEM_SENSOR_FIELDS["bidding"]
@@ -444,7 +480,8 @@ def test_summary_sensor_attributes_include_truncation_and_warnings() -> None:
     )
     sensor = EbaySummarySensor(coordinator, Mock(entry_id="entry-1"), description)
     attrs = sensor.extra_state_attributes
-    assert attrs == {"last_update": None}
+    assert attrs["last_update"] is None
+    assert attrs["items"] == []
     assert "partial_failures" not in attrs
 
     context_desc = next(
@@ -825,3 +862,110 @@ def test_should_fetch_sold_unsold_on_disappearance_or_stale() -> None:
         _should_fetch_sold_unsold({"a": {}}, {}, now - timedelta(hours=1), now=now)
         is True
     )
+
+
+def test_summary_sensor_items_attribute_formatting_and_capping() -> None:
+    """Summary sensors expose a clean, sorted, capped items list in extra attributes."""
+    from custom_components.ebay.sensor import (
+        EbaySummarySensor,
+        _format_summary_items,
+    )
+
+    now = datetime.now(timezone.utc)
+    # 1. Selling items with extra metrics
+    selling_data = {
+        f"item_{i}": {
+            "item_id": f"item_{i}",
+            "title": f"Listing {i}",
+            "current_price": 10.0 + i,
+            "currency": "USD",
+            "end_time": now + timedelta(hours=30 - i),  # item_29 ends soonest
+            "url": f"https://www.ebay.com/itm/item_{i}",
+            "bid_count": i % 3,
+            "watchers": i * 2,
+            "views": i * 10,
+            "offers": i % 2,
+            "quantity_available": 5,
+            "quantity_sold": 1,
+        }
+        for i in range(30)
+    }
+
+    # Verify capping at 25 and sorted by ending soonest
+    formatted = _format_summary_items(selling_data, "selling", max_items=25)
+    assert len(formatted) == 25
+    assert formatted[0]["item_id"] == "item_29"
+    assert formatted[0]["title"] == "Listing 29"
+    assert formatted[0]["watchers"] == 58
+    assert formatted[0]["views"] == 290
+    assert formatted[0]["item_url"] == "https://www.ebay.com/itm/item_29"
+
+    # 2. Bidding items with max_bid and winning
+    bidding_data = {
+        "bid_1": {
+            "item_id": "bid_1",
+            "title": "Auction 1",
+            "current_price": 50.0,
+            "max_bid": 75.0,
+            "winning": True,
+            "bid_count": 8,
+            "end_time": now + timedelta(minutes=15),
+            "currency": "USD",
+        }
+    }
+    bidding_formatted = _format_summary_items(bidding_data, "bidding")
+    assert len(bidding_formatted) == 1
+    assert bidding_formatted[0]["max_bid"] == 75.0
+    assert bidding_formatted[0]["winning"] is True
+    # Falls back to standard ebay item URL when url is None
+    assert bidding_formatted[0]["item_url"] == "https://www.ebay.com/itm/bid_1"
+
+    # 3. Watched items
+    watched_data = {
+        "watch_1": {
+            "item_id": "watch_1",
+            "title": "Watched Widget",
+            "current_price": 19.99,
+            "currency": "USD",
+            "end_time": None,
+            "bid_count": 0,
+        }
+    }
+    watched_formatted = _format_summary_items(watched_data, "watched")
+    assert len(watched_formatted) == 1
+    assert watched_formatted[0]["end_time"] is None
+    assert watched_formatted[0]["item_url"] == "https://www.ebay.com/itm/watch_1"
+
+    # 4. Empty dict handling
+    assert _format_summary_items({}, "selling") == []
+
+    # 5. Integration into EbaySummarySensor extra_state_attributes
+    coordinator = _SelectionCoordinator(
+        options={**DEFAULT_OPTIONS, "entity_mode": ENTITY_MODE_BALANCED},
+        data={
+            "summary": {"active_selling_items": 30, "last_update": None},
+            "selling": selling_data,
+            "watched": watched_data,
+            "bidding": bidding_data,
+        },
+    )
+    selling_desc = next(
+        item for item in SUMMARY_SENSORS if item.key == "active_selling_items"
+    )
+    selling_sensor = EbaySummarySensor(
+        coordinator, Mock(entry_id="entry-1"), selling_desc
+    )
+    assert len(selling_sensor.extra_state_attributes["items"]) == 25
+
+    bidding_desc = next(item for item in SUMMARY_SENSORS if item.key == "bidding_items")
+    bidding_sensor = EbaySummarySensor(
+        coordinator, Mock(entry_id="entry-1"), bidding_desc
+    )
+    assert len(bidding_sensor.extra_state_attributes["items"]) == 1
+    assert bidding_sensor.extra_state_attributes["items"][0]["winning"] is True
+
+    watched_desc = next(item for item in SUMMARY_SENSORS if item.key == "watched_items")
+    watched_sensor = EbaySummarySensor(
+        coordinator, Mock(entry_id="entry-1"), watched_desc
+    )
+    assert len(watched_sensor.extra_state_attributes["items"]) == 1

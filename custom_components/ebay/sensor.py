@@ -721,6 +721,69 @@ ITEM_SENSOR_FIELDS: dict[str, list[tuple[str, str, str | None]]] = {
 }
 
 _MONETARY_ITEM_FIELDS = frozenset({"current_price", "max_bid"})
+MAX_SUMMARY_ITEMS_ATTRIBUTE = 25
+
+
+def _format_summary_items(
+    items_dict: dict[str, dict[str, Any]],
+    kind: str,
+    max_items: int = MAX_SUMMARY_ITEMS_ATTRIBUTE,
+) -> list[dict[str, Any]]:
+    """Format and cap a list of items for summary sensor attributes."""
+    if not items_dict:
+        return []
+
+    def _sort_key(item: dict[str, Any]) -> tuple[int, datetime]:
+        end_time = item.get("end_time")
+        if isinstance(end_time, datetime):
+            return (0, end_time)
+        return (1, datetime.max.replace(tzinfo=timezone.utc))
+
+    sorted_items = sorted(items_dict.values(), key=_sort_key)[:max_items]
+    formatted: list[dict[str, Any]] = []
+    for item in sorted_items:
+        raw_id = item.get("item_id")
+        item_id_str = str(raw_id) if raw_id is not None else ""
+        raw_url = item.get("url")
+        item_url = raw_url or (
+            f"https://www.ebay.com/itm/{item_id_str}" if item_id_str else None
+        )
+
+        entry: dict[str, Any] = {
+            "item_id": item_id_str,
+            "title": str(item.get("title") or ""),
+            "current_price": item.get("current_price"),
+            "currency": item.get("currency"),
+            "end_time": (
+                item["end_time"].isoformat()
+                if isinstance(item.get("end_time"), datetime)
+                else item.get("end_time")
+            ),
+            "item_url": item_url,
+        }
+        bid_count = item.get("bid_count")
+        if bid_count is not None:
+            entry["bid_count"] = bid_count
+
+        if kind == "selling":
+            if item.get("watchers") is not None:
+                entry["watchers"] = item["watchers"]
+            if item.get("views") is not None:
+                entry["views"] = item["views"]
+            if item.get("offers") is not None:
+                entry["offers"] = item["offers"]
+            if item.get("quantity_available") is not None:
+                entry["quantity_available"] = item["quantity_available"]
+            if item.get("quantity_sold") is not None:
+                entry["quantity_sold"] = item["quantity_sold"]
+        elif kind == "bidding":
+            if item.get("max_bid") is not None:
+                entry["max_bid"] = item["max_bid"]
+            if item.get("winning") is not None:
+                entry["winning"] = item["winning"]
+
+        formatted.append(entry)
+    return formatted
 
 
 async def async_setup_entry(
@@ -1042,7 +1105,16 @@ class EbaySummarySensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEnti
         attrs: dict[str, Any] = {
             "last_update": summary.get("last_update"),
         }
-        if self.entity_description.key in {"sold_items_count", "unsold_items_count"}:
+        if self.entity_description.key == "active_selling_items":
+            selling_dict = (self.coordinator.data or {}).get("selling") or {}
+            attrs["items"] = _format_summary_items(selling_dict, "selling")
+        elif self.entity_description.key == "watched_items":
+            watched_dict = (self.coordinator.data or {}).get("watched") or {}
+            attrs["items"] = _format_summary_items(watched_dict, "watched")
+        elif self.entity_description.key == "bidding_items":
+            bidding_dict = (self.coordinator.data or {}).get("bidding") or {}
+            attrs["items"] = _format_summary_items(bidding_dict, "bidding")
+        elif self.entity_description.key in {"sold_items_count", "unsold_items_count"}:
             attrs["window_days"] = summary.get(
                 "sold_unsold_window_days", SOLD_UNSOLD_DURATION_DAYS
             )
@@ -1158,9 +1230,17 @@ class EbayItemSensor(CoordinatorEntity[EbayDataUpdateCoordinator], SensorEntity)
         self.field = field
         self._static_unit = unit
         self._attr_unique_id = f"{entry.entry_id}_{kind}_{item_id}_{suffix}"
-        # Prefer end_time TIMESTAMP sensors on dashboards; keep seconds_left available.
-        if suffix == "seconds_left":
-            self._attr_entity_registry_enabled_default = False
+        # Disable per-item sensors by default to prevent entity registry bloat.
+        # User-pinned items remain enabled by default (except redundant seconds_left).
+        pinned = getattr(coordinator, "pinned_item_ids", None)
+        is_pinned = (
+            item_id in pinned
+            if isinstance(pinned, (set, list, tuple, frozenset))
+            else False
+        )
+        self._attr_entity_registry_enabled_default = (
+            is_pinned and suffix != "seconds_left"
+        )
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": "eBay",
