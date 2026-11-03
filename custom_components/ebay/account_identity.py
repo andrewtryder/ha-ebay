@@ -507,12 +507,10 @@ async def async_verify_authenticated_account(
         )
     user_elem = direct_users[0]
 
-    # Reject structurally inconsistent XML with nested or impostor User elements anywhere
-    all_users = [
-        e
-        for e in root.iter()
-        if e.tag == f"{{{EBAY_XML_NS}}}User" or e.tag.endswith("User")
-    ]
+    # Reject structurally inconsistent XML with nested or impostor User elements anywhere.
+    # Match the exact local name "User" (namespaced or not). A suffix match would
+    # wrongly count legitimate GetUser children such as <NewUser>.
+    all_users = [e for e in root.iter() if e.tag in (f"{{{EBAY_XML_NS}}}User", "User")]
     if len(all_users) != 1:
         return AccountIdentity(
             environment=environment,
