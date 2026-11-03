@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/andrewtryder/ha-ebay/compare/v1.0.1...v1.0.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* accept real GetUser responses during account identity verification ([#113](https://github.com/andrewtryder/ha-ebay/issues/113)) ([c8343ab](https://github.com/andrewtryder/ha-ebay/commit/c8343abf970f8923af3a83501de9d86826dcae0f))
+
 ## [1.0.1](https://github.com/andrewtryder/ha-ebay/compare/v1.0.0...v1.0.1) (2026-11-03)
 
 
