@@ -43,6 +43,7 @@ from custom_components.ebay.const import (
     CONF_ENVIRONMENT,
     CONF_OAUTH_SCOPES,
     CONF_PER_ITEM_CAP,
+    CONF_PINNED_ITEM_IDS,
     CONF_REFRESH_TOKEN,
     CONF_RUNAME,
     CONF_SITE_ID,
@@ -284,14 +285,17 @@ async def test_e2e_full_setup_coordinator_refresh_and_all_platforms(
         assert watch_state is not None
         assert int(watch_state.state) == 3
 
-        # 2. Verify per-item entities created up to cap
+        # 2. Verify per-item entities created up to cap and disabled by default
         item_0_price_id = entity_reg.async_get_entity_id(
             "sensor", DOMAIN, f"{entry.entry_id}_watched_w_0_price"
         )
         assert item_0_price_id is not None
-        price_state = hass.states.get(item_0_price_id)
-        assert price_state is not None
-        assert float(price_state.state) == 10.0
+        reg_item_0 = entity_reg.async_get(item_0_price_id)
+        assert reg_item_0 is not None
+        assert reg_item_0.disabled_by == er.RegistryEntryDisabler.INTEGRATION
+        # Summary sensor contains the clean items list
+        assert len(watch_state.attributes["items"]) == 3
+        assert watch_state.attributes["items"][0]["item_id"] == "w_0"
 
         # 3. Verify calendar entities
         cal_watched_id = entity_reg.async_get_entity_id(
@@ -329,7 +333,11 @@ async def test_e2e_production_setup_entry_to_entities_and_update_lifecycle(
     entry = _create_mock_entry(
         entry_id="prod_live_setup_1",
         client_id="app_live_setup_1",
-        options={CONF_ENTITY_MODE: ENTITY_MODE_DETAILED, CONF_PER_ITEM_CAP: 5},
+        options={
+            CONF_ENTITY_MODE: ENTITY_MODE_DETAILED,
+            CONF_PER_ITEM_CAP: 5,
+            CONF_PINNED_ITEM_IDS: ["111111111111", "333333333333"],
+        },
     )
     entry.add_to_hass(hass)
 
@@ -579,7 +587,24 @@ async def test_e2e_production_setup_entry_to_entities_and_update_lifecycle(
         assert s_state is not None
         assert s_state.state == "1"
 
-        # Per-item watched price sensor
+        # Summary sensors expose clean items lists in attributes
+        assert len(w_state.attributes["items"]) == 1
+        assert w_state.attributes["items"][0]["item_id"] == "111111111111"
+        assert len(b_state.attributes["items"]) == 1
+        assert b_state.attributes["items"][0]["item_id"] == "222222222222"
+        assert len(s_state.attributes["items"]) == 1
+        assert s_state.attributes["items"][0]["item_id"] == "333333333333"
+
+        # Unpinned bidding item entity is registered but disabled by default
+        pb_id = entity_reg.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_bidding_222222222222_current_price"
+        )
+        assert pb_id is not None
+        reg_pb = entity_reg.async_get(pb_id)
+        assert reg_pb is not None
+        assert reg_pb.disabled_by == er.RegistryEntryDisabler.INTEGRATION
+
+        # Pinned watched price sensor (enabled by default)
         pw_id = entity_reg.async_get_entity_id(
             "sensor", DOMAIN, f"{entry.entry_id}_watched_111111111111_price"
         )
@@ -588,7 +613,7 @@ async def test_e2e_production_setup_entry_to_entities_and_update_lifecycle(
         assert pw_state is not None
         assert float(pw_state.state) == 25.50
 
-        # Per-item selling price sensor
+        # Pinned selling price sensor (enabled by default)
         ps_id = entity_reg.async_get_entity_id(
             "sensor", DOMAIN, f"{entry.entry_id}_selling_333333333333_price"
         )

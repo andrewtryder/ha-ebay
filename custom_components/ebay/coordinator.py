@@ -217,6 +217,11 @@ class EbayDataUpdateCoordinator(EbayEventMixin, DataUpdateCoordinator[dict[str, 
             or []
         )
 
+    @property
+    def pinned_item_ids(self) -> set[str]:
+        """Return user-configured pinned item IDs."""
+        return pinned_ids(self.options.get(CONF_PINNED_ITEM_IDS, ""))
+
     def async_add_timer_listener(
         self, update_callback: Callable[[], None]
     ) -> CALLBACK_TYPE:

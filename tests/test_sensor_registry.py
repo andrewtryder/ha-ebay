@@ -46,13 +46,13 @@ from custom_components.ebay.sensor import ITEM_SENSOR_FIELDS
 pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
 
 
-def _options() -> dict[str, Any]:
+def _options(pinned: str = "001,002") -> dict[str, Any]:
     return {
         CONF_POLL_INTERVAL: 30,
         CONF_ENDING_SOON_THRESHOLD: 60,
         CONF_ENTITY_MODE: ENTITY_MODE_DETAILED,
         CONF_PER_ITEM_CAP: 1,
-        CONF_PINNED_ITEM_IDS: "",
+        CONF_PINNED_ITEM_IDS: pinned,
         CONF_ANALYTICS_ENABLED: False,
         CONF_BUYING_ENABLED: False,
         CONF_SELLING_ENABLED: True,

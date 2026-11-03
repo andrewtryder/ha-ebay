@@ -40,6 +40,7 @@ My Home Assistant shortcuts:
 
 ## Notes
 
+- Blueprints listen directly to activity event entities (`event.ebay_*`), so notifications (such as outbid alerts or sales) trigger immediately across all items even when individual per-item sensors are kept disabled.
 - Event entities stay `unknown` until their first event. That does not block blueprint setup.
 - Notifications use `notify.send_message` against a notify entity (mobile app, Telegram, etc.).
 - Blueprints filter on the event entity's `event_type` attribute so one activity stream can drive many automations.
