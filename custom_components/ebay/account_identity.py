@@ -476,7 +476,9 @@ async def async_verify_authenticated_account(
         )
 
     # Fatal errors check even alongside Ack=Success/Warning
-    errors_elems = [e for e in root.iter() if e.tag.endswith("Errors")]
+    errors_elems = [
+        e for e in root.iter() if e.tag in (f"{{{EBAY_XML_NS}}}Errors", "Errors")
+    ]
     for err_container in errors_elems:
         sev_elem = err_container.find(f"{{{EBAY_XML_NS}}}SeverityCode")
         if sev_elem is None:
@@ -494,8 +496,10 @@ async def async_verify_authenticated_account(
                 failure_reason=IdentityFailureReason.AUTH_FAILED,
             )
 
-    # Locate direct User element in expected namespace
+    # Locate direct User element (namespaced or local)
     direct_users = root.findall(f"{{{EBAY_XML_NS}}}User")
+    if not direct_users:
+        direct_users = root.findall("User")
     if len(direct_users) != 1:
         return AccountIdentity(
             environment=environment,
@@ -521,6 +525,8 @@ async def async_verify_authenticated_account(
 
     # UserID is required and must be non-empty direct child in expected namespace
     userid_elem = user_elem.find(f"{{{EBAY_XML_NS}}}UserID")
+    if userid_elem is None:
+        userid_elem = user_elem.find("UserID")
     if userid_elem is None or not userid_elem.text or not userid_elem.text.strip():
         return AccountIdentity(
             environment=environment,
@@ -532,6 +538,8 @@ async def async_verify_authenticated_account(
 
     # Prefer stable EIASToken if present in User element; fall back to UserID
     eias_elem = user_elem.find(f"{{{EBAY_XML_NS}}}EIASToken")
+    if eias_elem is None:
+        eias_elem = user_elem.find("EIASToken")
     raw_eias = (
         eias_elem.text.strip() if eias_elem is not None and eias_elem.text else ""
     )
