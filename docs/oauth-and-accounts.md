@@ -26,23 +26,24 @@ eBay does not allow public, unauthenticated API access. Every Home Assistant ins
    - **I already have developer credentials**: Lets you jump straight to credential entry if you already have your keyset and RuName.
 4. If you choose **Guided setup**, copy the displayed **Home Assistant OAuth callback URL** (`https://my.home-assistant.io/redirect/oauth` or your custom callback URL) and proceed to the eBay Developer Portal.
 
-#### Step 2: Sign In to eBay Developer Portal & Create Keyset
+#### Step 2: Sign In to eBay Developer Portal & Obtain Keyset
 1. Go to [developer.ebay.com/my/keys](https://developer.ebay.com/my/keys) and sign in.
-2. Under **Production**, click **Create a keyset** (or view your existing Production keyset).
-3. Note your credentials:
-   - **App ID (Client ID)**
-   - **Cert ID (Client Secret)** (Home Assistant masks this field as a password)
+2. Find your **Production** keyset (or click **Create a keyset** if you do not have one yet). eBay provides one keyset per environment; getting another requires an eBay Developer support ticket.
+3. If you need to generate or reset your secret, under **Cert ID**, click **Rotate (Reset) Cert ID** and confirm in the Rotate CertID dialog. The old secret continues working for a 30-day grace period.
+4. Click the eye icon to reveal your new **Cert ID (Client Secret)** and copy it, along with the **App ID (Client ID)**. Home Assistant does not need the Dev ID.
 
 #### Step 3: Configure Redirect URL (RuName)
-1. On your Production Keyset card, click **User Tokens** -> **Get a Token from eBay via Your Application** (or navigate to **Your eBay Sign-in Settings**).
-2. Click **Add eBay Redirect URL** (or expand an existing one).
-3. Set **Display Title** to `Home Assistant` (note: Display Title is only a friendly label in eBay's console, **NOT** your RuName).
-4. Paste the callback URL from Step 1 into **both** fields:
+1. On your Production keyset card, under **App ID**, click **User Tokens**.
+2. Under "Get a Token from eBay via Your Application", click **Add eBay Redirect URL** (or expand an existing one).
+3. Set **Display Title** to `HA` or `Home Assistant` (note: Display Title is only a friendly label in eBay's console, **NOT** your RuName).
+4. For the **Privacy policy URL**, enter `https://github.com/andrewtryder/ha-ebay/blob/main/PRIVACY.md`.
+5. Enter your Home Assistant callback URL into both fields:
    - **Your auth accepted URL**
    - **Your auth declined URL**
-5. If prompted for a privacy policy URL, you may use `https://www.home-assistant.io/privacy/`.
-6. Click **Save**. eBay will generate a unique **RuName (eBay Redirect URL name)** (usually a long hyphenated identifier like `YourName-YourApp-PRD-xxxxxxxx-xxxxxxxx`).
-7. Copy the generated RuName.
+   *(Note: The input fields in the eBay Developer portal already include the `https://` prefix, so do not type or paste it twice!)*
+6. Click **Save**.
+7. **CRITICAL STEP**: On the newly saved row, select **OAuth Enabled** and confirm the dialog. Only one RuName per application can have OAuth turned on.
+8. Copy the generated **RuName (eBay Redirect URL name)** string from that row (looks like `YourName-YourApp-PRD-...-xxxx`).
 
 #### Step 4: Enter Keyset in Home Assistant
 1. Back in Home Assistant (or click **Continue to credentials** from Guided setup), enter:

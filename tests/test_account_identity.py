@@ -2395,3 +2395,71 @@ async def test_simultaneous_multi_account_integration_lifecycle(
     store_1 = f"ebay.{entry1.entry_id}.ending_soon"
     store_2 = f"ebay.{entry2.entry_id}.ending_soon"
     assert store_1 != store_2
+
+
+@pytest.mark.asyncio
+async def test_verify_authenticated_account_accepts_realistic_get_user_payload() -> (
+    None
+):
+    """Real GetUser responses include children like <NewUser> that end in "User".
+
+    Regression: a suffix match (``tag.endswith("User")``) counted <NewUser> as an
+    impostor User element and rejected every real account as malformed_response.
+    """
+    realistic_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <GetUserResponse xmlns="urn:ebay:apis:eBLBaseComponents">
+      <Timestamp>2026-11-03T12:42:19.000Z</Timestamp>
+      <Ack>Success</Ack>
+      <Version>1407</Version>
+      <Build>E1407_CORE_API_19146280_R1</Build>
+      <User>
+        <AboutMePage>false</AboutMePage>
+        <EIASToken>nY+sHZ2PrBmdj6wVnY+sEZ2PrA2dj6wFk4GlCZKBqQmdj6x9nY+seQ==</EIASToken>
+        <Email>Invalid Request</Email>
+        <FeedbackScore>42</FeedbackScore>
+        <UniqueNegativeFeedbackCount>0</UniqueNegativeFeedbackCount>
+        <UniquePositiveFeedbackCount>42</UniquePositiveFeedbackCount>
+        <PositiveFeedbackPercent>100.0</PositiveFeedbackPercent>
+        <FeedbackPrivate>false</FeedbackPrivate>
+        <IDVerified>false</IDVerified>
+        <eBayGoodStanding>true</eBayGoodStanding>
+        <NewUser>false</NewUser>
+        <RegistrationDate>2010-01-01T00:00:00.000Z</RegistrationDate>
+        <Site>US</Site>
+        <Status>Confirmed</Status>
+        <UserID>real_seller</UserID>
+        <UserIDChanged>false</UserIDChanged>
+        <UserIDLastChanged>2010-01-01T00:00:00.000Z</UserIDLastChanged>
+        <VATStatus>NoVATTax</VATStatus>
+        <SellerInfo>
+          <AllowPaymentEdit>true</AllowPaymentEdit>
+          <QualifiesForB2BVAT>false</QualifiesForB2BVAT>
+          <StoreOwner>false</StoreOwner>
+          <SafePaymentExempt>false</SafePaymentExempt>
+        </SellerInfo>
+        <BusinessRole>FullMarketPlaceParticipant</BusinessRole>
+        <EnterpriseSeller>false</EnterpriseSeller>
+      </User>
+    </GetUserResponse>"""
+
+    session_mock = Mock()
+    resp_mock = AsyncMock()
+    resp_mock.status = 200
+    resp_mock.read = AsyncMock(return_value=realistic_xml)
+    cm_mock = Mock()
+    cm_mock.__aenter__ = AsyncMock(return_value=resp_mock)
+    cm_mock.__aexit__ = AsyncMock(return_value=None)
+    session_mock.post.return_value = cm_mock
+
+    result = await async_verify_authenticated_account(
+        session_mock,
+        environment="production",
+        access_token="tok",
+    )
+
+    assert result.binding_state == AccountBindingState.VERIFIED
+    assert result.failure_reason == IdentityFailureReason.NONE
+    assert result.username == "real_seller"
+    assert result.account_id == (
+        "nY+sHZ2PrBmdj6wVnY+sEZ2PrA2dj6wFk4GlCZKBqQmdj6x9nY+seQ=="
+    )
