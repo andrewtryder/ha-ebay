@@ -39,13 +39,16 @@ A full Home Assistant restart is required after updating the integration through
 You need an eBay Developer Program application with:
 
 - App ID / Client ID
-- Cert ID / Client secret
-- RuName
+- Cert ID / Client secret (masked password input)
+- RuName (eBay Redirect URL name)
 - Production or Sandbox environment
 - eBay marketplace selection (e.g. eBay United States)
 
-Start the integration setup in Home Assistant first, copy the callback URL it provides
-on the setup screen, and register that URL in the matching eBay application keyset.
+When you add the eBay integration in Home Assistant, you are presented with two choices:
+1. **Recommended: Guided setup**: Displays your instance's exact OAuth callback URL (`https://my.home-assistant.io/redirect/oauth` or your custom callback), explains how to register it in the eBay Developer Program under *Your eBay Sign-in Settings* to generate your RuName, and provides a direct link to continue to credential entry.
+2. **I already have developer credentials**: Allows entering your existing App ID, Cert ID, and RuName directly.
+
+Manual authorization is available as an advanced troubleshooting fallback checkbox if your instance cannot receive incoming browser callbacks.
 
 See the **[OAuth and Account Setup Guide](docs/oauth-and-accounts.md)** for the complete walkthrough.
 

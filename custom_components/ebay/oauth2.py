@@ -52,7 +52,7 @@ def async_get_ebay_callback_url(hass: HomeAssistant) -> str:
     """Return the Home Assistant OAuth callback URL for setup instructions."""
     try:
         return async_get_redirect_uri(hass)
-    except RuntimeError:
+    except (RuntimeError, TypeError, AttributeError):
         return MY_AUTH_CALLBACK_PATH
 
 
