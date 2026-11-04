@@ -48,4 +48,6 @@ jobs:
         run: uv run --locked python -m compileall custom_components scripts tests
 
       - name: Tests with coverage
-        run: uv run --locked pytest -q
+        run: |
+          uv run --locked pytest -q --cov-report=json:"$RUNNER_TEMP/coverage.json"
+          uv run --locked python -c 'import json, sys; t = json.load(open(sys.argv[1]))["totals"]; n = t["num_statements"]; c = t["covered_lines"]; print(f"Statement coverage: {c}/{n}"); assert n and c * 100 >= n * 90, "Statement coverage must be at least 90%"' "$RUNNER_TEMP/coverage.json"

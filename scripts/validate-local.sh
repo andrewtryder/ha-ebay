@@ -57,7 +57,8 @@ echo "==> [5/7] Compiling Python source files"
 uv run --locked python -m compileall -q custom_components scripts tests
 
 echo "==> [6/7] Running Python test suite with branch coverage (>=90% gate)"
-uv run --locked pytest -q
+uv run --locked pytest -q --cov-report=json:"$snapshot_dir/coverage.json"
+uv run --locked python -c 'import json, sys; t = json.load(open(sys.argv[1]))["totals"]; n = t["num_statements"]; c = t["covered_lines"]; print(f"Statement coverage: {c}/{n}"); assert n and c * 100 >= n * 90, "Statement coverage must be at least 90%"' "$snapshot_dir/coverage.json"
 
 echo "==> [7/7] Checking for changes made by validation"
 check_changes
