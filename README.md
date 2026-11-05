@@ -1,229 +1,79 @@
-<p align="center">
-  <img src="https://upload.wikimedia.org/wikipedia/commons/4/48/EBay_logo.png" alt="eBay logo" width="220">
-</p>
-
 # eBay for Home Assistant
 
-A HACS custom integration that brings read-only eBay activity into Home Assistant.
-Monitor watched items, bidding, active listings, seller operations, and account health
-through sensors, event entities, calendars, and automations.
+<img src="custom_components/ebay/brand/logo.png" alt="eBay integration logo" width="180">
+
+Keep an eye on your eBay buying and selling activity from Home Assistant. This community integration reads your account data; it does not place bids, buy items, edit listings, send messages, or perform shipping actions.
+
+[![Latest release](https://img.shields.io/github/v/release/andrewtryder/ha-ebay?style=flat-square)](https://github.com/andrewtryder/ha-ebay/releases/latest)
+[![Tests on main](https://img.shields.io/github/actions/workflow/status/andrewtryder/ha-ebay/test.yml?branch=main&style=flat-square&label=tests)](https://github.com/andrewtryder/ha-ebay/actions/workflows/test.yml)
+[![License](https://img.shields.io/github/license/andrewtryder/ha-ebay?style=flat-square)](LICENSE)
+[![HACS custom integration](https://img.shields.io/badge/HACS-Custom-orange?style=flat-square)](https://my.home-assistant.io/redirect/hacs_repository/?owner=andrewtryder&repository=ha-ebay&category=integration)
 
 > [!IMPORTANT]
-> This is an unofficial community integration. It is not affiliated with, endorsed by,
-> or sponsored by eBay Inc.
+> This is an unofficial community integration. It is not affiliated with, endorsed by, or sponsored by eBay Inc.
 
-Requires Home Assistant `2026.10.0+`.
+## What can I do with it?
 
-## Features
+- Track watched items, bids, ending times, and changes in price.
+- Monitor active listings and recent sales. Optional seller features include orders, feedback, messages, and account health, where supported.
+- Create notifications for events such as being outbid or an item ending soon. Start with the [automation blueprints](docs/blueprints.md).
+- Add summary sensors, calendars, and recent activity to a dashboard.
 
-- Buying and watching: watched items, bids, winning/outbid status, price changes, and ending-soon alerts
-- Selling: active listings, bids, offers, watchers, questions, views, quantity sold, and recent sold/unsold counts (last 60 days via SoldList/UnsoldList)
-- Optional seller operations: orders, fulfillment, payment disputes, seller standards, feedback, and buyer messages
-- Directional and threshold-based watched-price events
-- Calendars for watched, bidding, and selling end times
-- Bounded recent activity on grouped event entities
-- Clean entity footprint: summary sensors (`active_selling_items`, `watched_items`, `bidding_items`) include a rich `items` list attribute for Lovelace dashboard cards; individual per-item sensors are disabled by default to prevent entity pollution and can be enabled individually or automatically via pinned item IDs in Options
-- Manual refresh and disabled-by-default diagnostic health sensors
+## Requirements and compatibility
 
-## Installation
+- Home Assistant **2026.10.0 or newer**, with HACS installed.
+- An eBay account and an **eBay Developer Program application**. You need the application's App ID, Cert ID, and eBay Redirect URL name (RuName).
+- Production credentials for Production or Sandbox credentials for Sandbox. Available seller and analytics features vary by marketplace and the permissions granted.
 
-1. In HACS, add `https://github.com/andrewtryder/ha-ebay` as a custom **Integration** repository.
-2. Install **eBay**.
-3. Restart Home Assistant.
-4. Click **[Add eBay to Home Assistant](https://my.home-assistant.io/redirect/config_flow_start/?domain=ebay)** to start setup, or go to **Settings → Devices & services → Add integration → eBay**.
+See the [OAuth setup guide](docs/oauth-and-accounts.md) for the callback URL, developer application, and RuName steps.
 
-A full Home Assistant restart is required after updating the integration through HACS.
+## Install with HACS
 
-## eBay Developer Setup
+1. In HACS, add `https://github.com/andrewtryder/ha-ebay` as a custom repository with category **Integration**, or use the HACS badge above.
+2. Find and install **eBay**.
+3. Restart Home Assistant completely. A full restart is also required after updates.
 
-You need an eBay Developer Program application with:
+## First-time setup
 
-- App ID / Client ID
-- Cert ID / Client secret (masked password input)
-- RuName (eBay Redirect URL name)
-- Production or Sandbox environment
-- eBay marketplace selection (e.g. eBay United States)
+1. Go to **Settings → Devices & services → Add integration**, then select **eBay**. You can also use [Add eBay to Home Assistant](https://my.home-assistant.io/redirect/config_flow_start/?domain=ebay).
+2. Choose guided setup or enter existing developer credentials. Guided setup shows the callback URL to register with eBay to obtain your RuName.
+3. Enter the matching environment, App ID, Cert ID, RuName, and marketplace, then authorize the eBay account you want to monitor.
+4. Enable optional seller features in the integration options when needed. Home Assistant may ask you to authorize additional permissions.
 
-When you add the eBay integration in Home Assistant, you are presented with two choices:
-1. **Recommended: Guided setup**: Displays your instance's exact OAuth callback URL (`https://my.home-assistant.io/redirect/oauth` or your custom callback), explains how to register it in the eBay Developer Program under *Your eBay Sign-in Settings* to generate your RuName, and provides a direct link to continue to credential entry.
-2. **I already have developer credentials**: Allows entering your existing App ID, Cert ID, and RuName directly.
+If a browser callback cannot reach your instance, the setup flow offers a manual authorization fallback. Multiple distinct accounts can share one developer application; the same account cannot be added twice in the same environment.
 
-Manual authorization is available as an advanced troubleshooting fallback checkbox if your instance cannot receive incoming browser callbacks.
+## What you'll see in Home Assistant
 
-See the **[OAuth and Account Setup Guide](docs/oauth-and-accounts.md)** for the complete walkthrough.
+The integration provides summary sensors, activity events, calendars, and refresh buttons. Per-item sensors are disabled by default; you can enable individual sensors or pin items in the options. Activity events appear after a change is detected, and their recent history resets after a restart or reload.
 
-Production credentials must be used with Production, and Sandbox credentials with Sandbox.
-Multiple distinct eBay user accounts can share the same developer application keyset, but a single eBay user account cannot be added multiple times under the same environment.
+Buying, selling, and active orders normally refresh on the configured interval; other sections update less often. See [advanced usage](docs/advanced-usage.md) for entity examples, refresh behavior, options, and limits.
 
-Existing installations keep previously granted OAuth scopes. New installs
-authorize with the core buying/selling scope only; enable optional seller-operation
-modules in options when needed (Home Assistant will reauthorize for extra scopes).
-Disabling a feature stops its API calls but does not revoke previously granted scopes.
+## Common problems and troubleshooting
 
-## Home Assistant Entities
+- **Setup or callback fails:** check the [OAuth guide](docs/oauth-and-accounts.md) and try the manual authorization fallback if needed.
+- **Credentials are rejected:** check that the selected Production or Sandbox environment matches the keyset.
+- **Optional data is missing:** enable the relevant feature and complete any requested reauthorization. Some marketplaces do not support every feature.
+- **Refresh button reports an error:** wait for the cooldown or an in-progress refresh to finish.
+- **New features do not appear after updating:** restart Home Assistant. Check **Settings → Repairs** for additional guidance.
 
-The integration creates stable summary sensors and grouped activity entities:
+When reporting a problem, do not include client secrets, authorization codes, access tokens, or refresh tokens.
 
-- `event.ebay_watching_activity`
-- `event.ebay_bidding_activity`
-- `event.ebay_selling_activity`
-- `event.ebay_seller_ops_activity`
-- `calendar.ebay_watched_items`
-- `calendar.ebay_bidding_items`
-- `calendar.ebay_selling_items`
-- `button.ebay_refresh`
+## Limitations, safety, and privacy
 
-Activity entities remain `Unknown` until their first detected event. Their `recent_events`
-attribute keeps a bounded, memory-only history that resets after a restart or integration reload.
+The integration is read-only, but account and listing information can appear in Home Assistant states, history, backups, logs, or diagnostics. Credentials and OAuth tokens are intended to be redacted from diagnostics and logs. Read the [privacy statement](PRIVACY.md) before sharing diagnostic information.
 
-Diagnostic health sensors are created disabled by default. Enable them from the entity registry
-when troubleshooting refresh failures, API warnings, truncation, or ending-soon timers.
+Some optional features need additional permissions. Disabling a feature stops its API calls but does not revoke previously granted permissions. Recent event history is memory-only. Removing the integration deletes the local entry and tokens; revoke authorization in your eBay account separately if desired.
 
-## Automation blueprints
+## More documentation
 
-Import-ready blueprints cover common notifications (outbid, price drop below target,
-watched item ending soon, overdue shipment, buyer question, and seller at risk).
+- [Advanced usage and limitations](docs/advanced-usage.md)
+- [OAuth and account setup](docs/oauth-and-accounts.md)
+- [Automation blueprints](docs/blueprints.md)
+- [API architecture](docs/api-architecture.md) and [rate limits](docs/reliability-and-rate-limits.md)
+- [Development](docs/development.md) and [contributing](CONTRIBUTING.md)
 
-See **[docs/blueprints.md](docs/blueprints.md)** for import links and feature requirements.
+## Support and license
 
-## Configuration
+Open a [GitHub issue](https://github.com/andrewtryder/ha-ebay/issues) for reproducible problems. This project is distributed under the [license](LICENSE).
 
-Options are grouped into sections (General, Buying and alerts, Selling, Seller
-operations, Entities, Diagnostics). They include:
-
-- Poll interval and ending-soon threshold
-- Minimal, balanced, or detailed per-item entity mode
-- Per-item cap and pinned item IDs (multi-select from known listings, or type an ID)
-- Watched-price percentage and currency-specific drop thresholds
-- Optional per-item price-drop targets (add/remove for pinned listings)
-- Buying, selling, analytics, and seller-operations feature toggles
-
-Prefer per-item **end time** sensors on dashboards; **seconds left** sensors exist for
-automations but are disabled by default.
-
-Buying, selling, and active orders refresh on the configured poll interval. Messages refresh at
-twice that interval; feedback and analytics refresh hourly; seller standards (including evaluation
-dates) refresh daily. A manual refresh fetches every enabled section immediately.
-
-The integration suppresses transition events during the initial startup/reload baseline and when
-API collections are incomplete or truncated.
-
-## Data updates
-
-The integration polls eBay over the cloud (no local discovery). Cadence by section:
-
-| Section | Cadence |
-|---------|---------|
-| Buying, selling, active orders | Configured poll interval (default 30 minutes) |
-| Messages | Twice the poll interval |
-| Feedback, analytics | Hourly |
-| Seller standards | Daily |
-
-Use **button.ebay_refresh** for a full refresh of every enabled section, or the
-section refresh buttons (Buying, Selling, Feedback, Seller operations, Analytics)
-to refresh only that subset. Manual refresh is rate-limited; presses during cooldown
-or while a refresh is already running raise an error in the UI.
-
-## Supported functions
-
-Read-only monitoring of one linked eBay account:
-
-- Watched items, bids, and selling listings (counts, calendars, optional per-item sensors)
-- Ending-soon timers and watched-price / threshold events
-- Optional seller operations: orders, fulfillment, disputes, standards, feedback, messages
-- Optional account privileges (selling registration, listing amount/quantity used vs remaining, near-limit binary; requires `sell.account.readonly` reauth) and finances (available/pending/held funds, last payout, failed/returned payouts, daily/monthly fees/refunds/net; requires `sell.finances`; capability-gated where request signing is required) when enabled and scoped
-- Optional Sell Analytics traffic views when the marketplace and scopes support them
-- Manual refresh, inactive-item cleanup, diagnostics download, and Settings → Repairs issues
-
-Mutation APIs (bidding, listing edits, messaging, shipping actions) are not used.
-
-## Use cases
-
-- Notify when you are outbid or a watched item ends soon
-- Track active listings and overdue shipments for a small seller account
-- Surface seller-standards or feedback risk before an evaluation period closes
-- Build dashboards for watched inventory and recent selling activity
-
-Import-ready blueprints cover several of these flows; see
-**[docs/blueprints.md](docs/blueprints.md)**.
-
-## Examples
-
-1. **Outbid notification** — trigger on `event.ebay_bidding_activity` with event type
-   `outbid`, then send a mobile notification with the item title from the event data.
-2. **Ending soon** — use the watched ending-soon blueprint, or automate on
-   `event.ebay_watching_activity` / `item_ending_soon`.
-3. **Seller at risk** — enable seller standards, then use the seller-at-risk blueprint
-   or the related binary sensor / event when standards drop.
-
-## Known limitations
-
-- Multiple distinct eBay user accounts can share the same developer application keyset; duplicate setups for the same eBay account in the same environment are prevented
-- Read-only: no bids, purchases, listing changes, messages, or shipping actions
-- Marketplace capabilities differ (for example analytics/traffic report); unsupported
-  markets soft-fail without breaking the rest of the integration
-- Per-item sensors are disabled by default to avoid polluting your entity registry and recorder; you can enable individual sensors under the eBay device page or pin item IDs in Options to enable them automatically. Summary sensors provide a clean, capped `items` attribute list (with title, price, bids, end time, and item URL) for Lovelace dashboards. Items outside selection enter a grace period before cleanup (or use the cleanup button to remove them immediately)
-- Recent activity on event entities is memory-only and resets on restart or reload
-- Optional features need matching OAuth scopes; enabling them triggers reauthorization
-- **GraphQL Watchlist is experimental and blocked (`FORBIDDEN`):**
-  - Live authenticated testing of eBay's modern GraphQL endpoint confirmed that while the
-    `userWatchList` query schema was accepted, the resolver returned `FORBIDDEN`.
-  - The exact required OAuth scope or developer application entitlement is still unknown.
-    `buy.watchlist.read` remains an unverified candidate, not a confirmed requirement.
-  - Production Watchlist monitoring still uses Trading XML (`GetMyeBayBuying`) and remains
-    fully operational.
-  - Existing users should **not** delete/re-add the integration or attempt reauthorization to
-    troubleshoot this experimental GraphQL limitation.
-  - Detailed architectural findings and API contracts are documented in
-    **[docs/api-architecture.md](docs/api-architecture.md)**.
-
-## Removal
-
-1. Go to **Settings → Devices & services → eBay**.
-2. Open the integration entry → **Delete**.
-3. Optionally uninstall the integration in HACS and restart Home Assistant.
-
-Deleting the entry removes entities and stored tokens for that account. OAuth consent
-on eBay’s side is not automatically revoked; revoke the app in your eBay account
-settings if you want to withdraw authorization there as well.
-
-## Read-only and Privacy
-
-The integration only reads eBay account data. It does not place bids, buy items, modify listings,
-change watchlists, send messages, perform shipping actions, issue refunds, or call eBay mutation APIs.
-
-Some eBay permissions do not have a separately named read-only scope; this integration still uses
-only retrieval operations. Credentials and OAuth tokens are redacted from diagnostics and are not
-intentionally written to logs.
-
-See **[PRIVACY.md](PRIVACY.md)** for the project privacy statement.
-
-## Troubleshooting
-
-- **Setup or callback problem:** follow the OAuth guide or use the manual authorization fallback.
-- **Production/Sandbox failure:** confirm the selected environment matches the credential keyset.
-- **Authentication failure:** reauthorize the integration (also shown under Settings → Repairs).
-- **Missing optional data (feedback, analytics, finances):** enable the feature in options and
-  complete reauthorization so the new scopes are granted.
-- **Refresh ignored / error on button press:** wait for the manual-refresh cooldown, or wait until
-  the in-flight refresh finishes, then try again.
-- **New entities or behavior missing after an update:** restart Home Assistant completely.
-- **Persistent problems:** check Settings → Repairs for actionable issues such as missing OAuth
-  scopes, an invalid Site ID, repeated partial failures, or consistently truncated collections.
-- **Partial data:** enable the diagnostic entities and download integration diagnostics for
-  technical detail beyond Repairs. Diagnostics may include a sanitized `last_api_failure`.
-- **API Architecture & Reliability:** production Watchlist, Bidding, and Selling monitoring
-  use Trading XML and remain fully operational. See **[docs/api-architecture.md](docs/api-architecture.md)**
-  and **[docs/reliability-and-rate-limits.md](docs/reliability-and-rate-limits.md)**.
-
-Report reproducible problems through **[GitHub Issues](https://github.com/andrewtryder/ha-ebay/issues)**.
-Do not include client secrets, OAuth codes, access tokens, or refresh tokens.
-
-## Development
-
-See **[docs/development.md](docs/development.md)** for the development environment, test commands,
-Home Assistant source-mount workflow, HACS testing process, and the Manual Live Validation Checklist.
-
-## Trademark
-
-eBay is a trademark of eBay Inc. The eBay name and logo are used only to identify the connected service.
+eBay is a trademark of eBay Inc. The eBay name and logo identify the connected service; this project is not an official eBay product.

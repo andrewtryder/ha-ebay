@@ -38,6 +38,12 @@ uv run --locked pre-commit run --all-files
 uv run --locked pre-commit run --all-files --hook-stage pre-push
 ```
 
+The portfolio standard validation interface executes the entire local test, linting, and hygiene contract:
+
+```bash
+./scripts/validate-local.sh
+```
+
 Or run individual verification commands:
 
 ```bash
