@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   python:
-    name: Python (HA 2026.10.0)
+    name: Python (HA 2026.10.4)
     runs-on: ubuntu-latest
 
     steps:
@@ -20,8 +20,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install uv
-        # astral-sh/setup-uv@v5.4.2
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        # astral-sh/setup-uv@v10.3.3
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2
         with:
           enable-cache: true
 
@@ -33,7 +33,7 @@ jobs:
 
       - name: Verify Home Assistant version
         run: |
-          uv run --locked python -c "import homeassistant.const, importlib.metadata; v1 = homeassistant.const.__version__; v2 = importlib.metadata.version('homeassistant'); print(f'Installed HA: const={v1}, metadata={v2}'); assert v1 == '2026.10.0' and v2 == '2026.10.0', (v1, v2)"
+          uv run --locked python -c "import homeassistant.const, importlib.metadata; v1 = homeassistant.const.__version__; v2 = importlib.metadata.version('homeassistant'); print(f'Installed HA: const={v1}, metadata={v2}'); assert v1 == '2026.10.4' and v2 == '2026.10.4', (v1, v2)"
 
       - name: Pre-commit (all files)
         run: uv run --locked pre-commit run --all-files
