@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/andrewtryder/ha-ebay/compare/v1.1.0...v1.1.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **deps:** synchronize project metadata version with release version ([#117](https://github.com/andrewtryder/ha-ebay/issues/117)) ([6feae50](https://github.com/andrewtryder/ha-ebay/commit/6feae5046a4525c13149b5899f3219280f98ec1e))
+
 ## [1.1.0](https://github.com/andrewtryder/ha-ebay/compare/v1.0.2...v1.1.0) (2026-11-03)
 
 
