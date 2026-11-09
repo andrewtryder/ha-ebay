@@ -21,15 +21,17 @@ Keep an eye on your eBay buying and selling activity from Home Assistant. This c
 
 ## Requirements and compatibility
 
-- Home Assistant **2026.10.0 or newer**, with HACS installed.
+- Home Assistant **2026.10.0 or newer**, with HACS (or the built-in Home Assistant Marketplace in **2026.11+**).
 - An eBay account and an **eBay Developer Program application**. You need the application's App ID, Cert ID, and eBay Redirect URL name (RuName).
 - Production credentials for Production or Sandbox credentials for Sandbox. Available seller and analytics features vary by marketplace and the permissions granted.
 
 See the [OAuth setup guide](docs/oauth-and-accounts.md) for the callback URL, developer application, and RuName steps.
 
-## Install with HACS
+## Install with HACS or Home Assistant Marketplace
 
-1. In HACS, add `https://github.com/andrewtryder/ha-ebay` as a custom repository with category **Integration**, or use the HACS badge above.
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=andrewtryder&repository=ha-ebay&category=integration)
+
+1. Click the **Open your Home Assistant instance** button above (backwards compatible: opens **HACS** on earlier versions and the built-in **Home Assistant Marketplace** on **2026.11+**), or manually add `https://github.com/andrewtryder/ha-ebay` as a custom repository with category **Integration**.
 2. Find and install **eBay**.
 3. Restart Home Assistant completely. A full restart is also required after updates.
 
