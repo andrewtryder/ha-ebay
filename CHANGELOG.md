@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/andrewtryder/ha-ebay/compare/v1.1.1...v1.1.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* **diagnostics:** read integration version via async_get_integration ([#128](https://github.com/andrewtryder/ha-ebay/issues/128)) ([8e3b753](https://github.com/andrewtryder/ha-ebay/commit/8e3b7536cbea322bc40b0fa1d87ae69b71c74b77))
+
 ## [1.1.1](https://github.com/andrewtryder/ha-ebay/compare/v1.1.0...v1.1.1) (2026-11-05)
 
 
