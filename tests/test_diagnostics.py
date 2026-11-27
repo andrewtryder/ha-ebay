@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from homeassistant.core import HomeAssistant
 
 from custom_components.ebay.const import (
     CONF_ANALYTICS_ENABLED,
@@ -248,22 +249,49 @@ def test_section_ages_handles_invalid_and_non_datetime_values() -> None:
     assert ages["analytics"] == 0.0
 
 
-def test_manifest_version_handles_read_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_async_integration_version_reads_manifest_via_loader(
+    hass: HomeAssistant,
+) -> None:
+    """_async_integration_version resolves the manifest version without direct disk I/O."""
+    import json
+    from pathlib import Path
+
+    from custom_components.ebay.diagnostics import _async_integration_version
+
+    manifest = json.loads(
+        Path("custom_components/ebay/manifest.json").read_text(encoding="utf-8")
+    )
+    version = await _async_integration_version(hass)
+    assert isinstance(version, str)
+    assert version == manifest["version"]
+
+    entry = Mock(
+        data={CONF_ENVIRONMENT: "production", CONF_SITE_ID: "0"},
+        runtime_data=_coordinator(data=None),
+    )
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag["integration_version"] == manifest["version"]
+
+
+async def test_async_integration_version_handles_missing_and_mock_hass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_async_integration_version returns None on missing version, not found, or Mock hass."""
+    from homeassistant.loader import IntegrationNotFound
+
     from custom_components.ebay import diagnostics as diagnostics_mod
 
-    class _Boom:
-        def with_name(self, name: str) -> _Boom:
-            return self
+    assert await diagnostics_mod._async_integration_version(Mock()) is None
 
-        def read_text(self, encoding: str = "utf-8") -> str:
-            raise OSError("boom")
+    async def _returns_none_version(hass: Any, domain: str) -> Any:
+        return Mock(version=None)
 
-    monkeypatch.setattr(diagnostics_mod, "Path", lambda *a, **k: _Boom())
-    assert diagnostics_mod._manifest_version() is None
+    monkeypatch.setattr(diagnostics_mod, "async_get_integration", _returns_none_version)
+    assert await diagnostics_mod._async_integration_version(Mock()) is None
 
-    class _BadJson(_Boom):
-        def read_text(self, encoding: str = "utf-8") -> str:
-            return "{not-json"
+    async def _raises_not_found(hass: Any, domain: str) -> Any:
+        raise IntegrationNotFound(domain)
 
-    monkeypatch.setattr(diagnostics_mod, "Path", lambda *a, **k: _BadJson())
-    assert diagnostics_mod._manifest_version() is None
+    monkeypatch.setattr(diagnostics_mod, "async_get_integration", _raises_not_found)
+    assert await diagnostics_mod._async_integration_version(Mock()) is None

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.loader import IntegrationNotFound, async_get_integration
 
 from .account_identity import get_entry_account_identity
 from .const import (
@@ -67,7 +66,7 @@ async def async_get_config_entry_diagnostics(
     summary = data.get("summary", {})
     options = coordinator.options
     return {
-        "integration_version": _manifest_version(),
+        "integration_version": await _async_integration_version(hass),
         "domain": DOMAIN,
         "environment": entry.data.get(CONF_ENVIRONMENT),
         "site_id": entry.data.get(CONF_SITE_ID),
@@ -252,11 +251,10 @@ def _safe_seller_ops_summary(seller_ops: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _manifest_version() -> str | None:
-    """Return the integration version from manifest.json."""
-    manifest_path = Path(__file__).with_name("manifest.json")
+async def _async_integration_version(hass: HomeAssistant) -> str | None:
+    """Return the integration version from Home Assistant's integration loader."""
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        integration = await async_get_integration(hass, DOMAIN)
+    except (IntegrationNotFound, KeyError, TypeError, AttributeError):
         return None
-    return manifest.get("version")
+    return str(integration.version) if integration.version is not None else None
